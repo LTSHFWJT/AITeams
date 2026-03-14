@@ -1,0 +1,156 @@
+from __future__ import annotations
+
+import math
+from datetime import datetime, timezone
+from typing import Any
+
+from aimemory.core.text import cosine_similarity, hash_embedding, normalize_text, tokenize
+from aimemory.core.utils import json_loads
+
+
+def estimate_tokens(text: str | None) -> int:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return 0
+    return max(1, math.ceil(len(cleaned) / 4))
+
+
+def parse_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def recency_multiplier(updated_at: str | None, half_life_days: float, *, now: datetime | None = None) -> float:
+    if half_life_days <= 0:
+        return 1.0
+    parsed = parse_timestamp(updated_at)
+    if parsed is None:
+        return 1.0
+    current = now or datetime.now(timezone.utc)
+    age_seconds = max(0.0, (current - parsed).total_seconds())
+    age_days = age_seconds / 86400.0
+    decay_lambda = math.log(2) / max(half_life_days, 1e-6)
+    return math.exp(-decay_lambda * age_days)
+
+
+def _overlap_score(query_tokens: set[str], candidate_tokens: set[str]) -> float:
+    if not query_tokens or not candidate_tokens:
+        return 0.0
+    intersection = len(query_tokens & candidate_tokens)
+    return intersection / max(1, len(query_tokens))
+
+
+def _coerce_keywords(value: str | list[str] | None) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    if isinstance(value, str):
+        loaded = json_loads(value)
+        if isinstance(loaded, list):
+            return [str(item) for item in loaded if str(item).strip()]
+        return tokenize(value)
+    return []
+
+
+def score_record(
+    query: str,
+    *,
+    text: str,
+    keywords: str | list[str] | None = None,
+    embedding: str | list[float] | None = None,
+    updated_at: str | None = None,
+    importance: float = 0.5,
+    boost: float = 0.0,
+    half_life_days: float = 30.0,
+) -> tuple[float, dict[str, float]]:
+    query_normalized = normalize_text(query)
+    text_normalized = normalize_text(text)
+    query_tokens = set(tokenize(query_normalized))
+    text_tokens = set(tokenize(text_normalized))
+    keyword_tokens = set(_coerce_keywords(keywords))
+
+    dense_vector = json_loads(embedding) if isinstance(embedding, str) else embedding
+    dense_score = max(
+        0.0,
+        cosine_similarity(
+            hash_embedding(query_normalized),
+            dense_vector if isinstance(dense_vector, list) and dense_vector else hash_embedding(text_normalized),
+        ),
+    )
+    sparse_score = _overlap_score(query_tokens, text_tokens)
+    keyword_score = _overlap_score(query_tokens, keyword_tokens)
+    exact_score = 1.0 if query_normalized and query_normalized in text_normalized else 0.0
+    recency_score = recency_multiplier(updated_at, half_life_days)
+    importance_score = max(0.0, min(1.0, float(importance or 0.0)))
+
+    score = (
+        (0.42 * dense_score)
+        + (0.24 * sparse_score)
+        + (0.12 * keyword_score)
+        + (0.08 * exact_score)
+        + (0.08 * recency_score)
+        + (0.06 * importance_score)
+        + boost
+    )
+    breakdown = {
+        "dense": round(dense_score, 6),
+        "sparse": round(sparse_score, 6),
+        "keyword": round(keyword_score, 6),
+        "exact": round(exact_score, 6),
+        "recency": round(recency_score, 6),
+        "importance": round(importance_score, 6),
+        "boost": round(boost, 6),
+    }
+    return round(score, 6), breakdown
+
+
+def mmr_rerank(
+    records: list[dict[str, Any]],
+    *,
+    lambda_value: float = 0.72,
+    limit: int | None = None,
+    text_key: str = "text",
+) -> list[dict[str, Any]]:
+    if len(records) <= 1:
+        return records[: limit or len(records)]
+
+    clamped = max(0.0, min(1.0, lambda_value))
+    pending = [dict(item) for item in records]
+    pending.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
+    selected: list[dict[str, Any]] = []
+    token_cache: dict[str, set[str]] = {}
+
+    def token_set(item: dict[str, Any]) -> set[str]:
+        item_id = str(item.get("id") or item.get("record_id") or len(token_cache))
+        if item_id not in token_cache:
+            token_cache[item_id] = set(tokenize(str(item.get(text_key) or "")))
+        return token_cache[item_id]
+
+    while pending and (limit is None or len(selected) < limit):
+        if not selected:
+            selected.append(pending.pop(0))
+            continue
+        best_index = 0
+        best_score = -float("inf")
+        for index, candidate in enumerate(pending):
+            candidate_tokens = token_set(candidate)
+            max_similarity = 0.0
+            for item in selected:
+                item_tokens = token_set(item)
+                union = candidate_tokens | item_tokens
+                similarity = (len(candidate_tokens & item_tokens) / len(union)) if union else 0.0
+                if similarity > max_similarity:
+                    max_similarity = similarity
+            score = (clamped * float(candidate.get("score", 0.0))) - ((1.0 - clamped) * max_similarity)
+            if score > best_score:
+                best_score = score
+                best_index = index
+        selected.append(pending.pop(best_index))
+
+    return selected
