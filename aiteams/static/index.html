@@ -1,0 +1,560 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Teams</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="topbar">
+        <div class="brand-block">
+          <p class="eyebrow">AI Teams / SQLite + AIMemory</p>
+          <h1>多智能体协同平台</h1>
+        </div>
+        <nav class="menu-bar" aria-label="主菜单">
+          <button class="menu-item active" type="button" data-page-target="home">首页</button>
+          <button class="menu-item" type="button" data-page-target="tasks">任务管理</button>
+          <button class="menu-item" type="button" data-page-target="agents">Agent管理</button>
+          <button class="menu-item" type="button" data-page-target="knowledge">知识库管理</button>
+        </nav>
+      </header>
+
+      <main class="page-stack">
+        <section class="page-view active" data-page="home">
+          <section class="hero">
+            <div class="hero-copy">
+              <p class="eyebrow">Platform Overview</p>
+              <h2>平台配置、任务协作、Agent 记忆与技能 / RAG 统一入口</h2>
+              <p class="hero-text">
+                平台配置与协作记录存入 SQLite，Agent 记忆、技能与 RAG 文档由 <code>aimemory</code> 管理。
+                顶部菜单按首页、任务管理、Agent 管理、知识库管理拆分。
+              </p>
+              <div class="actions">
+                <button type="button" data-page-link="tasks">进入任务管理</button>
+                <button type="button" class="ghost" data-page-link="agents">进入 Agent 管理</button>
+              </div>
+            </div>
+            <div class="hero-stats">
+              <div class="stat-card">
+                <span>Providers</span>
+                <strong id="provider-count">0</strong>
+              </div>
+              <div class="stat-card">
+                <span>Agents</span>
+                <strong id="agent-count">0</strong>
+              </div>
+              <div class="stat-card">
+                <span>Tasks</span>
+                <strong id="session-count">0</strong>
+              </div>
+              <div class="stat-card">
+                <span>知识资产</span>
+                <strong id="knowledge-count">0</strong>
+              </div>
+            </div>
+          </section>
+
+          <section class="overview-grid">
+            <article class="panel">
+              <div class="panel-head">
+                <h3>最近任务</h3>
+                <p>查看最近发起的多 Agent 协作任务与执行状态。</p>
+              </div>
+              <div id="home-session-list" class="list-grid compact-list"></div>
+            </article>
+
+            <article class="panel">
+              <div class="panel-head">
+                <h3>核心 Agents</h3>
+                <p>查看当前已配置的 Agent 及其绑定模型。</p>
+              </div>
+              <div id="home-agent-list" class="list-grid compact-list"></div>
+            </article>
+
+            <article class="panel">
+              <div class="panel-head">
+                <h3>技能与 RAG</h3>
+                <p>查看平台内可复用的技能与检索文档资产。</p>
+              </div>
+              <div id="home-knowledge-list" class="list-grid compact-list"></div>
+            </article>
+          </section>
+        </section>
+
+        <section class="page-view" data-page="tasks">
+          <div class="page-header">
+            <div>
+              <p class="eyebrow">Tasks</p>
+              <h2>任务管理</h2>
+            </div>
+          </div>
+
+          <div class="task-layout">
+            <section class="panel">
+              <div class="panel-head">
+                <h3>新建任务</h3>
+                <p>指定参与 Agent、Lead Agent 与轮次，发起协作任务。</p>
+              </div>
+              <form id="run-form" class="stack">
+                <div class="two-col">
+                  <label>
+                    <span>会话标题</span>
+                    <input name="title" placeholder="例如：新产品需求拆解" />
+                  </label>
+                  <label>
+                    <span>轮次</span>
+                    <input name="rounds" type="number" min="1" max="5" value="1" />
+                  </label>
+                </div>
+                <label>
+                  <span>用户任务</span>
+                  <textarea name="prompt" rows="6" placeholder="输入需要多个 Agent 协同处理的任务" required></textarea>
+                </label>
+                <label>
+                  <span>Lead Agent</span>
+                  <select name="lead_agent_id" id="lead-agent"></select>
+                </label>
+                <div>
+                  <span class="subhead">参与 Agent</span>
+                  <div id="agent-checkboxes" class="checkbox-grid"></div>
+                </div>
+                <div class="actions">
+                  <button type="submit">启动协作</button>
+                </div>
+              </form>
+              <pre id="run-error" class="result-box hidden"></pre>
+            </section>
+
+            <section class="panel">
+              <div class="panel-head">
+                <h3>任务列表</h3>
+                <p>左侧查看任务列表，右侧查看会话详情、消息轨迹与记忆召回。</p>
+              </div>
+              <div class="two-pane">
+                <div>
+                  <div id="session-list" class="session-list"></div>
+                </div>
+                <div class="session-detail">
+                  <div id="session-meta" class="session-meta empty">选择左侧任务查看详情。</div>
+                  <div id="transcript" class="transcript"></div>
+                  <div id="memory-view" class="memory-view"></div>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="page-view" data-page="agents">
+          <div class="page-header">
+            <div>
+              <p class="eyebrow">Agents</p>
+              <h2>Agent管理</h2>
+            </div>
+            <p class="page-copy">管理 AI Provider 与 Agent 定义。</p>
+          </div>
+
+          <div class="module-tabs" aria-label="Agent modules">
+            <button class="module-tab active" type="button" data-agent-module-target="providers">AI Provider</button>
+            <button class="module-tab" type="button" data-agent-module-target="agents">Agents</button>
+          </div>
+
+          <div class="split-layout module-stack">
+            <section class="panel module-view active" data-agent-module="providers">
+              <div class="panel-head">
+                <h3>AI Provider</h3>
+              </div>
+              <div class="management-shell">
+                <div class="management-form-column">
+                  <div id="provider-form-mode" class="form-mode hidden"></div>
+                  <form id="provider-form" class="stack">
+                    <div class="two-col">
+                      <label>
+                        <span>名称</span>
+                        <input name="name" placeholder="OpenAI Prod" required />
+                      </label>
+                      <label>
+                        <span>类型</span>
+                        <select name="provider_type" id="provider-type"></select>
+                      </label>
+                    </div>
+                    <div class="two-col">
+                      <label>
+                        <span>Model</span>
+                        <input name="model" placeholder="gpt-4.1-mini" required />
+                      </label>
+                      <label>
+                        <span>API Key</span>
+                        <input name="api_key" type="password" placeholder="sk-..." />
+                      </label>
+                    </div>
+                    <label>
+                      <span>Base URL</span>
+                      <input name="base_url" placeholder="https://api.openai.com/v1" />
+                    </label>
+                    <div id="provider-preset-hint" class="helper-copy"></div>
+                    <div id="provider-legacy-fields" class="two-col hidden">
+                      <label>
+                        <span>API Key</span>
+                        <input name="api_key" type="password" placeholder="sk-..." />
+                      </label>
+                      <label>
+                        <span>API Version / Organization</span>
+                        <div class="inline-fields">
+                          <input name="api_version" placeholder="api version" />
+                          <input name="organization" placeholder="organization" />
+                        </div>
+                      </label>
+                    </div>
+                    <details id="provider-advanced" class="advanced-block">
+                      <summary>Advanced Options</summary>
+                      <div class="stack advanced-fields">
+                        <label class="hidden" data-provider-field="api_version">
+                          <span>API Version</span>
+                          <input name="api_version" placeholder="2024-10-21" />
+                        </label>
+                        <label class="hidden" data-provider-field="organization">
+                          <span>Organization</span>
+                          <input name="organization" placeholder="org_xxx" />
+                        </label>
+                        <label>
+                          <span>Extra Headers JSON</span>
+                          <textarea name="extra_headers" rows="3" placeholder='{"HTTP-Referer":"https://your-app"}'></textarea>
+                        </label>
+                        <label>
+                          <span>Extra Config JSON</span>
+                          <textarea name="extra_config" rows="3" placeholder='{"top_p":0.9}'></textarea>
+                        </label>
+                      </div>
+                    </details>
+                    <label class="inline-toggle" for="provider-clear-api-key">
+                      <input id="provider-clear-api-key" name="clear_api_key" type="checkbox" />
+                      <span>保存时清空已存储 API Key</span>
+                    </label>
+                    <div id="provider-api-key-hint" class="helper-copy hidden">编辑模式下留空 API Key 将沿用已存储密钥。</div>
+                    <div id="provider-legacy-extra" class="hidden">
+                      <label>
+                        <span>Extra Headers JSON</span>
+                        <textarea name="extra_headers" rows="3" placeholder='{"HTTP-Referer":"https://your-app"}'></textarea>
+                      </label>
+                      <label>
+                        <span>Extra Config JSON</span>
+                        <textarea name="extra_config" rows="3" placeholder='{"top_p":0.9}'></textarea>
+                      </label>
+                    </div>
+                    <div class="actions">
+                      <button type="submit">保存 Provider</button>
+                      <button type="button" class="ghost" id="provider-test-btn">测试当前配置</button>
+                    </div>
+                  </form>
+                  <div class="actions">
+                    <button type="button" class="ghost hidden" id="provider-cancel-btn">Cancel Edit</button>
+                  </div>
+                  <pre id="provider-form-result" class="result-box hidden"></pre>
+                  <pre id="provider-test-result" class="result-box hidden"></pre>
+                </div>
+
+                <div class="management-list-column">
+                  <div class="management-list-head">
+                    <div>
+                      <h4>Provider List</h4>
+                      <p id="provider-list-summary" class="muted">Loading...</p>
+                    </div>
+                    <label class="page-size-control">
+                      <span>Per Page</span>
+                      <select id="provider-page-size">
+                        <option value="4">4</option>
+                        <option value="6">6</option>
+                        <option value="8">8</option>
+                        <option value="10" selected>10</option>
+                        <option value="12">12</option>
+                      </select>
+                    </label>
+                  </div>
+                  <form id="provider-filter-form" class="management-filter-form">
+                    <div class="management-filter-grid">
+                      <input name="name" placeholder="Filter by name" />
+                      <select name="provider_type" id="provider-filter-type"></select>
+                      <input name="model" placeholder="Filter by model" />
+                      <div class="filter-actions">
+                        <button type="submit" class="ghost">Filter</button>
+                        <button type="button" class="ghost" id="provider-filter-reset">Reset</button>
+                      </div>
+                    </div>
+                  </form>
+                  <div id="provider-list" class="list-grid management-list"></div>
+                  <div id="provider-pagination" class="pagination-bar"></div>
+                </div>
+              </div>
+            </section>
+
+            <section class="panel module-view" data-agent-module="agents">
+              <div class="panel-head">
+                <h3>Agents</h3>
+              </div>
+              <div class="management-shell">
+                <div class="management-form-column">
+                  <div id="agent-form-mode" class="form-mode hidden"></div>
+                  <form id="agent-form" class="stack">
+                    <div class="two-col">
+                      <label>
+                        <span>名称</span>
+                        <input name="name" placeholder="Solution Architect" required />
+                      </label>
+                      <label>
+                        <span>角色</span>
+                        <input name="role" placeholder="solution_architect" required />
+                      </label>
+                    </div>
+                    <div class="two-col long-fields">
+                      <label>
+                        <span>Provider</span>
+                        <select name="provider_id" id="agent-provider"></select>
+                      </label>
+                      <label>
+                        <span>Model Override</span>
+                        <input name="model_override" placeholder="留空时使用 Provider 默认模型" />
+                      </label>
+                    </div>
+                    <div class="two-col">
+                      <label>
+                        <span>Temperature</span>
+                        <input name="temperature" type="number" step="0.1" min="0" max="2" value="0.2" />
+                      </label>
+                      <label>
+                        <span>Max Tokens</span>
+                        <input name="max_tokens" type="number" min="1" placeholder="可选" />
+                      </label>
+                    </div>
+                    <label>
+                      <span>System Prompt</span>
+                      <textarea name="system_prompt" rows="5" placeholder="定义该 Agent 的专业职责与输出标准" required></textarea>
+                    </label>
+                    <div class="actions">
+                      <button type="submit">保存 Agent</button>
+                    </div>
+                  </form>
+                  <div class="actions">
+                    <button type="button" class="ghost hidden" id="agent-cancel-btn">Cancel Edit</button>
+                  </div>
+                  <pre id="agent-form-result" class="result-box hidden"></pre>
+                </div>
+
+                <div class="management-list-column">
+                  <div class="management-list-head">
+                    <div>
+                      <h4>Agent List</h4>
+                      <p id="agent-list-summary" class="muted">Loading...</p>
+                    </div>
+                    <label class="page-size-control">
+                      <span>Per Page</span>
+                      <select id="agent-page-size">
+                        <option value="4">4</option>
+                        <option value="6">6</option>
+                        <option value="8">8</option>
+                        <option value="10" selected>10</option>
+                        <option value="12">12</option>
+                      </select>
+                    </label>
+                  </div>
+                  <form id="agent-filter-form" class="management-filter-form">
+                    <div class="management-filter-grid">
+                      <input name="name" placeholder="Filter by name" />
+                      <input name="role" placeholder="Filter by role" />
+                      <select name="provider_id" id="agent-filter-provider"></select>
+                      <input name="model" placeholder="Filter by model" />
+                      <div class="filter-actions">
+                        <button type="submit" class="ghost">Filter</button>
+                        <button type="button" class="ghost" id="agent-filter-reset">Reset</button>
+                      </div>
+                    </div>
+                  </form>
+                  <div id="agent-list" class="list-grid management-list"></div>
+                  <div id="agent-pagination" class="pagination-bar"></div>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="page-view" data-page="knowledge">
+          <div class="page-header">
+            <div>
+              <p class="eyebrow">Knowledge</p>
+              <h2>技能与 RAG 管理</h2>
+            </div>
+          </div>
+
+          <div class="module-tabs" aria-label="Knowledge modules">
+            <button class="module-tab active" type="button" data-knowledge-module-target="skills">技能管理</button>
+            <button class="module-tab" type="button" data-knowledge-module-target="rag">RAG 管理</button>
+          </div>
+
+          <div class="module-stack">
+            <section class="panel module-view active" data-knowledge-module="skills">
+              <div class="panel-head">
+                <h3>技能库</h3>
+              </div>
+              <div class="knowledge-layout">
+                <div class="stack">
+                  <div class="subtle-panel stack">
+                    <div class="panel-head compact-head">
+                      <h4>导入技能</h4>
+                      <p>支持导入单个 skill 文件夹，或一次导入父文件夹下的全部 skill 子目录。</p>
+                    </div>
+                    <div class="actions">
+                      <button type="button" id="skill-import-single-btn">导入单个 skill 文件夹</button>
+                      <button type="button" class="ghost" id="skill-import-batch-btn">批量导入父文件夹</button>
+                    </div>
+                    <div id="skill-import-summary" class="helper-copy">SKILL.md 会写入 skill 版本内容，附带文件会进入 AIMemory object store。</div>
+                    <input id="skill-import-single-input" class="hidden" type="file" webkitdirectory directory multiple />
+                    <input id="skill-import-batch-input" class="hidden" type="file" webkitdirectory directory multiple />
+                  </div>
+                  <div id="skill-form-mode" class="form-mode hidden"></div>
+                  <form id="skill-form" class="stack">
+                    <div class="two-col">
+                      <label>
+                        <span>名称</span>
+                        <input name="name" placeholder="例如：RAG 规划技能" required />
+                      </label>
+                      <label>
+                        <span>状态</span>
+                        <select name="status">
+                          <option value="draft" selected>草稿</option>
+                          <option value="active">启用</option>
+                          <option value="archived">归档</option>
+                        </select>
+                      </label>
+                    </div>
+                    <label>
+                      <span>描述</span>
+                      <textarea name="description" rows="4" placeholder="描述这个技能的适用场景、调用方式和预期输出。" required></textarea>
+                    </label>
+                    <label>
+                      <span>提示词模板</span>
+                      <textarea
+                        name="skill_markdown"
+                        rows="16"
+                        placeholder="粘贴或编辑完整的 SKILL.md 内容；保存时会自动同步 frontmatter 的 name 和 description。"
+                        required
+                      ></textarea>
+                      <div class="helper-copy">这里编辑的是完整的 <code>SKILL.md</code> 内容。</div>
+                    </label>
+                    <label>
+                      <span>工作流</span>
+                      <textarea name="workflow" rows="5" placeholder='可填写 JSON 或纯文本，例如 {"steps":["检索","排序","生成"]}'></textarea>
+                    </label>
+                    <div class="two-col long-fields">
+                      <label>
+                        <span>工具</span>
+                        <input name="tools" placeholder="多个工具用逗号分隔，例如 rag.lookup, memory.search" />
+                      </label>
+                      <label>
+                        <span>主题标签</span>
+                        <input name="topics" placeholder="多个主题用逗号分隔，例如 rag, retrieval, planning" />
+                      </label>
+                    </div>
+                    <label>
+                      <span>元数据 JSON</span>
+                      <textarea name="metadata" rows="3" placeholder='{"owner":"platform"}'></textarea>
+                    </label>
+                    <div class="subtle-panel stack">
+                      <div class="panel-head compact-head">
+                        <h4>附带文档</h4>
+                        <p>新增 skill 时可附带参考文档、模板、脚本和其他附件；编辑时新上传文件会追加并按路径覆盖同名文件。</p>
+                      </div>
+                      <div class="upload-grid">
+                        <label>
+                          <span>参考文档</span>
+                          <input id="skill-reference-files" name="reference_files" type="file" multiple />
+                        </label>
+                        <label>
+                          <span>模板文件</span>
+                          <input id="skill-template-files" name="template_files" type="file" multiple />
+                        </label>
+                        <label>
+                          <span>脚本文件</span>
+                          <input id="skill-script-files" name="script_files" type="file" multiple />
+                        </label>
+                        <label>
+                          <span>其他附件</span>
+                          <input id="skill-asset-files" name="asset_files" type="file" multiple />
+                        </label>
+                      </div>
+                      <div id="skill-upload-summary" class="helper-copy">当前未选择附带文件。</div>
+                    </div>
+                    <div class="actions">
+                      <button type="submit">保存技能</button>
+                    </div>
+                  </form>
+                  <div class="actions">
+                    <button type="button" class="ghost hidden" id="skill-cancel-btn">取消编辑</button>
+                  </div>
+                  <pre id="skill-result" class="result-box hidden"></pre>
+                </div>
+
+                <div class="knowledge-panel-stack">
+                  <form id="skill-search-form" class="stack inline-search">
+                    <input name="query" placeholder="按名称、描述或主题标签搜索技能" />
+                    <div class="actions">
+                      <button type="submit">搜索</button>
+                      <button type="button" class="ghost" id="skill-reset-btn">查看全部</button>
+                    </div>
+                  </form>
+                  <div id="skill-list" class="list-grid"></div>
+                  <div id="skill-detail" class="detail-panel empty">选择一个技能查看详情。</div>
+                </div>
+              </div>
+            </section>
+
+            <section class="panel module-view" data-knowledge-module="rag">
+              <div class="panel-head">
+                <h3>RAG 文档</h3>
+              </div>
+              <div class="knowledge-layout">
+                <div class="stack">
+                  <div id="knowledge-form-mode" class="form-mode hidden"></div>
+                  <form id="knowledge-form" class="stack">
+                    <label>
+                      <span>标题</span>
+                      <input name="title" placeholder="例如：平台 RAG 手册" required />
+                    </label>
+                    <label>
+                      <span>来源名称</span>
+                      <input name="source_name" placeholder="例如：manual" />
+                    </label>
+                    <label>
+                      <span>正文内容</span>
+                      <textarea name="text" rows="10" placeholder="填写用于检索和回答 grounding 的文档内容。" required></textarea>
+                    </label>
+                    <div class="actions">
+                      <button type="submit">保存文档</button>
+                    </div>
+                  </form>
+                  <div class="actions">
+                    <button type="button" class="ghost hidden" id="knowledge-cancel-btn">取消编辑</button>
+                  </div>
+                  <pre id="knowledge-result" class="result-box hidden"></pre>
+                </div>
+
+                <div class="knowledge-panel-stack">
+                  <form id="knowledge-search-form" class="stack inline-search">
+                    <input name="query" placeholder="搜索检索切块或源文档内容" />
+                    <div class="actions">
+                      <button type="submit">搜索</button>
+                      <button type="button" class="ghost" id="knowledge-reset-btn">查看全部</button>
+                    </div>
+                  </form>
+                  <div id="knowledge-list" class="list-grid"></div>
+                  <div id="knowledge-detail" class="detail-panel empty">选择一个 RAG 文档或检索命中查看详情。</div>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>
