@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 import json
+import secrets
+import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+
+_UUID7_LOCK = threading.Lock()
+_UUID7_LAST_MS = 0
+_UUID7_LAST_SEQUENCE = 0
 
 
 def utcnow_iso() -> str:
@@ -13,6 +21,32 @@ def utcnow_iso() -> str:
 
 def make_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
+
+
+def make_uuid7() -> str:
+    return str(uuid7())
+
+
+def uuid7() -> uuid.UUID:
+    global _UUID7_LAST_MS, _UUID7_LAST_SEQUENCE
+    native = getattr(uuid, "uuid7", None)
+    if callable(native):
+        return native()
+    timestamp_ms = int(time.time() * 1000)
+    with _UUID7_LOCK:
+        if timestamp_ms == _UUID7_LAST_MS:
+            _UUID7_LAST_SEQUENCE = (_UUID7_LAST_SEQUENCE + 1) & 0x0FFF
+        else:
+            _UUID7_LAST_MS = timestamp_ms
+            _UUID7_LAST_SEQUENCE = secrets.randbits(12)
+        sequence = _UUID7_LAST_SEQUENCE
+    random_bits = secrets.randbits(62)
+    value = (timestamp_ms & ((1 << 48) - 1)) << 80
+    value |= 0x7 << 76
+    value |= (sequence & 0x0FFF) << 64
+    value |= 0b10 << 62
+    value |= random_bits
+    return uuid.UUID(int=value)
 
 
 def ensure_dir(path: str | Path) -> Path:

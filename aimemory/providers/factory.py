@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from aimemory.backends.defaults import KuzuGraphBackend, LanceDBIndexBackend, NoopGraphBackend, SQLiteGraphBackend, SQLiteIndexBackend
 from aimemory.providers.defaults import (
     AdaptiveMemoryPlanner,
     AdaptiveRecallPlanner,
@@ -23,8 +22,6 @@ class LiteProviderRegistry:
             "planner": {},
             "recall_planner": {},
             "reranker": {},
-            "index_backend": {},
-            "graph_backend": {},
         }
 
     def register(self, category: str, name: str, factory: Callable[..., Any]) -> None:
@@ -56,11 +53,6 @@ class LiteProviderFactory:
         cls.registry.register("recall_planner", "lite", lambda **_: AdaptiveRecallPlanner())
         cls.registry.register("reranker", "hybrid", lambda **_: HybridReranker())
         cls.registry.register("reranker", "rule", lambda **_: HybridReranker())
-        cls.registry.register("index_backend", "sqlite", lambda **kwargs: SQLiteIndexBackend(**kwargs))
-        cls.registry.register("index_backend", "lancedb", lambda **kwargs: LanceDBIndexBackend(**kwargs))
-        cls.registry.register("graph_backend", "sqlite", lambda **kwargs: SQLiteGraphBackend(**kwargs))
-        cls.registry.register("graph_backend", "kuzu", lambda **kwargs: KuzuGraphBackend(**kwargs))
-        cls.registry.register("graph_backend", "none", lambda **_: NoopGraphBackend())
         cls._bootstrapped = True
 
     @classmethod

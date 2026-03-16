@@ -108,6 +108,9 @@ class SkillNamespace(_NamespaceBase):
     def search(self, query: str, **kwargs: Any):
         return self._root._call("search_skill_keywords", query, **kwargs)
 
+    def search_references(self, query: str, **kwargs: Any):
+        return self._root._call("search_skill_references", query, **kwargs)
+
     def update(self, skill_id: str, **kwargs: Any):
         return self._root._call("update_skill", skill_id, **kwargs)
 

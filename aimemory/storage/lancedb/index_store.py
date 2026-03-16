@@ -6,17 +6,15 @@ from typing import Any
 from aimemory.core.text import hash_embedding
 from aimemory.core.utils import json_dumps, json_loads
 
+try:
+    import lancedb  # type: ignore
+except ImportError as exc:
+    raise RuntimeError("AIMemory now requires the `lancedb` package. Install dependencies with `pip install -e .`.") from exc
+
 
 class LanceIndexStore:
     def __init__(self, path: str | Path):
         self.path = Path(path).expanduser().resolve()
-        self.available = False
-        self._db = None
-        try:
-            import lancedb  # type: ignore
-        except ImportError:
-            return
-
         self.path.mkdir(parents=True, exist_ok=True)
         self._db = lancedb.connect(str(self.path))
         self.available = True
@@ -63,7 +61,8 @@ class LanceIndexStore:
 
     def _open_table(self, table_name: str):
         assert self._db is not None
-        if table_name not in set(self._db.table_names()):
+        table_names = self._list_tables()
+        if table_name not in table_names:
             return None
         return self._db.open_table(table_name)
 
@@ -73,6 +72,19 @@ class LanceIndexStore:
         if existing is not None:
             return existing
         return self._db.create_table(table_name, data=[row], mode="overwrite")
+
+    def _list_tables(self) -> set[str]:
+        assert self._db is not None
+        raw_tables = self._db.list_tables()
+        if hasattr(raw_tables, "tables"):
+            raw_tables = getattr(raw_tables, "tables")
+        names: set[str] = set()
+        for item in raw_tables:
+            if isinstance(item, str):
+                names.add(item)
+            elif isinstance(item, (list, tuple)) and item:
+                names.add(str(item[0]))
+        return names
 
     def _serialize_row(self, table_name: str, record_id: str, text: str, payload: dict[str, Any]) -> dict[str, Any]:
         vector = json_loads(payload.get("embedding"), None)

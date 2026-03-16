@@ -4,6 +4,7 @@ from typing import Any
 
 from aimemory.core.utils import utcnow_iso
 from aimemory.domains.skill.models import SkillStatus
+from aimemory.domains.skill.package import looks_like_skill_file_mapping
 from aimemory.services.base import ServiceBase
 
 
@@ -23,10 +24,18 @@ class SkillService(ServiceBase):
         tools: list[str] | None = None,
         tests: list[dict[str, Any]] | None = None,
         topics: list[str] | None = None,
-        assets: dict[str, Any] | None = None,
+        skill_markdown: str | None = None,
+        files: list[dict[str, Any]] | None = None,
+        references: dict[str, Any] | list[dict[str, Any]] | None = None,
+        scripts: dict[str, Any] | list[dict[str, Any]] | None = None,
+        assets: dict[str, Any] | list[dict[str, Any]] | None = None,
         status: str = SkillStatus.DRAFT,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        metadata_payload = dict(metadata or {})
+        asset_payload = assets if looks_like_skill_file_mapping(assets) else None
+        if assets is not None and asset_payload is None:
+            metadata_payload["assets"] = assets or {}
         skill = self._kernel().save_skill(
             name=name,
             description=description,
@@ -40,7 +49,12 @@ class SkillService(ServiceBase):
             tools=tools,
             tests=tests,
             topics=topics,
-            metadata={**dict(metadata or {}), "assets": assets or {}},
+            skill_markdown=skill_markdown,
+            files=files,
+            references=references,
+            scripts=scripts,
+            assets=asset_payload,
+            metadata=metadata_payload,
         )
         if str(status) != str(SkillStatus.ACTIVE):
             self.db.execute("UPDATE skills SET status = ?, updated_at = ? WHERE id = ?", (str(status), utcnow_iso(), skill["id"]))

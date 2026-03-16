@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from aimemory.core.utils import json_loads
 from aimemory.services.base import ServiceBase
 
 
@@ -48,19 +47,15 @@ class ArchiveService(ServiceBase):
         unit = self.get_archive(archive_unit_id)
         if unit is None:
             raise ValueError(f"Archive `{archive_unit_id}` does not exist.")
-        object_id = unit.get("object_id")
-        if not object_id:
+        content_id = unit.get("content_id")
+        if not content_id:
             return {"archive": unit, "payload": None}
-        obj = self._deserialize_row(self.db.fetch_one("SELECT * FROM objects WHERE id = ?", (object_id,)))
-        if obj is None:
-            return {"archive": unit, "payload": None}
-        text = self.object_store.get_text(obj["object_key"])
-        payload = json_loads(text, {})
+        payload = self._kernel().memory_content_store.get_json("archive", content_id, {})
         from aimemory.core.utils import utcnow_iso
 
         now = utcnow_iso()
         self.db.execute(
-            "UPDATE archive_units SET last_rehydrated_at = ? WHERE id = ?",
+            "UPDATE archive_memories SET last_rehydrated_at = ? WHERE id = ?",
             (now, archive_unit_id),
         )
         return {"archive": unit, "payload": payload}

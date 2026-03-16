@@ -50,7 +50,7 @@ class AIMemoryMCPAdapter:
             "storage": {
                 "root_dir": str(self.memory.config.root_dir),
                 "sqlite_path": str(self.memory.config.sqlite_path),
-                "relational_backend": self.memory.config.relational_backend,
+                "relational_backend": "sqlite",
                 "index_backend": self.memory._resolve_vector_backend_name(),
                 "graph_backend": self.memory._resolve_graph_backend_name(),
                 "layout": self.memory.storage_layout(**self.scope.as_metadata()),
@@ -140,6 +140,11 @@ class AIMemoryMCPAdapter:
             "tools": {"type": "array", "items": {"type": "string"}},
             "tests": {"type": "array", "items": {}},
             "topics": {"type": "array", "items": {"type": "string"}},
+            "skill_markdown": {"type": "string"},
+            "files": {"type": "array", "items": {"type": "object"}},
+            "references": {},
+            "scripts": {},
+            "assets": {},
             "metadata": {"type": "object"},
             "status": {"type": "string"},
         }
@@ -150,6 +155,14 @@ class AIMemoryMCPAdapter:
         }
         skill_search = {
             "query": {"type": "string"},
+            "limit": {"type": "integer", "default": 10},
+            "threshold": {"type": "number", "default": 0.0},
+        }
+        skill_reference_search = {
+            "query": {"type": "string"},
+            "skill_id": {"type": "string"},
+            "skill_version_id": {"type": "string"},
+            "path_prefix": {"type": "string"},
             "limit": {"type": "integer", "default": 10},
             "threshold": {"type": "number", "default": 0.0},
         }
@@ -217,6 +230,7 @@ class AIMemoryMCPAdapter:
             self._tool("skill_get", "通过 skill ID 获取完整 skill 内容。", {"skill_id": {"type": "string"}}, required=["skill_id"]),
             self._tool("skill_list", "列出当前 agent 的所有 skill metadata。", skill_list),
             self._tool("skill_search", "按关键字检索 skill。", skill_search, required=["query"]),
+            self._tool("skill_search_references", "检索 skill references 内的命中文本分块。", skill_reference_search, required=["query"]),
             self._tool(
                 "skill_update",
                 "更新 skill 元信息，必要时写入新版本。",
@@ -306,6 +320,7 @@ class AIMemoryMCPAdapter:
             "skill_get": lambda: self.memory.api.skill.get(payload["skill_id"]),
             "skill_list": lambda: self.memory.api.skill.list(**payload),
             "skill_search": lambda: self.memory.api.skill.search(**payload),
+            "skill_search_references": lambda: self.memory.api.skill.search_references(**payload),
             "skill_update": lambda: self.memory.api.skill.update(payload["skill_id"], **{key: value for key, value in payload.items() if key != "skill_id"}),
             "skill_delete": lambda: self.memory.api.skill.delete(payload["skill_id"]),
             "session_create": lambda: self.memory.api.session.create(**payload),

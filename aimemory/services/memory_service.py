@@ -144,7 +144,9 @@ class MemoryService(ServiceBase):
             )["results"]
             now = utcnow_iso()
             for item in session_memories:
-                self.db.execute("UPDATE memories SET status = 'archived', archived_at = ?, updated_at = ? WHERE id = ?", (now, now, item["id"]))
+                table_name = self._kernel()._memory_table_for_id(item["id"])
+                if table_name:
+                    self.db.execute(f"UPDATE {table_name} SET status = 'archived', archived_at = ?, updated_at = ? WHERE id = ?", (now, now, item["id"]))
         return {
             "source_count": len(created),
             "promoted_count": len(created),
@@ -222,7 +224,9 @@ class MemoryService(ServiceBase):
     ) -> dict[str, Any]:
         result = self._kernel().update(memory_id, text=text, metadata=metadata, importance=importance, status=status)
         if timestamp and result is not None:
-            self.db.execute("UPDATE memories SET updated_at = ? WHERE id = ?", (timestamp, memory_id))
+            table_name = self._kernel()._memory_table_for_id(memory_id)
+            if table_name:
+                self.db.execute(f"UPDATE {table_name} SET updated_at = ? WHERE id = ?", (timestamp, memory_id))
             refreshed = self.get(memory_id)
             assert refreshed is not None
             return refreshed

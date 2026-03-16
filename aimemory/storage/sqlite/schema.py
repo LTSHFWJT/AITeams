@@ -151,20 +151,54 @@ SCHEMA_STATEMENTS = [
     )
     """,
     """
-    CREATE TABLE IF NOT EXISTS memories (
+    CREATE TABLE IF NOT EXISTS short_term_memories (
         id TEXT PRIMARY KEY,
+        content_id TEXT NOT NULL UNIQUE,
         user_id TEXT NOT NULL,
         agent_id TEXT,
+        owner_agent_id TEXT,
         session_id TEXT,
         run_id TEXT,
-        scope TEXT NOT NULL,
+        source_session_id TEXT,
+        source_run_id TEXT,
+        subject_type TEXT,
+        subject_id TEXT,
+        interaction_type TEXT,
+        namespace_key TEXT,
         memory_type TEXT NOT NULL,
-        text TEXT NOT NULL,
         summary TEXT,
         importance REAL NOT NULL DEFAULT 0.5,
         status TEXT NOT NULL,
         source TEXT,
         metadata TEXT,
+        content_format TEXT NOT NULL DEFAULT 'text/plain',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        archived_at TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS long_term_memories (
+        id TEXT PRIMARY KEY,
+        content_id TEXT NOT NULL UNIQUE,
+        user_id TEXT NOT NULL,
+        agent_id TEXT,
+        owner_agent_id TEXT,
+        session_id TEXT,
+        run_id TEXT,
+        source_session_id TEXT,
+        source_run_id TEXT,
+        subject_type TEXT,
+        subject_id TEXT,
+        interaction_type TEXT,
+        namespace_key TEXT,
+        memory_type TEXT NOT NULL,
+        summary TEXT,
+        importance REAL NOT NULL DEFAULT 0.5,
+        status TEXT NOT NULL,
+        source TEXT,
+        metadata TEXT,
+        content_format TEXT NOT NULL DEFAULT 'text/plain',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         archived_at TEXT
@@ -331,16 +365,57 @@ SCHEMA_STATEMENTS = [
     )
     """,
     """
-    CREATE TABLE IF NOT EXISTS archive_units (
+    CREATE TABLE IF NOT EXISTS skill_files (
         id TEXT PRIMARY KEY,
+        skill_id TEXT NOT NULL,
+        skill_version_id TEXT NOT NULL,
+        object_id TEXT NOT NULL,
+        relative_path TEXT NOT NULL,
+        role TEXT NOT NULL,
+        mime_type TEXT,
+        size_bytes INTEGER NOT NULL,
+        checksum TEXT NOT NULL,
+        metadata TEXT,
+        created_at TEXT NOT NULL,
+        UNIQUE(skill_version_id, relative_path)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS skill_reference_chunks (
+        id TEXT PRIMARY KEY,
+        skill_id TEXT NOT NULL,
+        skill_version_id TEXT NOT NULL,
+        file_id TEXT NOT NULL,
+        object_id TEXT NOT NULL,
+        relative_path TEXT NOT NULL,
+        chunk_index INTEGER NOT NULL,
+        title TEXT,
+        content TEXT NOT NULL,
+        metadata TEXT,
+        created_at TEXT NOT NULL,
+        UNIQUE(file_id, chunk_index)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS archive_memories (
+        id TEXT PRIMARY KEY,
+        content_id TEXT NOT NULL UNIQUE,
         domain TEXT NOT NULL,
         source_id TEXT NOT NULL,
         user_id TEXT,
+        owner_agent_id TEXT,
+        subject_type TEXT,
+        subject_id TEXT,
+        interaction_type TEXT,
+        namespace_key TEXT,
+        source_type TEXT,
         session_id TEXT,
-        object_id TEXT,
         summary TEXT,
         metadata TEXT,
-        created_at TEXT NOT NULL
+        content_format TEXT NOT NULL DEFAULT 'application/json',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        last_rehydrated_at TEXT
     )
     """,
     """
@@ -421,6 +496,25 @@ SCHEMA_STATEMENTS = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS skill_reference_index (
+        record_id TEXT PRIMARY KEY,
+        skill_id TEXT NOT NULL,
+        skill_version_id TEXT NOT NULL,
+        file_id TEXT NOT NULL,
+        object_id TEXT NOT NULL,
+        owner_agent_id TEXT,
+        source_subject_type TEXT,
+        source_subject_id TEXT,
+        namespace_key TEXT,
+        relative_path TEXT NOT NULL,
+        title TEXT,
+        text TEXT NOT NULL,
+        keywords TEXT,
+        updated_at TEXT NOT NULL,
+        metadata TEXT
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS archive_summary_index (
         record_id TEXT PRIMARY KEY,
         archive_unit_id TEXT NOT NULL,
@@ -458,12 +552,24 @@ SCHEMA_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_turns_session ON conversation_turns(session_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_runs_session ON runs(session_id, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_tasks_run ON tasks(run_id, updated_at)",
-    "CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(user_id, session_id, scope, status, updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_short_term_memories_scope ON short_term_memories(user_id, session_id, status, updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_short_term_memories_owner ON short_term_memories(owner_agent_id, subject_type, subject_id, updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_short_term_memories_namespace ON short_term_memories(namespace_key, updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_long_term_memories_scope ON long_term_memories(user_id, status, updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_long_term_memories_owner ON long_term_memories(owner_agent_id, subject_type, subject_id, updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_long_term_memories_namespace ON long_term_memories(namespace_key, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_memory_events_memory ON memory_events(memory_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_documents_source ON documents(source_id, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_chunks_document ON document_chunks(document_id, chunk_index)",
     "CREATE INDEX IF NOT EXISTS idx_skills_status ON skills(status, updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_skill_files_version ON skill_files(skill_version_id, relative_path)",
+    "CREATE INDEX IF NOT EXISTS idx_skill_files_skill ON skill_files(skill_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_skill_ref_chunks_version ON skill_reference_chunks(skill_version_id, relative_path, chunk_index)",
+    "CREATE INDEX IF NOT EXISTS idx_skill_ref_index_skill ON skill_reference_index(skill_id, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_outbox_status ON outbox_events(status, available_at, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_memory_index_scope ON memory_index(user_id, session_id, scope, updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_archive_memories_scope ON archive_memories(user_id, session_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_archive_memories_owner ON archive_memories(owner_agent_id, subject_type, subject_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_archive_memories_namespace ON archive_memories(namespace_key, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_archive_index_scope ON archive_summary_index(user_id, session_id, updated_at)",
 ]

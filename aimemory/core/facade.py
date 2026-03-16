@@ -8,19 +8,26 @@ from aimemory.algorithms.compression import CompressionResult, compress_records
 from aimemory.algorithms.dedupe import fingerprint, hamming_similarity, merge_text_fragments, semantic_similarity
 from aimemory.algorithms.distill import AdaptiveDistiller, DistilledCandidate
 from aimemory.algorithms.retrieval import estimate_tokens, mmr_rerank, score_record
-from aimemory.backends.registry import BACKEND_REGISTRY
+from aimemory.backends.registry import LanceDBVectorIndex, NullGraphStore
 from aimemory.core.capabilities import capability_dict
 from aimemory.core.scope import CollaborationScope
 from aimemory.core.settings import AIMemoryConfig
 from aimemory.core.text import build_summary, chunk_text, extract_keywords, split_sentences
-from aimemory.core.utils import json_dumps, json_loads, make_id, merge_metadata, utcnow_iso
+from aimemory.core.utils import json_dumps, json_loads, make_id, make_uuid7, merge_metadata, utcnow_iso
 from aimemory.domains.memory.models import MemoryScope, MemoryType
+from aimemory.domains.skill.package import (
+    default_skill_markdown,
+    is_textual_skill_file,
+    looks_like_skill_file_mapping,
+    normalize_skill_package_inputs,
+)
 from aimemory.memory_intelligence.models import MemoryScopeContext, NormalizedMessage
 from aimemory.providers.defaults import TextOnlyVisionProcessor
 from aimemory.providers.embeddings import configure_embedding_runtime, describe_embedding_runtime, embed_text
 from aimemory.querying.filters import filter_records
+from aimemory.storage.lmdb.store import LMDBMemoryStore
 from aimemory.storage.object_store.local import LocalObjectStore
-from aimemory.storage.plugins import STORAGE_PLUGIN_REGISTRY
+from aimemory.storage.sqlite.database import SQLiteDatabase
 from aimemory.storage.sqlite.runtime_schema import ADDITIONAL_COLUMNS, EXTRA_SCHEMA_STATEMENTS, POST_MIGRATION_SCHEMA_STATEMENTS
 
 
@@ -79,16 +86,55 @@ def _domain_priority(domain: str) -> float:
     }.get(domain, 0.0)
 
 
+MEMORY_TABLE_MAP = {
+    str(MemoryScope.SESSION): "short_term_memories",
+    str(MemoryScope.LONG_TERM): "long_term_memories",
+}
+
+MEMORY_BUCKET_MAP = {
+    str(MemoryScope.SESSION): "short_term",
+    str(MemoryScope.LONG_TERM): "long_term",
+}
+
+MEMORY_TABLE_SELECT = """
+    SELECT
+        id,
+        content_id,
+        user_id,
+        agent_id,
+        owner_agent_id,
+        session_id,
+        run_id,
+        source_session_id,
+        source_run_id,
+        subject_type,
+        subject_id,
+        interaction_type,
+        namespace_key,
+        memory_type,
+        summary,
+        importance,
+        status,
+        source,
+        metadata,
+        content_format,
+        created_at,
+        updated_at,
+        archived_at
+    FROM {table}
+"""
+
+
 class AIMemory:
     def __init__(self, config: AIMemoryConfig | dict[str, Any] | None = None):
         self.config = AIMemoryConfig.from_value(config)
         configure_embedding_runtime(self.config.embeddings)
-        self.db = STORAGE_PLUGIN_REGISTRY.create_relational(self.config.relational_backend, self.config)
-        self._ensure_runtime_schema()
+        self.memory_content_store = LMDBMemoryStore(self.config.lmdb_path)
         self.object_store = LocalObjectStore(self.config.object_store_path)
-        BACKEND_REGISTRY.bootstrap_defaults()
-        self.vector_index = BACKEND_REGISTRY.create_vector(self._resolve_vector_backend_name(), db=self.db, config=self.config)
-        self.graph_store = BACKEND_REGISTRY.create_graph(self._resolve_graph_backend_name(), db=self.db, config=self.config)
+        self.db = SQLiteDatabase(self.config.sqlite_path)
+        self._ensure_runtime_schema()
+        self.vector_index = LanceDBVectorIndex(self.config)
+        self.graph_store = NullGraphStore()
         self.normalizer = TextOnlyVisionProcessor()
         self.distiller = AdaptiveDistiller(self.config.memory_policy)
         self._domain_compressors: dict[str, Callable[..., Any]] = {}
@@ -131,76 +177,160 @@ class AIMemory:
             """
         )
         self.db.execute("UPDATE runs SET owner_agent_id = COALESCE(owner_agent_id, agent_id) WHERE owner_agent_id IS NULL")
-        self.db.execute("UPDATE memories SET owner_agent_id = COALESCE(owner_agent_id, agent_id) WHERE owner_agent_id IS NULL")
-        self.db.execute("UPDATE memories SET source_session_id = COALESCE(source_session_id, session_id) WHERE source_session_id IS NULL")
-        self.db.execute("UPDATE memories SET source_run_id = COALESCE(source_run_id, run_id) WHERE source_run_id IS NULL")
-        self.db.execute(
-            """
-            UPDATE memories
-            SET subject_type = COALESCE(subject_type, (SELECT s.subject_type FROM sessions s WHERE s.id = memories.session_id), 'human')
-            WHERE subject_type IS NULL
-            """
-        )
-        self.db.execute(
-            """
-            UPDATE memories
-            SET subject_id = COALESCE(subject_id, (SELECT s.subject_id FROM sessions s WHERE s.id = memories.session_id), user_id)
-            WHERE subject_id IS NULL
-            """
-        )
-        self.db.execute(
-            """
-            UPDATE memories
-            SET interaction_type = COALESCE(interaction_type, (SELECT s.interaction_type FROM sessions s WHERE s.id = memories.session_id), 'human_agent')
-            WHERE interaction_type IS NULL
-            """
-        )
+        self._normalize_memory_management_tables()
         self.db.execute("UPDATE skills SET owner_agent_id = COALESCE(owner_agent_id, owner_id) WHERE owner_agent_id IS NULL")
+        self._normalize_archive_management_table()
+
+    def _normalize_memory_management_tables(self) -> None:
+        for table_name in MEMORY_TABLE_MAP.values():
+            self.db.execute(f"UPDATE {table_name} SET owner_agent_id = COALESCE(owner_agent_id, agent_id) WHERE owner_agent_id IS NULL")
+            self.db.execute(f"UPDATE {table_name} SET source_session_id = COALESCE(source_session_id, session_id) WHERE source_session_id IS NULL")
+            self.db.execute(f"UPDATE {table_name} SET source_run_id = COALESCE(source_run_id, run_id) WHERE source_run_id IS NULL")
+            self.db.execute(
+                f"""
+                UPDATE {table_name}
+                SET subject_type = COALESCE(subject_type, (SELECT s.subject_type FROM sessions s WHERE s.id = {table_name}.session_id), 'human')
+                WHERE subject_type IS NULL
+                """
+            )
+            self.db.execute(
+                f"""
+                UPDATE {table_name}
+                SET subject_id = COALESCE(subject_id, (SELECT s.subject_id FROM sessions s WHERE s.id = {table_name}.session_id), user_id)
+                WHERE subject_id IS NULL
+                """
+            )
+            self.db.execute(
+                f"""
+                UPDATE {table_name}
+                SET interaction_type = COALESCE(interaction_type, (SELECT s.interaction_type FROM sessions s WHERE s.id = {table_name}.session_id), 'human_agent')
+                WHERE interaction_type IS NULL
+                """
+            )
+
+    def _normalize_archive_management_table(self) -> None:
         self.db.execute(
             """
-            UPDATE archive_units
-            SET owner_agent_id = COALESCE(owner_agent_id, (SELECT s.owner_agent_id FROM sessions s WHERE s.id = archive_units.session_id))
+            UPDATE archive_memories
+            SET owner_agent_id = COALESCE(owner_agent_id, (SELECT s.owner_agent_id FROM sessions s WHERE s.id = archive_memories.session_id))
             WHERE owner_agent_id IS NULL
             """
         )
         self.db.execute(
             """
-            UPDATE archive_units
-            SET subject_type = COALESCE(subject_type, (SELECT s.subject_type FROM sessions s WHERE s.id = archive_units.session_id))
+            UPDATE archive_memories
+            SET subject_type = COALESCE(subject_type, (SELECT s.subject_type FROM sessions s WHERE s.id = archive_memories.session_id))
             WHERE subject_type IS NULL
             """
         )
         self.db.execute(
             """
-            UPDATE archive_units
-            SET subject_id = COALESCE(subject_id, (SELECT s.subject_id FROM sessions s WHERE s.id = archive_units.session_id))
+            UPDATE archive_memories
+            SET subject_id = COALESCE(subject_id, (SELECT s.subject_id FROM sessions s WHERE s.id = archive_memories.session_id))
             WHERE subject_id IS NULL
             """
         )
         self.db.execute(
             """
-            UPDATE archive_units
-            SET interaction_type = COALESCE(interaction_type, (SELECT s.interaction_type FROM sessions s WHERE s.id = archive_units.session_id))
+            UPDATE archive_memories
+            SET interaction_type = COALESCE(interaction_type, (SELECT s.interaction_type FROM sessions s WHERE s.id = archive_memories.session_id))
             WHERE interaction_type IS NULL
             """
         )
-        self.db.execute("UPDATE archive_units SET source_type = COALESCE(source_type, domain) WHERE source_type IS NULL")
+        self.db.execute("UPDATE archive_memories SET source_type = COALESCE(source_type, domain) WHERE source_type IS NULL")
+
+    def _memory_table_for_scope(self, scope: str) -> str:
+        return MEMORY_TABLE_MAP.get(scope, MEMORY_TABLE_MAP[str(MemoryScope.LONG_TERM)])
+
+    def _memory_bucket_for_scope(self, scope: str) -> str:
+        return MEMORY_BUCKET_MAP.get(scope, MEMORY_BUCKET_MAP[str(MemoryScope.LONG_TERM)])
+
+    def _memory_scope_from_table(self, table_name: str) -> str:
+        for scope, candidate in MEMORY_TABLE_MAP.items():
+            if candidate == table_name:
+                return scope
+        return str(MemoryScope.LONG_TERM)
+
+    def _memory_table_for_id(self, memory_id: str) -> str | None:
+        for table_name in MEMORY_TABLE_MAP.values():
+            if self.db.fetch_one(f"SELECT id FROM {table_name} WHERE id = ?", (memory_id,)):
+                return table_name
+        return None
+
+    def _memory_row_sql(self, table_name: str) -> str:
+        return MEMORY_TABLE_SELECT.format(table=table_name)
+
+    def _memory_row_with_scope(self, table_name: str, row: dict[str, Any] | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        item = dict(row)
+        item["scope"] = self._memory_scope_from_table(table_name)
+        return item
+
+    def _hydrate_memory_row(self, table_name: str, row: dict[str, Any] | None) -> dict[str, Any] | None:
+        item = _deserialize_row(self._memory_row_with_scope(table_name, row))
+        if item is None:
+            return None
+        content_id = item.get("content_id")
+        item["text"] = self.memory_content_store.get_text(self._memory_bucket_for_scope(item["scope"]), content_id) if content_id else ""
+        return item
+
+    def _hydrate_memory_rows(self, table_name: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [item for item in (self._hydrate_memory_row(table_name, row) for row in rows) if item is not None]
+
+    def _list_memory_rows(
+        self,
+        *,
+        scope: str = "all",
+        filters: list[str] | None = None,
+        params: list[Any] | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        sql_filters = filters or ["1 = 1"]
+        sql_params = list(params or [])
+        target_tables = (
+            [(self._memory_table_for_scope(scope), scope)]
+            if scope in MEMORY_TABLE_MAP
+            else [(table_name, table_scope) for table_scope, table_name in MEMORY_TABLE_MAP.items()]
+        )
+        rows: list[dict[str, Any]] = []
+        fetch_size = max(limit + offset, 1)
+        for table_name, _table_scope in target_tables:
+            rows.extend(
+                self._hydrate_memory_rows(
+                    table_name,
+                    self.db.fetch_all(
+                        f"{self._memory_row_sql(table_name)} WHERE {' AND '.join(sql_filters)} ORDER BY updated_at DESC LIMIT ?",
+                        tuple(sql_params + [fetch_size]),
+                    ),
+                )
+            )
+        rows.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+        return rows[offset : offset + limit]
+
+    def _memory_index_payloads(self, memory_ids: list[str]) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+        if not memory_ids:
+            return {}, {}
+        placeholders = ",".join("?" for _ in memory_ids)
+        index_rows = self.db.fetch_all(
+            f"SELECT * FROM memory_index WHERE record_id IN ({placeholders})",
+            tuple(memory_ids),
+        )
+        semantic_rows = self.db.fetch_all(
+            f"SELECT * FROM semantic_index_cache WHERE collection = 'memory_index' AND record_id IN ({placeholders})",
+            tuple(memory_ids),
+        )
+        return (
+            {str(row["record_id"]): row for row in index_rows},
+            {str(row["record_id"]): row for row in semantic_rows},
+        )
 
     def _resolve_vector_backend_name(self) -> str:
-        if self.config.enable_lancedb:
-            return "lancedb"
-        if self.config.enable_faiss:
-            return "faiss"
-        if self.config.index_backend in {"sqlite", "lancedb", "faiss", "none"}:
-            return self.config.index_backend
-        return "sqlite"
+        return "lancedb"
 
     def _resolve_graph_backend_name(self) -> str:
-        if self.config.enable_kuzu:
-            return "kuzu"
-        if self.config.graph_backend in {"sqlite", "kuzu", "none"}:
-            return self.config.graph_backend
-        return "sqlite"
+        return "disabled"
 
     def add(self, messages, **kwargs) -> dict[str, Any]:
         kwargs = self._normalize_add_kwargs(kwargs)
@@ -271,8 +401,11 @@ class AIMemory:
         return {"results": results, "facts": [item["memory"] for item in results]}
 
     def get(self, memory_id: str) -> dict[str, Any] | None:
-        row = self.db.fetch_one("SELECT * FROM memories WHERE id = ?", (memory_id,))
-        return _deserialize_row(row)
+        table_name = self._memory_table_for_id(memory_id)
+        if table_name is None:
+            return None
+        row = self.db.fetch_one(f"{self._memory_row_sql(table_name)} WHERE id = ?", (memory_id,))
+        return self._hydrate_memory_row(table_name, row)
 
     def get_all(
         self,
@@ -328,14 +461,23 @@ class AIMemory:
             sql_filters.append("namespace_key = ?")
             params.append(namespace_filter)
         if scope == str(MemoryScope.SESSION):
-            sql_filters.append("scope = ?")
-            params.append(str(MemoryScope.SESSION))
+            rows = self._list_memory_rows(
+                scope=str(MemoryScope.SESSION),
+                filters=sql_filters,
+                params=params,
+                limit=limit,
+                offset=offset,
+            )
         elif scope == str(MemoryScope.LONG_TERM):
-            sql_filters.append("scope = ?")
-            params.append(str(MemoryScope.LONG_TERM))
-        sql = f"SELECT * FROM memories WHERE {' AND '.join(sql_filters)} ORDER BY updated_at DESC LIMIT ? OFFSET ?"
-        params.extend([limit, offset])
-        rows = _deserialize_rows(self.db.fetch_all(sql, tuple(params)))
+            rows = self._list_memory_rows(
+                scope=str(MemoryScope.LONG_TERM),
+                filters=sql_filters,
+                params=params,
+                limit=limit,
+                offset=offset,
+            )
+        else:
+            rows = self._list_memory_rows(filters=sql_filters, params=params, limit=limit, offset=offset)
         if filters:
             rows = filter_records(rows, filters)
         return {"results": rows, "count": len(rows), "limit": limit, "offset": offset}
@@ -348,19 +490,22 @@ class AIMemory:
         row = self.get(memory_id)
         if row is None:
             raise ValueError(f"Memory `{memory_id}` does not exist.")
+        table_name = self._memory_table_for_id(memory_id)
+        assert table_name is not None
         metadata = merge_metadata(row.get("metadata"), kwargs.pop("metadata", None))
         text = str(kwargs.pop("text", row["text"]))
         summary = str(kwargs.pop("summary", build_summary(split_sentences(text), max_sentences=3, max_chars=200)))
         importance = float(kwargs.pop("importance", row.get("importance", 0.5)))
         status = str(kwargs.pop("status", row.get("status", "active")))
         now = utcnow_iso()
+        self.memory_content_store.put_text(self._memory_bucket_for_scope(row["scope"]), text, key=row["content_id"])
         self.db.execute(
-            """
-            UPDATE memories
-            SET text = ?, summary = ?, importance = ?, status = ?, metadata = ?, updated_at = ?
+            f"""
+            UPDATE {table_name}
+            SET summary = ?, importance = ?, status = ?, metadata = ?, updated_at = ?
             WHERE id = ?
             """,
-            (text, summary, importance, status, json_dumps(metadata), now, memory_id),
+            (summary, importance, status, json_dumps(metadata), now, memory_id),
         )
         self._record_memory_event(memory_id, "UPDATE", {"text": text, "metadata": metadata, "status": status})
         updated = self.get(memory_id)
@@ -376,8 +521,10 @@ class AIMemory:
         row = self.get(memory_id)
         if row is None:
             raise ValueError(f"Memory `{memory_id}` does not exist.")
+        table_name = self._memory_table_for_id(memory_id)
+        assert table_name is not None
         now = utcnow_iso()
-        self.db.execute("UPDATE memories SET status = ?, updated_at = ? WHERE id = ?", ("deleted", now, memory_id))
+        self.db.execute(f"UPDATE {table_name} SET status = ?, updated_at = ? WHERE id = ?", ("deleted", now, memory_id))
         self._delete_memory_index(memory_id)
         self._record_memory_event(memory_id, "DELETE", {"deleted_at": now})
         result = dict(row)
@@ -436,55 +583,54 @@ class AIMemory:
             project_id=kwargs.pop("project_id", None),
             namespace_key=kwargs.pop("namespace_key", None),
         )
-        sql_filters = ["m.status = 'active'"]
+        sql_filters = ["status = 'active'"]
         params: list[Any] = []
         if user_id:
-            sql_filters.append("m.user_id = ?")
+            sql_filters.append("user_id = ?")
             params.append(user_id)
         if owner_agent_id:
-            sql_filters.append("(m.owner_agent_id = ? OR (m.owner_agent_id IS NULL AND m.agent_id = ?))")
+            sql_filters.append("(owner_agent_id = ? OR (owner_agent_id IS NULL AND agent_id = ?))")
             params.extend([owner_agent_id, owner_agent_id])
         if subject_type:
-            sql_filters.append("(m.subject_type = ? OR m.subject_type IS NULL)")
+            sql_filters.append("(subject_type = ? OR subject_type IS NULL)")
             params.append(subject_type)
         if subject_id:
-            sql_filters.append("(m.subject_id = ? OR m.subject_id IS NULL)")
+            sql_filters.append("(subject_id = ? OR subject_id IS NULL)")
             params.append(subject_id)
         if interaction_type:
-            sql_filters.append("(m.interaction_type = ? OR m.interaction_type IS NULL)")
+            sql_filters.append("(interaction_type = ? OR interaction_type IS NULL)")
             params.append(interaction_type)
         if session_id and scope == str(MemoryScope.SESSION):
-            sql_filters.append("m.session_id = ?")
+            sql_filters.append("session_id = ?")
             params.append(session_id)
-        if scope == str(MemoryScope.SESSION):
-            sql_filters.append("m.scope = ?")
-            params.append(str(MemoryScope.SESSION))
-        elif scope == str(MemoryScope.LONG_TERM):
-            sql_filters.append("m.scope = ?")
-            params.append(str(MemoryScope.LONG_TERM))
-        elif session_id:
-            sql_filters.append("(m.scope = ? OR m.session_id = ?)")
-            params.extend([str(MemoryScope.LONG_TERM), session_id])
         if namespace_filter:
-            sql_filters.append("m.namespace_key = ?")
+            sql_filters.append("namespace_key = ?")
             params.append(namespace_filter)
-
-        rows = self.db.fetch_all(
-            f"""
-            SELECT m.*, mi.keywords AS index_keywords, sic.embedding
-            FROM memories m
-            LEFT JOIN memory_index mi ON mi.record_id = m.id
-            LEFT JOIN semantic_index_cache sic ON sic.record_id = m.id
-            WHERE {' AND '.join(sql_filters)}
-            ORDER BY m.updated_at DESC
-            LIMIT ?
-            """,
-            tuple(params + [self.config.memory_policy.search_scan_limit]),
-        )
+        scan_limit = self.config.memory_policy.search_scan_limit
+        if scope == str(MemoryScope.SESSION):
+            rows = self._list_memory_rows(scope=str(MemoryScope.SESSION), filters=sql_filters, params=params, limit=scan_limit)
+        elif scope == str(MemoryScope.LONG_TERM):
+            rows = self._list_memory_rows(scope=str(MemoryScope.LONG_TERM), filters=sql_filters, params=params, limit=scan_limit)
+        else:
+            rows = self._list_memory_rows(filters=sql_filters, params=params, limit=scan_limit)
+            if session_id:
+                rows = [
+                    row
+                    for row in rows
+                    if row.get("scope") == str(MemoryScope.LONG_TERM) or row.get("session_id") == session_id
+                ]
+        index_rows, semantic_rows = self._memory_index_payloads([row["id"] for row in rows])
+        enriched_rows: list[dict[str, Any]] = []
+        for row in rows:
+            enriched = dict(row)
+            record_id = row["id"]
+            enriched["index_keywords"] = index_rows.get(record_id, {}).get("keywords")
+            enriched["embedding"] = semantic_rows.get(record_id, {}).get("embedding")
+            enriched_rows.append(enriched)
         vector_hits = self._vector_hit_map("memory_index", query, limit=max(limit * 4, 24))
         results = self._rank_memory_rows(
             query,
-            rows,
+            enriched_rows,
             half_life_days=self.config.memory_policy.short_term_half_life_days if scope == str(MemoryScope.SESSION) else self.config.memory_policy.long_term_half_life_days,
             threshold=threshold,
             filters=filters,
@@ -704,7 +850,7 @@ class AIMemory:
             "query": query,
             "policy": {
                 "vector_backend": getattr(self.vector_index, "name", "unknown"),
-                "graph_backend": getattr(self.graph_store, "active_backend", getattr(self.graph_store, "backend_name", "unknown")),
+                "graph_backend": getattr(self.graph_store, "active_backend", "disabled"),
                 "diversity_lambda": self.config.memory_policy.diversity_lambda,
                 "scan_limit": self.config.memory_policy.search_scan_limit,
             },
@@ -1143,6 +1289,14 @@ class AIMemory:
         else:
             skill = self.db.fetch_one("SELECT * FROM skills WHERE name = ?", (name,))
         metadata = dict(kwargs.pop("metadata", {}) or {})
+        raw_assets = kwargs.pop("assets", None)
+        skill_markdown = kwargs.pop("skill_markdown", None)
+        files = kwargs.pop("files", None)
+        references = kwargs.pop("references", None)
+        scripts = kwargs.pop("scripts", None)
+        asset_files = raw_assets if looks_like_skill_file_mapping(raw_assets) else None
+        if raw_assets is not None and asset_files is None:
+            metadata["assets"] = raw_assets
         if skill is None:
             skill_id = make_id("skill")
             self.db.execute(
@@ -1194,6 +1348,177 @@ class AIMemory:
         tools = list(kwargs.pop("tools", []) or [])
         tests = list(kwargs.pop("tests", []) or [])
         topics = list(kwargs.pop("topics", []) or [])
+        self._write_skill_version_record(
+            skill_id=skill_id,
+            name=name,
+            description=description,
+            scope=scope,
+            metadata=metadata,
+            version=version,
+            prompt_template=prompt_template,
+            workflow=workflow,
+            schema=schema,
+            tools=tools,
+            tests=tests,
+            topics=topics,
+            skill_markdown=skill_markdown,
+            base_files=None,
+            files=list(files or []),
+            references=references,
+            scripts=scripts,
+            assets=asset_files,
+            now=now,
+        )
+        return self.get_skill(skill_id)
+
+    def register_skill(self, name: str, description: str, **kwargs) -> dict[str, Any]:
+        return self.save_skill(name, description, **kwargs)
+
+    def _load_skill_version_asset(self, version_or_id: dict[str, Any] | str | None) -> dict[str, Any]:
+        if version_or_id is None:
+            return {}
+        object_id = version_or_id.get("object_id") if isinstance(version_or_id, dict) else None
+        if object_id is None and not isinstance(version_or_id, dict):
+            row = self.db.fetch_one("SELECT object_id FROM skill_versions WHERE id = ?", (str(version_or_id),))
+            object_id = row.get("object_id") if row else None
+        if not object_id:
+            return {}
+        object_row = self.db.fetch_one("SELECT object_key FROM objects WHERE id = ?", (object_id,))
+        if object_row is None:
+            return {}
+        try:
+            return json_loads(self.object_store.get_text(object_row["object_key"]), {}) or {}
+        except (FileNotFoundError, UnicodeDecodeError):
+            return {}
+
+    def _skill_version_file_rows(self, skill_version_id: str) -> list[dict[str, Any]]:
+        return _deserialize_rows(
+            self.db.fetch_all(
+                """
+                SELECT sf.*, o.object_key, o.object_type, o.metadata AS object_metadata
+                FROM skill_files sf
+                JOIN objects o ON o.id = sf.object_id
+                WHERE sf.skill_version_id = ?
+                ORDER BY
+                    CASE sf.role
+                        WHEN 'skill_md' THEN 0
+                        WHEN 'reference' THEN 1
+                        WHEN 'script' THEN 2
+                        ELSE 3
+                    END,
+                    sf.relative_path ASC
+                """,
+                (skill_version_id,),
+            ),
+            ("metadata", "object_metadata"),
+        )
+
+    def _skill_version_files(self, skill_version_id: str, *, inline_contents: bool = True) -> list[dict[str, Any]]:
+        files: list[dict[str, Any]] = []
+        for row in self._skill_version_file_rows(skill_version_id):
+            item = {
+                "id": row["id"],
+                "skill_id": row["skill_id"],
+                "skill_version_id": row["skill_version_id"],
+                "object_id": row["object_id"],
+                "object_key": row.get("object_key"),
+                "relative_path": row["relative_path"],
+                "role": row["role"],
+                "mime_type": row.get("mime_type"),
+                "size_bytes": row.get("size_bytes"),
+                "checksum": row.get("checksum"),
+                "metadata": row.get("metadata", {}),
+                "textual": is_textual_skill_file(
+                    relative_path=row["relative_path"],
+                    mime_type=row.get("mime_type"),
+                    role=row.get("role"),
+                ),
+            }
+            if inline_contents and item["textual"] and row.get("object_key"):
+                try:
+                    item["content"] = self.object_store.get_text(row["object_key"])
+                except (FileNotFoundError, UnicodeDecodeError):
+                    item["content"] = None
+            files.append(item)
+        return files
+
+    def _clone_skill_version_file_inputs(
+        self,
+        *,
+        skill_version_id: str,
+        name: str,
+        description: str,
+        prompt_template: str | None,
+        workflow: Any,
+        tools: list[str],
+        topics: list[str],
+    ) -> list[dict[str, Any]]:
+        cloned: list[dict[str, Any]] = []
+        for row in self._skill_version_file_rows(skill_version_id):
+            role = str(row.get("role") or "")
+            metadata = dict(row.get("metadata", {}) or {})
+            if role == "skill_md" and metadata.get("generated"):
+                content: str | bytes = default_skill_markdown(
+                    name=name,
+                    description=description,
+                    prompt_template=prompt_template,
+                    workflow=workflow,
+                    tools=tools,
+                    topics=topics,
+                )
+            elif is_textual_skill_file(
+                relative_path=row["relative_path"],
+                mime_type=row.get("mime_type"),
+                role=role,
+            ):
+                content = self.object_store.get_text(row["object_key"])
+            else:
+                content = self.object_store.get_bytes(row["object_key"])
+            cloned.append(
+                {
+                    "path": row["relative_path"],
+                    "role": role,
+                    "mime_type": row.get("mime_type"),
+                    "content": content,
+                    "metadata": metadata,
+                    "index": role == "reference",
+                }
+            )
+        return cloned
+
+    def _delete_skill_version_artifacts(self, skill_version_id: str) -> None:
+        rows = self.db.fetch_all("SELECT id FROM skill_reference_chunks WHERE skill_version_id = ?", (skill_version_id,))
+        for row in rows:
+            record_id = row["id"]
+            self.db.execute("DELETE FROM skill_reference_index WHERE record_id = ?", (record_id,))
+            self.db.execute("DELETE FROM semantic_index_cache WHERE record_id = ?", (record_id,))
+            self.vector_index.delete("skill_reference_index", record_id)
+        self.db.execute("DELETE FROM skill_reference_chunks WHERE skill_version_id = ?", (skill_version_id,))
+        self.db.execute("DELETE FROM skill_files WHERE skill_version_id = ?", (skill_version_id,))
+
+    def _write_skill_version_record(
+        self,
+        *,
+        skill_id: str,
+        name: str,
+        description: str,
+        scope: dict[str, Any],
+        metadata: dict[str, Any],
+        version: str | None,
+        prompt_template: str | None,
+        workflow: Any,
+        schema: dict[str, Any] | None,
+        tools: list[str],
+        tests: list[dict[str, Any]],
+        topics: list[str],
+        skill_markdown: str | None,
+        base_files: list[dict[str, Any]] | None,
+        files: list[dict[str, Any]] | None,
+        references: dict[str, Any] | list[dict[str, Any]] | None,
+        scripts: dict[str, Any] | list[dict[str, Any]] | None,
+        assets: dict[str, Any] | list[dict[str, Any]] | None,
+        now: str,
+    ) -> dict[str, Any]:
         asset_payload = {
             "name": name,
             "description": description,
@@ -1210,15 +1535,34 @@ class AIMemory:
             suffix=".json",
             prefix=self._object_store_prefix(scope, "skill"),
         )
-        object_row = self._persist_object(stored, mime_type="application/json", metadata={"skill_id": skill_id, **self._scope_metadata(scope), **metadata})
+        object_row = self._persist_object(
+            stored,
+            mime_type="application/json",
+            metadata={"skill_id": skill_id, **self._scope_metadata(scope), **metadata},
+        )
         version_id = make_id("skillver")
+        existing_count = int(
+            self.db.fetch_one("SELECT COUNT(*) AS count FROM skill_versions WHERE skill_id = ?", (skill_id,)).get("count", 0)
+        )
+        resolved_version = str(version or f"v{existing_count + 1}")
         workflow_text = workflow if isinstance(workflow, str) else json_dumps(workflow or {})
         self.db.execute(
             """
             INSERT INTO skill_versions(id, skill_id, version, prompt_template, workflow, schema_json, object_id, changelog, metadata, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (version_id, skill_id, version, prompt_template, workflow_text, json_dumps(schema or {}), object_row["id"], None, json_dumps(metadata), now),
+            (
+                version_id,
+                skill_id,
+                resolved_version,
+                prompt_template,
+                workflow_text,
+                json_dumps(schema or {}),
+                object_row["id"],
+                None,
+                json_dumps(metadata or {}),
+                now,
+            ),
         )
         for tool_name in tools:
             self.db.execute(
@@ -1243,34 +1587,200 @@ class AIMemory:
                     now,
                 ),
             )
-        self._index_skill(
+
+        normalized_files = normalize_skill_package_inputs(
+            name=name,
+            description=description,
+            prompt_template=prompt_template,
+            workflow=workflow,
+            tools=tools,
+            topics=topics,
+            skill_markdown=skill_markdown,
+            base_files=base_files,
+            files=list(files or []),
+            references=references,
+            scripts=scripts,
+            assets=assets,
+        )
+        file_rows: list[dict[str, Any]] = []
+        for entry in normalized_files:
+            relative_path = entry["relative_path"]
+            suffix = "." + relative_path.rsplit(".", 1)[1] if "." in relative_path.rsplit("/", 1)[-1] else ".bin"
+            if entry.get("text_content") is not None:
+                stored_file = self.object_store.put_text(
+                    entry["text_content"],
+                    object_type="skill-files",
+                    suffix=suffix,
+                    prefix=self._object_store_prefix(scope, "skill"),
+                )
+            else:
+                stored_file = self.object_store.put_bytes(
+                    entry["content_bytes"],
+                    object_type="skill-files",
+                    suffix=suffix,
+                    prefix=self._object_store_prefix(scope, "skill"),
+                )
+            object_metadata = {
+                "skill_id": skill_id,
+                "skill_version_id": version_id,
+                "relative_path": relative_path,
+                "role": entry["role"],
+                **self._scope_metadata(scope),
+                **dict(metadata or {}),
+                **dict(entry.get("metadata") or {}),
+            }
+            file_object = self._persist_object(
+                stored_file,
+                mime_type=entry.get("mime_type") or "application/octet-stream",
+                metadata=object_metadata,
+            )
+            file_id = make_id("sfile")
+            file_metadata = {**dict(entry.get("metadata") or {}), "indexable": bool(entry.get("indexable"))}
+            self.db.execute(
+                """
+                INSERT INTO skill_files(id, skill_id, skill_version_id, object_id, relative_path, role, mime_type, size_bytes, checksum, metadata, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    file_id,
+                    skill_id,
+                    version_id,
+                    file_object["id"],
+                    relative_path,
+                    entry["role"],
+                    entry.get("mime_type"),
+                    file_object["size_bytes"],
+                    file_object["checksum"],
+                    json_dumps(file_metadata),
+                    now,
+                ),
+            )
+            file_rows.append(
                 {
-                    "record_id": version_id,
-                    "skill_id": skill_id,
-                    "version": version,
-                    "name": name,
-                "description": description,
-                "text": "\n".join(part for part in [name, description, prompt_template or "", workflow_text, " ".join(topics), " ".join(tools)] if part),
-                "tools": tools,
-                "topics": topics,
-                    "owner_agent_id": owner_agent_id or (skill.get("owner_agent_id") if skill else None),
-                    "source_subject_type": source_subject_type,
-                    "source_subject_id": source_subject_id,
-                    "namespace_key": scope.get("namespace_key") or (skill.get("namespace_key") if skill else None),
-                    "metadata": metadata,
-                    "updated_at": now,
+                    "id": file_id,
+                    "object_id": file_object["id"],
+                    "relative_path": relative_path,
+                    "role": entry["role"],
+                    "mime_type": entry.get("mime_type"),
+                    "metadata": file_metadata,
+                    "text_content": entry.get("text_content"),
+                    "indexable": bool(entry.get("indexable")),
                 }
             )
-        return self.get_skill(skill_id)
 
-    def register_skill(self, name: str, description: str, **kwargs) -> dict[str, Any]:
-        return self.save_skill(name, description, **kwargs)
+        for file_row in file_rows:
+            if not (file_row["role"] == "reference" and file_row["indexable"] and file_row.get("text_content")):
+                continue
+            title = f"{name}:{file_row['relative_path']}"
+            for index, chunk in enumerate(
+                chunk_text(
+                    str(file_row["text_content"]),
+                    chunk_size=int(self.config.memory_policy.chunk_size),
+                    overlap=int(self.config.memory_policy.chunk_overlap),
+                )
+            ):
+                chunk_id = make_id("skref")
+                chunk_metadata = {
+                    "chunk_index": index,
+                    "relative_path": file_row["relative_path"],
+                    "role": file_row["role"],
+                    **self._scope_metadata(scope),
+                    **dict(metadata or {}),
+                    **dict(file_row.get("metadata") or {}),
+                }
+                self.db.execute(
+                    """
+                    INSERT INTO skill_reference_chunks(id, skill_id, skill_version_id, file_id, object_id, relative_path, chunk_index, title, content, metadata, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        chunk_id,
+                        skill_id,
+                        version_id,
+                        file_row["id"],
+                        file_row["object_id"],
+                        file_row["relative_path"],
+                        index,
+                        title,
+                        chunk,
+                        json_dumps(chunk_metadata),
+                        now,
+                    ),
+                )
+                self._index_skill_reference_chunk(
+                    {
+                        "record_id": chunk_id,
+                        "skill_id": skill_id,
+                        "skill_version_id": version_id,
+                        "file_id": file_row["id"],
+                        "object_id": file_row["object_id"],
+                        "owner_agent_id": scope.get("owner_agent_id"),
+                        "source_subject_type": scope.get("subject_type"),
+                        "source_subject_id": scope.get("subject_id"),
+                        "namespace_key": scope.get("namespace_key"),
+                        "relative_path": file_row["relative_path"],
+                        "title": title,
+                        "text": chunk,
+                        "metadata": chunk_metadata,
+                        "updated_at": now,
+                    }
+                )
+
+        skill_markdown_text = next(
+            (str(file_row.get("text_content") or "") for file_row in file_rows if file_row["role"] == "skill_md"),
+            "",
+        )
+        self._index_skill(
+            {
+                "record_id": version_id,
+                "skill_id": skill_id,
+                "version": resolved_version,
+                "name": name,
+                "description": description,
+                "text": "\n".join(
+                    part
+                    for part in [
+                        name,
+                        description,
+                        skill_markdown_text,
+                        prompt_template or "",
+                        workflow_text,
+                        " ".join(topics),
+                        " ".join(tools),
+                    ]
+                    if part
+                ),
+                "tools": tools,
+                "topics": topics,
+                "owner_agent_id": scope.get("owner_agent_id"),
+                "source_subject_type": scope.get("subject_type"),
+                "source_subject_id": scope.get("subject_id"),
+                "namespace_key": scope.get("namespace_key"),
+                "metadata": metadata,
+                "updated_at": now,
+            }
+        )
+        return {"id": version_id, "version": resolved_version}
 
     def get_skill(self, skill_id: str) -> dict[str, Any] | None:
         skill = _deserialize_row(self.db.fetch_one("SELECT * FROM skills WHERE id = ?", (skill_id,)))
         if skill is None:
             return None
         skill["versions"] = _deserialize_rows(self.db.fetch_all("SELECT * FROM skill_versions WHERE skill_id = ? ORDER BY created_at DESC", (skill_id,)), ("metadata", "schema_json"))
+        for version in skill["versions"]:
+            payload = self._load_skill_version_asset(version)
+            version["files"] = self._skill_version_files(version["id"])
+            version["payload"] = payload
+            version["tools"] = payload.get("tools", [])
+            version["topics"] = payload.get("topics", [])
+            version["tests_payload"] = payload.get("tests", [])
+            version["skill_markdown"] = next(
+                (item.get("content") for item in version["files"] if item.get("role") == "skill_md"),
+                None,
+            )
+            version["references"] = [item for item in version["files"] if item.get("role") == "reference"]
+            version["scripts"] = [item for item in version["files"] if item.get("role") == "script"]
+            version["assets"] = [item for item in version["files"] if item.get("role") == "asset"]
         skill["bindings"] = _deserialize_rows(
             self.db.fetch_all(
                 """
@@ -1295,6 +1805,13 @@ class AIMemory:
             ),
             ("input_payload", "expected_output", "metadata"),
         )
+        if skill["versions"]:
+            latest = skill["versions"][0]
+            skill["files"] = latest.get("files", [])
+            skill["skill_markdown"] = latest.get("skill_markdown")
+            skill["references"] = latest.get("references", [])
+            skill["scripts"] = latest.get("scripts", [])
+            skill["assets"] = latest.get("assets", [])
         return skill
 
     def list_skills(self, status: str | None = None) -> dict[str, Any]:
@@ -1356,6 +1873,8 @@ class AIMemory:
             tuple(params + [max(limit * 12, self.config.memory_policy.search_scan_limit // 2)]),
         )
         vector_hits = self._vector_hit_map("skill_index", query, limit=max(limit * 4, 24))
+        for version_id, score in self._skill_reference_version_hit_map(query, limit=max(limit * 4, 24)).items():
+            vector_hits[version_id] = max(vector_hits.get(version_id, 0.0), score)
         ranked = self._rank_rows(
             query,
             rows,
@@ -1364,6 +1883,97 @@ class AIMemory:
             keywords_getter=lambda row: extract_keywords(" ".join(part for part in [row.get("name"), row.get("description"), row.get("text")] if part)),
             updated_at_key="updated_at",
             importance_getter=lambda row: 0.78,
+            half_life_days=self.config.memory_policy.knowledge_half_life_days,
+            threshold=threshold,
+            filters=filters,
+            vector_hits=vector_hits,
+            affinity={"owner_agent_id": owner_agent_id, "subject_type": subject_type, "subject_id": subject_id},
+        )
+        return {"results": ranked[:limit]}
+
+    def search_skill_references(
+        self,
+        query: str,
+        *,
+        skill_id: str | None = None,
+        skill_version_id: str | None = None,
+        path_prefix: str | None = None,
+        owner_agent_id: str | None = None,
+        subject_type: str | None = None,
+        subject_id: str | None = None,
+        platform_id: str | None = None,
+        workspace_id: str | None = None,
+        team_id: str | None = None,
+        project_id: str | None = None,
+        namespace_key: str | None = None,
+        limit: int = 10,
+        threshold: float = 0.0,
+        filters: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        sql_filters = ["s.status = 'active'"]
+        params: list[Any] = []
+        if skill_id:
+            sql_filters.append("sri.skill_id = ?")
+            params.append(skill_id)
+        if skill_version_id:
+            sql_filters.append("sri.skill_version_id = ?")
+            params.append(skill_version_id)
+        if owner_agent_id:
+            sql_filters.append("(sri.owner_agent_id = ? OR sri.owner_agent_id IS NULL)")
+            params.append(owner_agent_id)
+        if subject_type:
+            sql_filters.append("(sri.source_subject_type = ? OR sri.source_subject_type IS NULL)")
+            params.append(subject_type)
+        if subject_id:
+            sql_filters.append("(sri.source_subject_id = ? OR sri.source_subject_id IS NULL)")
+            params.append(subject_id)
+        if path_prefix:
+            sql_filters.append("sri.relative_path LIKE ?")
+            params.append(f"{path_prefix}%")
+        namespace_filter = self._namespace_filter_value(
+            owner_agent_id=owner_agent_id,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            platform_id=platform_id,
+            workspace_id=workspace_id,
+            team_id=team_id,
+            project_id=project_id,
+            namespace_key=namespace_key,
+        )
+        if namespace_filter:
+            sql_filters.append("sri.namespace_key = ?")
+            params.append(namespace_filter)
+        rows = self.db.fetch_all(
+            f"""
+            SELECT
+                sri.*,
+                sri.source_subject_type AS subject_type,
+                sri.source_subject_id AS subject_id,
+                src.chunk_index,
+                s.name AS skill_name,
+                s.description AS skill_description,
+                sv.version,
+                sic.embedding
+            FROM skill_reference_index sri
+            JOIN skills s ON s.id = sri.skill_id
+            JOIN skill_versions sv ON sv.id = sri.skill_version_id
+            LEFT JOIN skill_reference_chunks src ON src.id = sri.record_id
+            LEFT JOIN semantic_index_cache sic ON sic.record_id = sri.record_id
+            WHERE {' AND '.join(sql_filters)}
+            ORDER BY sri.updated_at DESC
+            LIMIT ?
+            """,
+            tuple(params + [max(limit * 12, self.config.memory_policy.search_scan_limit // 2)]),
+        )
+        vector_hits = self._vector_hit_map("skill_reference_index", query, limit=max(limit * 4, 24))
+        ranked = self._rank_rows(
+            query,
+            rows,
+            domain="skill_reference",
+            text_key="text",
+            keywords_getter=lambda row: _loads(row.get("keywords"), []),
+            updated_at_key="updated_at",
+            importance_getter=lambda row: 0.7,
             half_life_days=self.config.memory_policy.knowledge_half_life_days,
             threshold=threshold,
             filters=filters,
@@ -1381,22 +1991,18 @@ class AIMemory:
         now = utcnow_iso()
         metadata = dict(kwargs.pop("metadata", {}) or {})
         payload = {"memory": memory, "metadata": metadata}
-        stored = self.object_store.put_text(
-            json_dumps(payload),
-            object_type="archive",
-            suffix=".json",
-            prefix=self._object_store_prefix(memory, "archive"),
-        )
-        object_row = self._persist_object(stored, mime_type="application/json", metadata={"memory_id": memory_id, **self._scope_metadata(memory), **metadata})
         archive_id = make_id("arch")
+        content_id = make_uuid7()
+        self.memory_content_store.put_json("archive", payload, key=content_id)
         summary_text = memory.get("summary") or build_summary(split_sentences(memory["text"]), max_sentences=3, max_chars=240)
         self.db.execute(
             """
-            INSERT INTO archive_units(id, domain, source_id, user_id, owner_agent_id, subject_type, subject_id, interaction_type, namespace_key, source_type, session_id, object_id, summary, metadata, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO archive_memories(id, content_id, domain, source_id, user_id, owner_agent_id, subject_type, subject_id, interaction_type, namespace_key, source_type, session_id, summary, metadata, content_format, created_at, updated_at, last_rehydrated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 archive_id,
+                content_id,
                 "memory",
                 memory_id,
                 memory.get("user_id"),
@@ -1407,10 +2013,12 @@ class AIMemory:
                 memory.get("namespace_key"),
                 "memory",
                 memory.get("session_id"),
-                object_row["id"],
                 summary_text,
                 json_dumps(merge_metadata(metadata, self._scope_metadata(memory))),
+                "application/json",
                 now,
+                now,
+                None,
             ),
         )
         summary_id = make_id("archsum")
@@ -1422,7 +2030,9 @@ class AIMemory:
             """,
             (summary_id, archive_id, summary_text, json_dumps(highlights), json_dumps(metadata), now),
         )
-        self.db.execute("UPDATE memories SET status = ?, archived_at = ?, updated_at = ? WHERE id = ?", ("archived", now, now, memory_id))
+        table_name = self._memory_table_for_id(memory_id)
+        assert table_name is not None
+        self.db.execute(f"UPDATE {table_name} SET status = ?, archived_at = ?, updated_at = ? WHERE id = ?", ("archived", now, now, memory_id))
         self._delete_memory_index(memory_id)
         self._index_archive_summary(
             {
@@ -1479,21 +2089,17 @@ class AIMemory:
             "memories": memories,
             "compression": compression.as_dict(),
         }
-        stored = self.object_store.put_text(
-            json_dumps(payload),
-            object_type="archive",
-            suffix=".json",
-            prefix=self._object_store_prefix(session, "archive"),
-        )
-        object_row = self._persist_object(stored, mime_type="application/json", metadata={"session_id": session_id, **self._scope_metadata(session), **metadata})
         archive_id = make_id("arch")
+        content_id = make_uuid7()
+        self.memory_content_store.put_json("archive", payload, key=content_id)
         self.db.execute(
             """
-            INSERT INTO archive_units(id, domain, source_id, user_id, owner_agent_id, subject_type, subject_id, interaction_type, namespace_key, source_type, session_id, object_id, summary, metadata, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO archive_memories(id, content_id, domain, source_id, user_id, owner_agent_id, subject_type, subject_id, interaction_type, namespace_key, source_type, session_id, summary, metadata, content_format, created_at, updated_at, last_rehydrated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 archive_id,
+                content_id,
                 "session",
                 session_id,
                 session.get("user_id"),
@@ -1504,10 +2110,12 @@ class AIMemory:
                 session.get("namespace_key"),
                 "session",
                 session_id,
-                object_row["id"],
                 compression.summary,
                 json_dumps(merge_metadata(metadata, self._scope_metadata(session))),
+                "application/json",
                 now,
+                now,
+                None,
             ),
         )
         summary_id = make_id("archsum")
@@ -1539,7 +2147,9 @@ class AIMemory:
         self.db.execute("UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?", ("archived", now, session_id))
         for item in memories:
             if item.get("status") == "active":
-                self.db.execute("UPDATE memories SET status = ?, archived_at = ?, updated_at = ? WHERE id = ?", ("archived", now, now, item["id"]))
+                table_name = self._memory_table_for_id(item["id"])
+                if table_name:
+                    self.db.execute(f"UPDATE {table_name} SET status = ?, archived_at = ?, updated_at = ? WHERE id = ?", ("archived", now, now, item["id"]))
                 self._delete_memory_index(item["id"])
         return {
             "archive": self.get_archive_unit(archive_id),
@@ -1547,7 +2157,7 @@ class AIMemory:
         }
 
     def get_archive_unit(self, archive_unit_id: str) -> dict[str, Any] | None:
-        archive = _deserialize_row(self.db.fetch_one("SELECT * FROM archive_units WHERE id = ?", (archive_unit_id,)))
+        archive = _deserialize_row(self.db.fetch_one("SELECT * FROM archive_memories WHERE id = ?", (archive_unit_id,)))
         if archive is None:
             return None
         archive["summaries"] = _deserialize_rows(self.db.fetch_all("SELECT * FROM archive_summaries WHERE archive_unit_id = ? ORDER BY created_at DESC", (archive_unit_id,)), ("highlights", "metadata"))
@@ -1988,19 +2598,18 @@ class AIMemory:
 
     def cleanup_low_value_memories(self, **kwargs) -> dict[str, Any]:
         limit = int(kwargs.pop("limit", 20))
-        rows = _deserialize_rows(
-            self.db.fetch_all(
-                """
-                SELECT m.*, sic.fingerprint
-                FROM memories m
-                LEFT JOIN semantic_index_cache sic ON sic.record_id = m.id
-                WHERE m.scope = ? AND m.status = 'active'
-                ORDER BY m.updated_at ASC
-                LIMIT ?
-                """,
-                (str(MemoryScope.LONG_TERM), max(limit * 4, 80)),
+        rows = list(
+            reversed(
+                self._list_memory_rows(
+                    scope=str(MemoryScope.LONG_TERM),
+                    filters=["status = 'active'"],
+                    limit=max(limit * 4, 80),
+                )
             )
         )
+        _index_rows, semantic_rows = self._memory_index_payloads([row["id"] for row in rows])
+        for row in rows:
+            row["fingerprint"] = semantic_rows.get(row["id"], {}).get("fingerprint")
         archived: list[dict[str, Any]] = []
         seen: list[dict[str, Any]] = []
         for row in rows:
@@ -2030,11 +2639,9 @@ class AIMemory:
 
     def project(self, limit: int | None = None) -> dict[str, Any]:
         projected = {"memory": 0, "knowledge": 0, "skill": 0, "archive": 0}
-        rows = _deserialize_rows(
-            self.db.fetch_all(
-                "SELECT * FROM memories WHERE status = 'active' ORDER BY updated_at DESC LIMIT ?",
-                (limit or self.config.memory_policy.search_scan_limit,),
-            )
+        rows = self._list_memory_rows(
+            filters=["status = 'active'"],
+            limit=(limit or self.config.memory_policy.search_scan_limit),
         )
         for row in rows:
             self._index_memory(row)
@@ -2086,6 +2693,22 @@ class AIMemory:
             combined = "\n".join(part for part in [row["name"], row["description"], row.get("prompt_template"), row.get("workflow")] if part)
             self._index_skill({**row, "text": combined, "tools": [], "topics": []})
             projected["skill"] += 1
+        reference_rows = _deserialize_rows(
+            self.db.fetch_all(
+                """
+                SELECT src.id AS record_id, src.skill_id, src.skill_version_id, src.file_id, src.object_id, sri.owner_agent_id, sri.source_subject_type,
+                       sri.source_subject_id, sri.namespace_key, src.relative_path, src.title, src.content AS text, src.metadata, sv.created_at AS updated_at
+                FROM skill_reference_chunks src
+                JOIN skill_versions sv ON sv.id = src.skill_version_id
+                LEFT JOIN skill_reference_index sri ON sri.record_id = src.id
+                ORDER BY sv.created_at DESC
+                LIMIT ?
+                """,
+                (limit or self.config.memory_policy.search_scan_limit,),
+            )
+        )
+        for row in reference_rows:
+            self._index_skill_reference_chunk(row)
         archive_rows = _deserialize_rows(
             self.db.fetch_all(
                 """
@@ -2111,10 +2734,10 @@ class AIMemory:
                     "local_only": True,
                     "llm_required": False,
                     "portable_storage": True,
+                    "fixed_storage_stack": True,
                     "multi_domain_memory": True,
                     "agent_facing_mcp": True,
                     "team_scoped_namespace": True,
-                    "plugin_relational_storage": True,
                 },
             ),
             "embeddings": describe_embedding_runtime(),
@@ -2150,7 +2773,7 @@ class AIMemory:
                     "tools": [item["name"] for item in self.create_mcp_adapter().tool_specs()],
                     "litellm": self.config.providers.as_litellm_kwargs(),
                     "storage_layout": self.storage_layout(),
-                    "relational_backend": self.config.relational_backend,
+                    "relational_backend": "sqlite",
                 },
             ),
         }
@@ -2275,6 +2898,7 @@ class AIMemory:
     def close(self) -> None:
         if self._closed:
             return
+        self.memory_content_store.close()
         self.db.close()
         self._closed = True
 
@@ -2468,19 +3092,23 @@ class AIMemory:
         scope = self._resolve_scope(**scope_kwargs)
         return {
             "scope": scope,
-            "relational_backend": self.config.relational_backend,
+            "relational_backend": "sqlite",
+            "content_backend": "lmdb",
+            "lmdb_path": str(self.config.lmdb_path),
             "vector_backend": self._resolve_vector_backend_name(),
             "graph_backend": self._resolve_graph_backend_name(),
             "domains": {
                 "long_term_memory": {
-                    "tables": ["memories", "memory_index"],
+                    "tables": ["long_term_memories", "memory_index"],
+                    "lmdb_bucket": "long_term",
                     "object_prefix": self._object_store_prefix(scope, "memory"),
                     "scope": str(MemoryScope.LONG_TERM),
                     "strategy": "dedupe + semantic distill + hybrid retrieval",
                     "compression_threshold_chars": self.config.memory_policy.long_term_char_threshold,
                 },
                 "short_term_memory": {
-                    "tables": ["conversation_turns", "working_memory_snapshots", "memories"],
+                    "tables": ["conversation_turns", "working_memory_snapshots", "short_term_memories"],
+                    "lmdb_bucket": "short_term",
                     "object_prefix": self._object_store_prefix(scope, "interaction"),
                     "scope": str(MemoryScope.SESSION),
                     "strategy": "session turns + salience compression + promotion",
@@ -2492,12 +3120,13 @@ class AIMemory:
                     "strategy": "chunk + semantic index + lightweight rerank",
                 },
                 "skill": {
-                    "tables": ["skills", "skill_versions", "skill_index"],
+                    "tables": ["skills", "skill_versions", "skill_files", "skill_reference_chunks", "skill_index", "skill_reference_index"],
                     "object_prefix": self._object_store_prefix(scope, "skill"),
                     "strategy": "versioned procedural memory + semantic search",
                 },
                 "archive": {
-                    "tables": ["archive_units", "archive_summaries", "archive_summary_index"],
+                    "tables": ["archive_memories", "archive_summaries", "archive_summary_index"],
+                    "lmdb_bucket": "archive",
                     "object_prefix": self._object_store_prefix(scope, "archive"),
                     "strategy": "budget compression + low-cost summary retrieval",
                     "compression_threshold_chars": self.config.memory_policy.archive_char_threshold,
@@ -2679,8 +3308,8 @@ class AIMemory:
 
     def _background_texts(self, *, context: MemoryScopeContext, long_term: bool) -> list[str]:
         scope = str(MemoryScope.LONG_TERM if long_term else MemoryScope.SESSION)
-        filters = ["status = 'active'", "scope = ?"]
-        params: list[Any] = [scope]
+        filters = ["status = 'active'"]
+        params: list[Any] = []
         if context.user_id:
             filters.append("user_id = ?")
             params.append(context.user_id)
@@ -2702,9 +3331,11 @@ class AIMemory:
         if not long_term and context.session_id:
             filters.append("session_id = ?")
             params.append(context.session_id)
-        rows = self.db.fetch_all(
-            f"SELECT text FROM memories WHERE {' AND '.join(filters)} ORDER BY updated_at DESC LIMIT ?",
-            tuple(params + [self.config.memory_policy.background_sample_limit]),
+        rows = self._list_memory_rows(
+            scope=scope,
+            filters=filters,
+            params=params,
+            limit=self.config.memory_policy.background_sample_limit,
         )
         return [str(item.get("text") or "") for item in rows if str(item.get("text") or "").strip()]
 
@@ -2756,6 +3387,7 @@ class AIMemory:
         namespace_key = resolved_scope.get("namespace_key")
         metadata = merge_metadata(metadata or {}, self._scope_metadata(resolved_scope))
         now = utcnow_iso()
+        table_name = self._memory_table_for_scope(scope)
         existing, relation = self._find_existing_memory(
             cleaned,
             user_id=user_id,
@@ -2770,9 +3402,11 @@ class AIMemory:
         if existing is not None and relation == "duplicate":
             merged_metadata = merge_metadata(existing.get("metadata"), metadata)
             new_importance = max(float(existing.get("importance", 0.5) or 0.0), float(importance))
+            existing_table = self._memory_table_for_id(existing["id"])
+            assert existing_table is not None
             self.db.execute(
-                """
-                UPDATE memories
+                f"""
+                UPDATE {existing_table}
                 SET importance = ?, namespace_key = ?, metadata = ?, updated_at = ?
                 WHERE id = ?
                 """,
@@ -2789,13 +3423,16 @@ class AIMemory:
             merged_summary = build_summary(split_sentences(merged_text), max_sentences=3, max_chars=220)
             merged_metadata = merge_metadata(existing.get("metadata"), metadata)
             new_importance = max(float(existing.get("importance", 0.5) or 0.0), float(importance))
+            existing_table = self._memory_table_for_id(existing["id"])
+            assert existing_table is not None
+            self.memory_content_store.put_text(self._memory_bucket_for_scope(existing["scope"]), merged_text, key=existing["content_id"])
             self.db.execute(
-                """
-                UPDATE memories
-                SET text = ?, summary = ?, importance = ?, namespace_key = ?, metadata = ?, updated_at = ?
+                f"""
+                UPDATE {existing_table}
+                SET summary = ?, importance = ?, namespace_key = ?, metadata = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (merged_text, merged_summary, new_importance, namespace_key or existing.get("namespace_key"), json_dumps(merged_metadata), now, existing["id"]),
+                (merged_summary, new_importance, namespace_key or existing.get("namespace_key"), json_dumps(merged_metadata), now, existing["id"]),
             )
             self._record_memory_event(existing["id"], "MERGE", {"incoming_text": cleaned})
             merged = self.get(existing["id"])
@@ -2805,14 +3442,17 @@ class AIMemory:
             return merged
 
         memory_id = make_id("mem")
+        content_id = make_uuid7()
         summary = build_summary(split_sentences(cleaned), max_sentences=3, max_chars=220)
+        self.memory_content_store.put_text(self._memory_bucket_for_scope(scope), cleaned, key=content_id)
         self.db.execute(
-            """
-            INSERT INTO memories(id, user_id, agent_id, owner_agent_id, subject_type, subject_id, interaction_type, namespace_key, session_id, run_id, source_session_id, source_run_id, scope, memory_type, text, summary, importance, status, source, metadata, created_at, updated_at, archived_at)
+            f"""
+            INSERT INTO {table_name}(id, content_id, user_id, agent_id, owner_agent_id, subject_type, subject_id, interaction_type, namespace_key, session_id, run_id, source_session_id, source_run_id, memory_type, summary, importance, status, source, metadata, content_format, created_at, updated_at, archived_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 memory_id,
+                content_id,
                 user_id,
                 owner_agent_id,
                 owner_agent_id,
@@ -2824,14 +3464,13 @@ class AIMemory:
                 run_id,
                 session_id,
                 run_id,
-                scope,
                 memory_type,
-                cleaned,
                 summary,
                 float(importance),
                 "active",
                 source,
                 json_dumps(metadata),
+                "text/plain",
                 now,
                 now,
                 None,
@@ -2857,39 +3496,30 @@ class AIMemory:
         session_id: str | None,
         scope: str,
     ) -> tuple[dict[str, Any] | None, str | None]:
-        filters = ["m.user_id = ?", "m.scope = ?", "m.status = 'active'"]
-        params: list[Any] = [user_id, scope]
+        filters = ["user_id = ?", "status = 'active'"]
+        params: list[Any] = [user_id]
         if owner_agent_id:
-            filters.append("(m.owner_agent_id = ? OR (m.owner_agent_id IS NULL AND m.agent_id = ?))")
+            filters.append("(owner_agent_id = ? OR (owner_agent_id IS NULL AND agent_id = ?))")
             params.extend([owner_agent_id, owner_agent_id])
         if subject_type:
-            filters.append("(m.subject_type = ? OR m.subject_type IS NULL)")
+            filters.append("(subject_type = ? OR subject_type IS NULL)")
             params.append(subject_type)
         if subject_id:
-            filters.append("(m.subject_id = ? OR m.subject_id IS NULL)")
+            filters.append("(subject_id = ? OR subject_id IS NULL)")
             params.append(subject_id)
         if interaction_type:
-            filters.append("(m.interaction_type = ? OR m.interaction_type IS NULL)")
+            filters.append("(interaction_type = ? OR interaction_type IS NULL)")
             params.append(interaction_type)
         if namespace_key:
-            filters.append("m.namespace_key = ?")
+            filters.append("namespace_key = ?")
             params.append(namespace_key)
         if scope == str(MemoryScope.SESSION) and session_id:
-            filters.append("m.session_id = ?")
+            filters.append("session_id = ?")
             params.append(session_id)
-        rows = _deserialize_rows(
-            self.db.fetch_all(
-                f"""
-                SELECT m.*, sic.fingerprint
-                FROM memories m
-                LEFT JOIN semantic_index_cache sic ON sic.record_id = m.id
-                WHERE {' AND '.join(filters)}
-                ORDER BY m.updated_at DESC
-                LIMIT ?
-                """,
-                tuple(params + [48]),
-            )
-        )
+        rows = self._list_memory_rows(scope=scope, filters=filters, params=params, limit=48)
+        _index_rows, semantic_rows = self._memory_index_payloads([row["id"] for row in rows])
+        for row in rows:
+            row["fingerprint"] = semantic_rows.get(row["id"], {}).get("fingerprint")
         current_fingerprint = fingerprint(text)
         best_duplicate = None
         best_merge = None
@@ -2935,6 +3565,7 @@ class AIMemory:
 
     def _index_memory(self, memory: dict[str, Any]) -> None:
         keywords = extract_keywords(memory["text"])
+        index_text = " ".join(keywords[:24]) or str(memory.get("summary") or "")[:120]
         self.db.execute(
             """
             INSERT INTO memory_index(record_id, domain, scope, user_id, owner_agent_id, subject_type, subject_id, interaction_type, namespace_key, session_id, text, keywords, score_boost, updated_at, metadata)
@@ -2965,21 +3596,22 @@ class AIMemory:
                 memory.get("interaction_type"),
                 memory.get("namespace_key"),
                 memory.get("session_id"),
-                memory["text"],
+                index_text,
                 json_dumps(keywords),
                 round(float(memory.get("importance", 0.5) or 0.0) * 0.08, 6),
                 memory["updated_at"],
-                json_dumps(memory.get("metadata", {})),
+                json_dumps({"content_id": memory.get("content_id"), **dict(memory.get("metadata", {}))}),
             ),
         )
         self._index_semantic_record(
             collection="memory_index",
             record_id=memory["id"],
             domain="memory",
-            text=memory["text"],
+            text=index_text,
+            semantic_source_text=memory["text"],
             updated_at=memory["updated_at"],
             quality=float(memory.get("importance", 0.5) or 0.0),
-            metadata={"memory_type": memory.get("memory_type"), "scope": memory.get("scope"), **dict(memory.get("metadata", {}))},
+            metadata={"content_id": memory.get("content_id"), "memory_type": memory.get("memory_type"), "scope": memory.get("scope"), **dict(memory.get("metadata", {}))},
             keywords=keywords,
         )
         self.graph_store.upsert_node("memory", memory["id"], memory.get("summary") or memory["text"][:120], memory.get("metadata"))
@@ -3086,6 +3718,66 @@ class AIMemory:
         )
         self.graph_store.upsert_node("skill", payload["skill_id"], payload["name"], payload.get("metadata"))
 
+    def _index_skill_reference_chunk(self, payload: dict[str, Any]) -> None:
+        keywords = extract_keywords(" ".join(part for part in [payload.get("title"), payload.get("text")] if part))
+        self.db.execute(
+            """
+            INSERT INTO skill_reference_index(
+                record_id, skill_id, skill_version_id, file_id, object_id, owner_agent_id, source_subject_type, source_subject_id,
+                namespace_key, relative_path, title, text, keywords, updated_at, metadata
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(record_id) DO UPDATE SET
+                skill_id = excluded.skill_id,
+                skill_version_id = excluded.skill_version_id,
+                file_id = excluded.file_id,
+                object_id = excluded.object_id,
+                owner_agent_id = excluded.owner_agent_id,
+                source_subject_type = excluded.source_subject_type,
+                source_subject_id = excluded.source_subject_id,
+                namespace_key = excluded.namespace_key,
+                relative_path = excluded.relative_path,
+                title = excluded.title,
+                text = excluded.text,
+                keywords = excluded.keywords,
+                updated_at = excluded.updated_at,
+                metadata = excluded.metadata
+            """,
+            (
+                payload["record_id"],
+                payload["skill_id"],
+                payload["skill_version_id"],
+                payload["file_id"],
+                payload["object_id"],
+                payload.get("owner_agent_id"),
+                payload.get("source_subject_type"),
+                payload.get("source_subject_id"),
+                payload.get("namespace_key"),
+                payload["relative_path"],
+                payload.get("title"),
+                payload["text"],
+                json_dumps(keywords),
+                payload["updated_at"],
+                json_dumps(payload.get("metadata", {})),
+            ),
+        )
+        self._index_semantic_record(
+            collection="skill_reference_index",
+            record_id=payload["record_id"],
+            domain="skill",
+            text=payload["text"],
+            updated_at=payload["updated_at"],
+            quality=0.76,
+            metadata={
+                "skill_id": payload["skill_id"],
+                "skill_version_id": payload["skill_version_id"],
+                "file_id": payload["file_id"],
+                "relative_path": payload["relative_path"],
+                **dict(payload.get("metadata", {})),
+            },
+            keywords=keywords,
+        )
+
     def _index_archive_summary(self, payload: dict[str, Any]) -> None:
         keywords = payload.get("keywords") or extract_keywords(payload["text"])
         self.db.execute(
@@ -3145,15 +3837,17 @@ class AIMemory:
         record_id: str,
         domain: str,
         text: str,
+        semantic_source_text: str | None = None,
         updated_at: str,
         quality: float,
         metadata: dict[str, Any],
         keywords: list[str],
     ) -> None:
+        source_text = semantic_source_text if semantic_source_text is not None else text
         payload = {
             "domain": domain,
-            "embedding": json_dumps([] if not text else self._embedding_for_text(text)),
-            "fingerprint": fingerprint(text),
+            "embedding": json_dumps([] if not source_text else self._embedding_for_text(source_text)),
+            "fingerprint": fingerprint(source_text),
             "quality": quality,
             "updated_at": updated_at,
             "metadata": json_dumps(metadata),
@@ -3193,31 +3887,22 @@ class AIMemory:
 
     def _link_memory_relations(self, memory: dict[str, Any]) -> None:
         self.db.execute("DELETE FROM memory_links WHERE source_memory_id = ?", (memory["id"],))
-        filters = ["m.id != ?", "m.status = 'active'", "m.user_id = ?"]
+        filters = ["id != ?", "status = 'active'", "user_id = ?"]
         params: list[Any] = [memory["id"], memory.get("user_id")]
         owner_agent_id = memory.get("owner_agent_id") or memory.get("agent_id")
         if owner_agent_id:
-            filters.append("(m.owner_agent_id = ? OR (m.owner_agent_id IS NULL AND m.agent_id = ?))")
+            filters.append("(owner_agent_id = ? OR (owner_agent_id IS NULL AND agent_id = ?))")
             params.extend([owner_agent_id, owner_agent_id])
         if memory.get("subject_type"):
-            filters.append("(m.subject_type = ? OR m.subject_type IS NULL)")
+            filters.append("(subject_type = ? OR subject_type IS NULL)")
             params.append(memory.get("subject_type"))
         if memory.get("subject_id"):
-            filters.append("(m.subject_id = ? OR m.subject_id IS NULL)")
+            filters.append("(subject_id = ? OR subject_id IS NULL)")
             params.append(memory.get("subject_id"))
-        candidates = _deserialize_rows(
-            self.db.fetch_all(
-                f"""
-                SELECT m.id, m.text, sic.fingerprint
-                FROM memories m
-                LEFT JOIN semantic_index_cache sic ON sic.record_id = m.id
-                WHERE {' AND '.join(filters)}
-                ORDER BY m.updated_at DESC
-                LIMIT 24
-                """,
-                tuple(params),
-            )
-        )
+        candidates = self._list_memory_rows(scope=memory.get("scope") or "all", filters=filters, params=params, limit=24)
+        _index_rows, semantic_rows = self._memory_index_payloads([row["id"] for row in candidates])
+        for candidate in candidates:
+            candidate["fingerprint"] = semantic_rows.get(candidate["id"], {}).get("fingerprint")
         relation_count = 0
         for candidate in candidates:
             similarity = semantic_similarity(memory.get("text"), candidate.get("text"))
@@ -3243,6 +3928,22 @@ class AIMemory:
                 continue
             distance = float(row.get("_distance", 1.0) or 1.0)
             hits[record_id] = max(hits.get(record_id, 0.0), max(0.0, 1.0 - distance))
+        return hits
+
+    def _skill_reference_version_hit_map(self, query: str, *, limit: int) -> dict[str, float]:
+        hits: dict[str, float] = {}
+        for row in self.vector_index.search("skill_reference_index", query, limit=limit):
+            metadata = _loads(row.get("metadata"), {})
+            version_id = str(
+                row.get("skill_version_id")
+                or metadata.get("skill_version_id")
+                or ""
+            )
+            if not version_id:
+                continue
+            distance = float(row.get("_distance", 1.0) or 1.0)
+            score = max(0.0, 1.0 - distance)
+            hits[version_id] = max(hits.get(version_id, 0.0), round(score * 0.92, 6))
         return hits
 
     def _rank_memory_rows(
