@@ -92,6 +92,9 @@ class KnowledgeNamespace(_NamespaceBase):
     def delete(self, document_id: str):
         return self._root._call("delete_knowledge_document", document_id)
 
+    def compress(self, document_id: str, **kwargs: Any):
+        return self._root._call("compress_knowledge_document", document_id, **kwargs)
+
 
 class SkillNamespace(_NamespaceBase):
     namespace_name = "skill"
@@ -110,6 +113,9 @@ class SkillNamespace(_NamespaceBase):
 
     def search_references(self, query: str, **kwargs: Any):
         return self._root._call("search_skill_references", query, **kwargs)
+
+    def compress_references(self, skill_id: str, **kwargs: Any):
+        return self._root._call("compress_skill_reference_bundle", skill_id, **kwargs)
 
     def update(self, skill_id: str, **kwargs: Any):
         return self._root._call("update_skill", skill_id, **kwargs)
@@ -182,6 +188,9 @@ class RecallNamespace(_NamespaceBase):
 
     def explain(self, query: str, **kwargs: Any):
         return self._root._call("explain_recall", query, **kwargs)
+
+    def compress_text(self, text: str, **kwargs: Any):
+        return self._root._call("compress_text_payload", text, **kwargs)
 
 
 class ExecutionNamespace(_NamespaceBase):

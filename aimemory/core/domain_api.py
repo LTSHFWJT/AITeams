@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from aimemory.core.text import chunk_text
+from aimemory.algorithms.retrieval import estimate_tokens
+from aimemory.algorithms.segmentation import chunk_text_units
 from aimemory.core.utils import json_dumps, json_loads, make_id, make_uuid7, merge_metadata, utcnow_iso
 from aimemory.domains.memory.models import MemoryScope, MemoryType
 from aimemory.domains.skill.package import looks_like_skill_file_mapping
@@ -49,6 +50,16 @@ def _deserialize_rows(
     ),
 ) -> list[dict[str, Any]]:
     return [item for item in (_deserialize_row(row, json_fields) for row in rows) if item is not None]
+
+
+def _chunk_title(base_title: str | None, metadata: dict[str, Any] | None = None) -> str:
+    title = str(base_title or "").strip()
+    section_label = str((metadata or {}).get("section_label") or "").strip()
+    if not section_label:
+        return title
+    if not title:
+        return section_label
+    return f"{title} | {section_label}"
 
 
 class AgentStoreAPI:
@@ -620,6 +631,23 @@ class AgentStoreAPI:
     ) -> dict[str, Any]:
         return self.memory.search_knowledge(query, include_global=include_global, limit=limit, threshold=threshold, **scope_kwargs)
 
+    def compress_knowledge_document(
+        self,
+        document_id: str,
+        *,
+        query: str | None = None,
+        budget_chars: int | None = None,
+        max_sentences: int = 8,
+        max_highlights: int = 12,
+    ) -> dict[str, Any]:
+        return self.memory.compress_document(
+            document_id,
+            query=query,
+            budget_chars=budget_chars,
+            max_sentences=max_sentences,
+            max_highlights=max_highlights,
+        )
+
     def update_knowledge_document(self, document_id: str, **kwargs: Any) -> dict[str, Any]:
         document = self.get_knowledge_document(document_id)
         global_scope = bool(kwargs.pop("global_scope", document.get("namespace_key") == "global" and not document.get("owner_agent_id")))
@@ -786,6 +814,27 @@ class AgentStoreAPI:
             **scope_kwargs,
         )
 
+    def compress_skill_reference_bundle(
+        self,
+        skill_id: str,
+        *,
+        skill_version_id: str | None = None,
+        path_prefix: str | None = None,
+        query: str | None = None,
+        budget_chars: int | None = None,
+        max_sentences: int = 8,
+        max_highlights: int = 12,
+    ) -> dict[str, Any]:
+        return self.memory.compress_skill_references(
+            skill_id,
+            skill_version_id=skill_version_id,
+            path_prefix=path_prefix,
+            query=query,
+            budget_chars=budget_chars,
+            max_sentences=max_sentences,
+            max_highlights=max_highlights,
+        )
+
     def update_skill(self, skill_id: str, **kwargs: Any) -> dict[str, Any]:
         skill = self.get_skill_content(skill_id)
         name = str(kwargs.pop("name", skill["name"]))
@@ -940,6 +989,29 @@ class AgentStoreAPI:
         else:
             filters.append(f"{column} = ?")
         params.append(value)
+
+    def compress_text_payload(
+        self,
+        text: str,
+        *,
+        query: str | None = None,
+        domain_hint: str | None = None,
+        budget_chars: int = 600,
+        max_sentences: int = 8,
+        max_highlights: int = 12,
+        metadata: dict[str, Any] | None = None,
+        **scope_kwargs: Any,
+    ) -> dict[str, Any]:
+        merged_metadata = merge_metadata(metadata, {key: value for key, value in scope_kwargs.items() if value not in (None, "")})
+        return self.memory.compress_text(
+            text,
+            query=query,
+            domain_hint=domain_hint,
+            budget_chars=budget_chars,
+            max_sentences=max_sentences,
+            max_highlights=max_highlights,
+            metadata=merged_metadata,
+        )
 
     def _create_short_term_snapshot(self, session_id: str, compression: dict[str, Any]) -> dict[str, Any]:
         session = self.memory.get_session(session_id)
@@ -1239,16 +1311,21 @@ class AgentStoreAPI:
                 now,
             ),
         )
-        chunks = chunk_text(text, chunk_size=chunk_size, overlap=chunk_overlap)
+        chunks = chunk_text_units(text, source_id=document_id, chunk_size=chunk_size, overlap=chunk_overlap)
         for index, chunk in enumerate(chunks):
             chunk_id = make_id("chunk")
-            chunk_metadata = {"chunk_index": index, **self.memory._scope_metadata(scope), **dict(metadata or {})}
+            chunk_metadata = {
+                "chunk_index": index,
+                **chunk.metadata,
+                **self.memory._scope_metadata(scope),
+                **dict(metadata or {}),
+            }
             self.memory.db.execute(
                 """
                 INSERT INTO document_chunks(id, document_id, version_id, chunk_index, content, tokens, metadata, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (chunk_id, document_id, version_id, index, chunk, len(chunk), json_dumps(chunk_metadata), now),
+                (chunk_id, document_id, version_id, index, chunk.text, estimate_tokens(chunk.text), json_dumps(chunk_metadata), now),
             )
             self.memory.db.execute(
                 """
@@ -1266,8 +1343,8 @@ class AgentStoreAPI:
                     "source_subject_type": scope.get("subject_type"),
                     "source_subject_id": scope.get("subject_id"),
                     "namespace_key": scope.get("namespace_key"),
-                    "title": title,
-                    "content": chunk,
+                    "title": _chunk_title(title, chunk_metadata),
+                    "content": chunk.text,
                     "metadata": chunk_metadata,
                     "updated_at": now,
                 }

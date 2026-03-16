@@ -3,13 +3,24 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
-from aimemory.core.text import chunk_text, extract_keywords
+from aimemory.algorithms.retrieval import estimate_tokens
+from aimemory.algorithms.segmentation import chunk_text_units
+from aimemory.core.text import extract_keywords
 from aimemory.core.utils import json_dumps, make_id, utcnow_iso
 from aimemory.domains.knowledge.models import KnowledgeSourceType
 from aimemory.services.base import ServiceBase
 
 
 class KnowledgeService(ServiceBase):
+    def _chunk_title(self, base_title: str | None, metadata: dict[str, Any] | None = None) -> str:
+        title = str(base_title or "").strip()
+        section_label = str((metadata or {}).get("section_label") or "").strip()
+        if not section_label:
+            return title
+        if not title:
+            return section_label
+        return f"{title} | {section_label}"
+
     def create_source(
         self,
         name: str,
@@ -113,15 +124,15 @@ class KnowledgeService(ServiceBase):
             (version_id, document_id, version_label, object_row["id"], checksum, len(text.encode("utf-8")), json_dumps(merged_metadata), now),
         )
 
-        for index, chunk in enumerate(chunk_text(text, chunk_size=chunk_size, overlap=overlap)):
+        for index, chunk in enumerate(chunk_text_units(text, source_id=document_id, chunk_size=chunk_size, overlap=overlap)):
             chunk_id = make_id("chunk")
-            chunk_metadata = {"chunk_index": index, **merged_metadata}
+            chunk_metadata = {"chunk_index": index, **chunk.metadata, **merged_metadata}
             self.db.execute(
                 """
                 INSERT INTO document_chunks(id, document_id, version_id, chunk_index, content, tokens, metadata, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (chunk_id, document_id, version_id, index, chunk, len(chunk), json_dumps(chunk_metadata), now),
+                (chunk_id, document_id, version_id, index, chunk.text, estimate_tokens(chunk.text), json_dumps(chunk_metadata), now),
             )
             citation_id = make_id("cite")
             self.db.execute(
@@ -143,9 +154,9 @@ class KnowledgeService(ServiceBase):
                     "owner_agent_id": owner_agent_id,
                     "source_subject_type": source_subject_type,
                     "source_subject_id": source_subject_id,
-                    "title": title,
-                    "text": chunk,
-                    "keywords": extract_keywords(" ".join(part for part in [title, chunk] if part)),
+                    "title": self._chunk_title(title, chunk_metadata),
+                    "text": chunk.text,
+                    "keywords": extract_keywords(" ".join(part for part in [self._chunk_title(title, chunk_metadata), chunk.text] if part)),
                     "metadata": chunk_metadata,
                     "updated_at": now,
                 },

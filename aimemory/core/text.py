@@ -69,20 +69,9 @@ def build_summary(parts: Iterable[str], max_sentences: int = 4, max_chars: int =
 
 
 def chunk_text(text: str, chunk_size: int = 500, overlap: int = 80) -> list[str]:
-    normalized = text.strip()
-    if not normalized:
-        return []
-    if len(normalized) <= chunk_size:
-        return [normalized]
-    chunks: list[str] = []
-    start = 0
-    while start < len(normalized):
-        end = min(len(normalized), start + chunk_size)
-        chunks.append(normalized[start:end])
-        if end == len(normalized):
-            break
-        start = max(0, end - overlap)
-    return chunks
+    from aimemory.algorithms.segmentation import chunk_text_units
+
+    return [chunk.text for chunk in chunk_text_units(text, chunk_size=chunk_size, overlap=overlap)]
 
 
 def lexical_hash_embedding(text: str | None, dims: int = 128) -> list[float]:
@@ -117,19 +106,3 @@ def cosine_similarity(left: list[float], right: list[float]) -> float:
     if not left or not right or len(left) != len(right):
         return 0.0
     return float(sum(a * b for a, b in zip(left, right)))
-
-
-def hybrid_score(query: str, text: str, keywords: str | list[str] | None = None, boost: float = 0.0) -> float:
-    query_tokens = set(tokenize(query))
-    text_tokens = set(tokenize(text))
-    if isinstance(keywords, str):
-        keyword_tokens = set(tokenize(keywords))
-    else:
-        keyword_tokens = set(keywords or [])
-
-    overlap = len(query_tokens & text_tokens)
-    keyword_overlap = len(query_tokens & keyword_tokens)
-    denominator = max(1, len(query_tokens))
-    exact_bonus = 0.2 if normalize_text(query) and normalize_text(query) in normalize_text(text) else 0.0
-    embedding_bonus = max(0.0, cosine_similarity(hash_embedding(query), hash_embedding(text)))
-    return round((0.45 * (overlap / denominator)) + (0.15 * (keyword_overlap / denominator)) + (0.3 * embedding_bonus) + exact_bonus + boost, 6)

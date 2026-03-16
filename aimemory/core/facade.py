@@ -4,15 +4,16 @@ import asyncio
 from dataclasses import asdict
 from typing import Any, Callable
 
-from aimemory.algorithms.compression import CompressionResult, compress_records
+from aimemory.algorithms.compression import CompressionResult, compress_records, compress_text as compress_text_content
 from aimemory.algorithms.dedupe import fingerprint, hamming_similarity, merge_text_fragments, semantic_similarity
 from aimemory.algorithms.distill import AdaptiveDistiller, DistilledCandidate
 from aimemory.algorithms.retrieval import estimate_tokens, mmr_rerank, score_record
+from aimemory.algorithms.segmentation import chunk_text_units
 from aimemory.backends.registry import LanceDBVectorIndex, NullGraphStore
 from aimemory.core.capabilities import capability_dict
 from aimemory.core.scope import CollaborationScope
 from aimemory.core.settings import AIMemoryConfig
-from aimemory.core.text import build_summary, chunk_text, extract_keywords, normalize_text, split_sentences, tokenize
+from aimemory.core.text import build_summary, extract_keywords, normalize_text, split_sentences, tokenize
 from aimemory.core.utils import json_dumps, json_loads, make_id, make_uuid7, merge_metadata, utcnow_iso
 from aimemory.domains.memory.models import MemoryScope, MemoryType
 from aimemory.domains.skill.package import (
@@ -84,6 +85,16 @@ def _domain_priority(domain: str) -> float:
         "archive": -0.02,
         "execution": 0.01,
     }.get(domain, 0.0)
+
+
+def _chunk_title(base_title: str | None, metadata: dict[str, Any] | None = None) -> str:
+    title = str(base_title or "").strip()
+    section_label = str((metadata or {}).get("section_label") or "").strip()
+    if not section_label:
+        return title
+    if not title:
+        return section_label
+    return f"{title} | {section_label}"
 
 
 MEMORY_TABLE_MAP = {
@@ -1154,16 +1165,21 @@ class AIMemory:
             """,
             (version_id, document_id, "v1", object_row["id"], object_row["checksum"], object_row["size_bytes"], json_dumps(metadata), now),
         )
-        chunks = chunk_text(text, chunk_size=chunk_size, overlap=chunk_overlap)
+        chunks = chunk_text_units(text, source_id=document_id, chunk_size=chunk_size, overlap=chunk_overlap)
         for index, chunk in enumerate(chunks):
             chunk_id = make_id("chunk")
-            chunk_metadata = {"chunk_index": index, **self._scope_metadata(scope), **metadata}
+            chunk_metadata = {
+                "chunk_index": index,
+                **chunk.metadata,
+                **self._scope_metadata(scope),
+                **metadata,
+            }
             self.db.execute(
                 """
                 INSERT INTO document_chunks(id, document_id, version_id, chunk_index, content, tokens, metadata, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (chunk_id, document_id, version_id, index, chunk, estimate_tokens(chunk), json_dumps(chunk_metadata), now),
+                (chunk_id, document_id, version_id, index, chunk.text, estimate_tokens(chunk.text), json_dumps(chunk_metadata), now),
             )
             self._index_knowledge_chunk(
                 {
@@ -1174,8 +1190,8 @@ class AIMemory:
                     "source_subject_type": source_subject_type,
                     "source_subject_id": source_subject_id,
                     "namespace_key": scope.get("namespace_key"),
-                    "title": title,
-                    "content": chunk,
+                    "title": _chunk_title(title, chunk_metadata),
+                    "content": chunk.text,
                     "metadata": chunk_metadata,
                     "updated_at": now,
                 }
@@ -1690,8 +1706,9 @@ class AIMemory:
                 continue
             title = f"{name}:{file_row['relative_path']}"
             for index, chunk in enumerate(
-                chunk_text(
+                chunk_text_units(
                     str(file_row["text_content"]),
+                    source_id=str(file_row["id"]),
                     chunk_size=int(self.config.memory_policy.chunk_size),
                     overlap=int(self.config.memory_policy.chunk_overlap),
                 )
@@ -1701,6 +1718,7 @@ class AIMemory:
                     "chunk_index": index,
                     "relative_path": file_row["relative_path"],
                     "role": file_row["role"],
+                    **chunk.metadata,
                     **self._scope_metadata(scope),
                     **dict(metadata or {}),
                     **dict(file_row.get("metadata") or {}),
@@ -1718,8 +1736,8 @@ class AIMemory:
                         file_row["object_id"],
                         file_row["relative_path"],
                         index,
-                        title,
-                        chunk,
+                        _chunk_title(title, chunk_metadata),
+                        chunk.text,
                         json_dumps(chunk_metadata),
                         now,
                     ),
@@ -1736,8 +1754,8 @@ class AIMemory:
                         "source_subject_id": scope.get("subject_id"),
                         "namespace_key": scope.get("namespace_key"),
                         "relative_path": file_row["relative_path"],
-                        "title": title,
-                        "text": chunk,
+                        "title": _chunk_title(title, chunk_metadata),
+                        "text": chunk.text,
                         "metadata": chunk_metadata,
                         "updated_at": now,
                     }
@@ -2933,6 +2951,134 @@ class AIMemory:
     def litellm_config(self) -> dict[str, Any]:
         return self.config.providers.as_litellm_kwargs()
 
+    def compress_text(
+        self,
+        text: str,
+        *,
+        query: str | None = None,
+        domain_hint: str | None = None,
+        budget_chars: int = 600,
+        max_sentences: int = 8,
+        max_highlights: int = 12,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        result = compress_text_content(
+            text,
+            query=query,
+            domain_hint=domain_hint,
+            budget_chars=budget_chars,
+            max_sentences=max_sentences,
+            diversity_lambda=self.config.memory_policy.diversity_lambda,
+            max_highlights=max_highlights,
+            policy=self.config.memory_policy,
+            metadata=metadata,
+        )
+        return result.as_dict()
+
+    def compress_document(
+        self,
+        document_id: str,
+        *,
+        query: str | None = None,
+        budget_chars: int | None = None,
+        max_sentences: int = 8,
+        max_highlights: int = 12,
+    ) -> dict[str, Any]:
+        document = self.get_document(document_id)
+        if document is None:
+            raise ValueError(f"Document `{document_id}` does not exist.")
+        chunk_records = [
+            {
+                "id": chunk["id"],
+                "text": str(chunk.get("content") or chunk.get("text") or ""),
+                "score": 0.72,
+                "metadata": {
+                    "document_id": document_id,
+                    "title": document.get("title"),
+                    "chunk_index": chunk.get("chunk_index"),
+                },
+            }
+            for chunk in document.get("chunks", [])
+            if str(chunk.get("content") or chunk.get("text") or "").strip()
+        ]
+        compression = compress_records(
+            chunk_records,
+            query=query,
+            domain_hint="knowledge",
+            budget_chars=int(budget_chars or max(self.config.memory_policy.long_term_compression_budget_chars, 800)),
+            max_sentences=max_sentences,
+            diversity_lambda=self.config.memory_policy.diversity_lambda,
+            max_highlights=max_highlights,
+            policy=self.config.memory_policy,
+        ).as_dict()
+        return {
+            "document_id": document_id,
+            "title": document.get("title"),
+            **compression,
+        }
+
+    def compress_skill_references(
+        self,
+        skill_id: str,
+        *,
+        skill_version_id: str | None = None,
+        path_prefix: str | None = None,
+        query: str | None = None,
+        budget_chars: int | None = None,
+        max_sentences: int = 8,
+        max_highlights: int = 12,
+    ) -> dict[str, Any]:
+        skill = self.get_skill(skill_id)
+        if skill is None:
+            raise ValueError(f"Skill `{skill_id}` does not exist.")
+        versions = list(skill.get("versions", []))
+        if skill_version_id:
+            versions = [version for version in versions if version.get("id") == skill_version_id]
+            if not versions:
+                raise ValueError(f"Skill version `{skill_version_id}` does not exist for skill `{skill_id}`.")
+        elif versions:
+            versions = [versions[0]]
+
+        reference_records: list[dict[str, Any]] = []
+        for version in versions:
+            for reference in version.get("references", []):
+                relative_path = str(reference.get("relative_path") or "")
+                if path_prefix and not relative_path.startswith(path_prefix):
+                    continue
+                text = str(reference.get("content") or "")
+                if not text.strip():
+                    continue
+                reference_records.append(
+                    {
+                        "id": reference.get("id") or relative_path,
+                        "text": text,
+                        "score": 0.76,
+                        "metadata": {
+                            "skill_id": skill_id,
+                            "skill_version_id": version.get("id"),
+                            "relative_path": relative_path,
+                        },
+                    }
+                )
+        if not reference_records:
+            raise ValueError(f"Skill `{skill_id}` does not have matching reference files.")
+        compression = compress_records(
+            reference_records,
+            query=query,
+            domain_hint="skill_reference",
+            budget_chars=int(budget_chars or max(self.config.memory_policy.long_term_compression_budget_chars, 800)),
+            max_sentences=max_sentences,
+            diversity_lambda=self.config.memory_policy.diversity_lambda,
+            max_highlights=max_highlights,
+            policy=self.config.memory_policy,
+        ).as_dict()
+        return {
+            "skill_id": skill_id,
+            "skill_version_id": versions[0].get("id") if versions else skill_version_id,
+            "name": skill.get("name"),
+            **compression,
+        }
+
     def register_domain_compressor(self, domain: str, compressor: Callable[..., Any]) -> None:
         self._domain_compressors[str(domain)] = compressor
 
@@ -2965,14 +3111,25 @@ class AIMemory:
                 "highlights": [],
                 "kept_ids": [],
                 "estimated_tokens": 0,
+                "facts": [],
+                "constraints": [],
+                "steps": [],
+                "risks": [],
+                "selected_unit_ids": [],
+                "coverage_score": 0.0,
+                "redundancy_score": 0.0,
+                "metadata": {},
+                "evidence_spans": [],
                 "provider": "skipped",
             }
         compressor = self._domain_compressors.get(str(domain))
         if compressor is None:
             result = compress_records(
                 records,
+                domain_hint=str(domain),
                 budget_chars=budget_chars,
                 diversity_lambda=self.config.memory_policy.diversity_lambda,
+                policy=self.config.memory_policy,
             )
             normalized = result.as_dict()
             provider = "local"
@@ -2990,8 +3147,10 @@ class AIMemory:
             elif isinstance(external, str):
                 normalized = compress_records(
                     [{"id": item.get("id"), "text": external, "score": 1.0}],
+                    domain_hint=str(domain),
                     budget_chars=budget_chars,
                     diversity_lambda=self.config.memory_policy.diversity_lambda,
+                    policy=self.config.memory_policy,
                 ).as_dict()
             elif isinstance(external, dict):
                 normalized = {
@@ -3000,6 +3159,15 @@ class AIMemory:
                     "kept_ids": list(external.get("kept_ids") or []),
                     "estimated_tokens": int(external.get("estimated_tokens") or estimate_tokens(str(external.get("summary") or ""))),
                     "source_count": int(external.get("source_count") or len(records)),
+                    "facts": list(external.get("facts") or []),
+                    "constraints": list(external.get("constraints") or []),
+                    "steps": list(external.get("steps") or []),
+                    "risks": list(external.get("risks") or []),
+                    "selected_unit_ids": list(external.get("selected_unit_ids") or []),
+                    "coverage_score": float(external.get("coverage_score") or 0.0),
+                    "redundancy_score": float(external.get("redundancy_score") or 0.0),
+                    "metadata": dict(external.get("metadata") or {}),
+                    "evidence_spans": list(external.get("evidence_spans") or []),
                 }
             else:
                 raise TypeError("compressor must return CompressionResult, dict, or str")

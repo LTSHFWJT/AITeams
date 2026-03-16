@@ -166,6 +166,15 @@ class AIMemoryMCPAdapter:
             "limit": {"type": "integer", "default": 10},
             "threshold": {"type": "number", "default": 0.0},
         }
+        text_compress = {
+            "text": {"type": "string"},
+            "query": {"type": "string"},
+            "domain_hint": {"type": "string"},
+            "budget_chars": {"type": "integer", "default": 600},
+            "max_sentences": {"type": "integer", "default": 8},
+            "max_highlights": {"type": "integer", "default": 12},
+            "metadata": {"type": "object"},
+        }
         return [
             self._tool("aimemory_manifest", "返回 AIMemory 的能力、存储布局与 LiteLLM 兼容配置。"),
             self._tool(
@@ -179,6 +188,7 @@ class AIMemoryMCPAdapter:
                 },
                 required=["query"],
             ),
+            self._tool("text_compress", "使用本地纯算法压缩长文本。", text_compress, required=["text"]),
             self._tool("long_term_memory_add", "写入指定 agent 与交互主体之间的长期记忆。", memory_write, required=["text"]),
             self._tool("long_term_memory_get", "获取一条长期记忆。", {"memory_id": {"type": "string"}}, required=["memory_id"]),
             self._tool("long_term_memory_list", "列出指定 agent 与主体之间的完整长期记忆。", memory_list),
@@ -220,6 +230,18 @@ class AIMemoryMCPAdapter:
             self._tool("knowledge_document_list", "列出知识库文档。", knowledge_list),
             self._tool("knowledge_document_search", "检索知识库文档与切块。", knowledge_search, required=["query"]),
             self._tool(
+                "knowledge_document_compress",
+                "对知识文档执行本地纯算法压缩。",
+                {
+                    "document_id": {"type": "string"},
+                    "query": {"type": "string"},
+                    "budget_chars": {"type": "integer", "default": 800},
+                    "max_sentences": {"type": "integer", "default": 8},
+                    "max_highlights": {"type": "integer", "default": 12},
+                },
+                required=["document_id"],
+            ),
+            self._tool(
                 "knowledge_document_update",
                 "更新知识库文档标题、正文、作用域或元数据。",
                 {**knowledge_write, "document_id": {"type": "string"}, "status": {"type": "string"}},
@@ -231,6 +253,20 @@ class AIMemoryMCPAdapter:
             self._tool("skill_list", "列出当前 agent 的所有 skill metadata。", skill_list),
             self._tool("skill_search", "按关键字检索 skill。", skill_search, required=["query"]),
             self._tool("skill_search_references", "检索 skill references 内的命中文本分块。", skill_reference_search, required=["query"]),
+            self._tool(
+                "skill_reference_compress",
+                "对 skill reference 文件执行本地纯算法压缩。",
+                {
+                    "skill_id": {"type": "string"},
+                    "skill_version_id": {"type": "string"},
+                    "path_prefix": {"type": "string"},
+                    "query": {"type": "string"},
+                    "budget_chars": {"type": "integer", "default": 800},
+                    "max_sentences": {"type": "integer", "default": 8},
+                    "max_highlights": {"type": "integer", "default": 12},
+                },
+                required=["skill_id"],
+            ),
             self._tool(
                 "skill_update",
                 "更新 skill 元信息，必要时写入新版本。",
@@ -289,6 +325,7 @@ class AIMemoryMCPAdapter:
         return {
             "aimemory_manifest": lambda: self.manifest(),
             "recall_query": lambda: self.memory.api.recall.query(**payload),
+            "text_compress": lambda: self.memory.api.recall.compress_text(**payload),
             "long_term_memory_add": lambda: self.memory.api.long_term.add(**payload),
             "long_term_memory_get": lambda: self.memory.api.long_term.get(payload["memory_id"]),
             "long_term_memory_list": lambda: self.memory.api.long_term.list(**payload),
@@ -314,6 +351,7 @@ class AIMemoryMCPAdapter:
             "knowledge_document_get": lambda: self.memory.api.knowledge.get(payload["document_id"]),
             "knowledge_document_list": lambda: self.memory.api.knowledge.list(**payload),
             "knowledge_document_search": lambda: self.memory.api.knowledge.search(**payload),
+            "knowledge_document_compress": lambda: self.memory.api.knowledge.compress(payload["document_id"], **{key: value for key, value in payload.items() if key != "document_id"}),
             "knowledge_document_update": lambda: self.memory.api.knowledge.update(payload["document_id"], **{key: value for key, value in payload.items() if key != "document_id"}),
             "knowledge_document_delete": lambda: self.memory.api.knowledge.delete(payload["document_id"]),
             "skill_add": lambda: self.memory.api.skill.add(**payload),
@@ -321,6 +359,7 @@ class AIMemoryMCPAdapter:
             "skill_list": lambda: self.memory.api.skill.list(**payload),
             "skill_search": lambda: self.memory.api.skill.search(**payload),
             "skill_search_references": lambda: self.memory.api.skill.search_references(**payload),
+            "skill_reference_compress": lambda: self.memory.api.skill.compress_references(payload["skill_id"], **{key: value for key, value in payload.items() if key != "skill_id"}),
             "skill_update": lambda: self.memory.api.skill.update(payload["skill_id"], **{key: value for key, value in payload.items() if key != "skill_id"}),
             "skill_delete": lambda: self.memory.api.skill.delete(payload["skill_id"]),
             "session_create": lambda: self.memory.api.session.create(**payload),
