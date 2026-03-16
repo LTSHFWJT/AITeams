@@ -509,6 +509,7 @@ class AgentStoreAPI:
         for summary in archive.get("summaries", []):
             self.memory.db.execute("DELETE FROM archive_summary_index WHERE record_id = ?", (summary["id"],))
             self.memory.db.execute("DELETE FROM semantic_index_cache WHERE record_id = ?", (summary["id"],))
+            self.memory._delete_text_search_record(summary["id"])
             self.memory.vector_index.delete("archive_summary_index", summary["id"])
         self.memory.graph_store.delete_reference(archive_unit_id)
         self.memory.db.execute("DELETE FROM archive_summaries WHERE archive_unit_id = ?", (archive_unit_id,))
@@ -666,6 +667,7 @@ class AgentStoreAPI:
         for chunk_id in chunk_ids:
             self.memory.db.execute("DELETE FROM knowledge_chunk_index WHERE record_id = ?", (chunk_id,))
             self.memory.db.execute("DELETE FROM semantic_index_cache WHERE record_id = ?", (chunk_id,))
+            self.memory._delete_text_search_record(chunk_id)
             self.memory.vector_index.delete("knowledge_chunk_index", chunk_id)
             self.memory.graph_store.delete_reference(chunk_id)
         self.memory.db.execute("DELETE FROM citations WHERE document_id = ?", (document_id,))
@@ -900,6 +902,7 @@ class AgentStoreAPI:
         for version in skill.get("versions", []):
             self.memory.db.execute("DELETE FROM skill_index WHERE record_id = ?", (version["id"],))
             self.memory.db.execute("DELETE FROM semantic_index_cache WHERE record_id = ?", (version["id"],))
+            self.memory._delete_text_search_record(version["id"])
             self.memory.vector_index.delete("skill_index", version["id"])
             self.memory._delete_skill_version_artifacts(version["id"])
         self.memory.graph_store.delete_reference(skill_id)
@@ -980,7 +983,10 @@ class AgentStoreAPI:
                 now,
             ),
         )
-        return self.memory.get_snapshot(snapshot_id) or {"id": snapshot_id, "summary": compression["summary"]}
+        snapshot = self.memory.get_snapshot(snapshot_id) or {"id": snapshot_id, "summary": compression["summary"]}
+        if snapshot:
+            self.memory._index_interaction_snapshot(snapshot)
+        return snapshot
 
     def _filter_memory_items(
         self,
@@ -1197,6 +1203,7 @@ class AgentStoreAPI:
         for chunk in document.get("chunks", []):
             self.memory.db.execute("DELETE FROM knowledge_chunk_index WHERE record_id = ?", (chunk["id"],))
             self.memory.db.execute("DELETE FROM semantic_index_cache WHERE record_id = ?", (chunk["id"],))
+            self.memory._delete_text_search_record(chunk["id"])
             self.memory.vector_index.delete("knowledge_chunk_index", chunk["id"])
             self.memory.graph_store.delete_reference(chunk["id"])
         self.memory.db.execute("DELETE FROM citations WHERE document_id = ?", (document_id,))

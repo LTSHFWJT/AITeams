@@ -12,7 +12,7 @@ from aimemory.backends.registry import LanceDBVectorIndex, NullGraphStore
 from aimemory.core.capabilities import capability_dict
 from aimemory.core.scope import CollaborationScope
 from aimemory.core.settings import AIMemoryConfig
-from aimemory.core.text import build_summary, chunk_text, extract_keywords, split_sentences
+from aimemory.core.text import build_summary, chunk_text, extract_keywords, normalize_text, split_sentences, tokenize
 from aimemory.core.utils import json_dumps, json_loads, make_id, make_uuid7, merge_metadata, utcnow_iso
 from aimemory.domains.memory.models import MemoryScope, MemoryType
 from aimemory.domains.skill.package import (
@@ -238,6 +238,7 @@ class AIMemory:
             """
         )
         self.db.execute("UPDATE archive_memories SET source_type = COALESCE(source_type, domain) WHERE source_type IS NULL")
+        self._sync_text_search_index()
 
     def _memory_table_for_scope(self, scope: str) -> str:
         return MEMORY_TABLE_MAP.get(scope, MEMORY_TABLE_MAP[str(MemoryScope.LONG_TERM)])
@@ -628,6 +629,7 @@ class AIMemory:
             enriched["embedding"] = semantic_rows.get(record_id, {}).get("embedding")
             enriched_rows.append(enriched)
         vector_hits = self._vector_hit_map("memory_index", query, limit=max(limit * 4, 24))
+        fts_hits = self._fts_hit_map(["memory_index"], query, limit=max(limit * 6, 36))
         results = self._rank_memory_rows(
             query,
             enriched_rows,
@@ -635,6 +637,7 @@ class AIMemory:
             threshold=threshold,
             filters=filters,
             vector_hits=vector_hits,
+            fts_hits=fts_hits,
             affinity={
                 "owner_agent_id": owner_agent_id,
                 "subject_type": subject_type,
@@ -982,6 +985,14 @@ class AIMemory:
             ),
         )
         self.db.execute("UPDATE sessions SET updated_at = ?, last_accessed_at = ? WHERE id = ?", (now, now, session_id))
+        self._index_interaction_turn(
+            session,
+            turn_id=turn_id,
+            role=role,
+            content=content,
+            turn_type=turn_type,
+            updated_at=now,
+        )
         auto_capture = bool(kwargs.pop("auto_capture", True))
         auto_compress = bool(kwargs.pop("auto_compress", True))
         captured = None
@@ -1062,7 +1073,10 @@ class AIMemory:
                 now,
             ),
         )
-        return _deserialize_row(self.db.fetch_one("SELECT * FROM runs WHERE id = ?", (run_id,)))
+        run = _deserialize_row(self.db.fetch_one("SELECT * FROM runs WHERE id = ?", (run_id,)))
+        if run is not None:
+            self._index_execution_run(run)
+        return run
 
     def ingest_document(self, title: str, text: str, **kwargs) -> dict[str, Any]:
         source_name = kwargs.pop("source_name", title)
@@ -1249,6 +1263,7 @@ class AIMemory:
             tuple(params + [max(limit * 12, self.config.memory_policy.search_scan_limit // 2)]),
         )
         vector_hits = self._vector_hit_map("knowledge_chunk_index", query, limit=max(limit * 4, 24))
+        fts_hits = self._fts_hit_map(["knowledge_chunk_index"], query, limit=max(limit * 6, 36))
         ranked = self._rank_rows(
             query,
             rows,
@@ -1261,6 +1276,7 @@ class AIMemory:
             threshold=threshold,
             filters=filters,
             vector_hits=vector_hits,
+            fts_hits=fts_hits,
             affinity={"owner_agent_id": owner_agent_id, "subject_type": subject_type, "subject_id": subject_id},
         )
         return {"results": ranked[:limit]}
@@ -1492,6 +1508,7 @@ class AIMemory:
             record_id = row["id"]
             self.db.execute("DELETE FROM skill_reference_index WHERE record_id = ?", (record_id,))
             self.db.execute("DELETE FROM semantic_index_cache WHERE record_id = ?", (record_id,))
+            self._delete_text_search_record(record_id)
             self.vector_index.delete("skill_reference_index", record_id)
         self.db.execute("DELETE FROM skill_reference_chunks WHERE skill_version_id = ?", (skill_version_id,))
         self.db.execute("DELETE FROM skill_files WHERE skill_version_id = ?", (skill_version_id,))
@@ -1873,6 +1890,7 @@ class AIMemory:
             tuple(params + [max(limit * 12, self.config.memory_policy.search_scan_limit // 2)]),
         )
         vector_hits = self._vector_hit_map("skill_index", query, limit=max(limit * 4, 24))
+        fts_hits = self._fts_hit_map(["skill_index"], query, limit=max(limit * 6, 36))
         for version_id, score in self._skill_reference_version_hit_map(query, limit=max(limit * 4, 24)).items():
             vector_hits[version_id] = max(vector_hits.get(version_id, 0.0), score)
         ranked = self._rank_rows(
@@ -1887,6 +1905,7 @@ class AIMemory:
             threshold=threshold,
             filters=filters,
             vector_hits=vector_hits,
+            fts_hits=fts_hits,
             affinity={"owner_agent_id": owner_agent_id, "subject_type": subject_type, "subject_id": subject_id},
         )
         return {"results": ranked[:limit]}
@@ -1966,6 +1985,7 @@ class AIMemory:
             tuple(params + [max(limit * 12, self.config.memory_policy.search_scan_limit // 2)]),
         )
         vector_hits = self._vector_hit_map("skill_reference_index", query, limit=max(limit * 4, 24))
+        fts_hits = self._fts_hit_map(["skill_reference_index"], query, limit=max(limit * 6, 36))
         ranked = self._rank_rows(
             query,
             rows,
@@ -1978,6 +1998,7 @@ class AIMemory:
             threshold=threshold,
             filters=filters,
             vector_hits=vector_hits,
+            fts_hits=fts_hits,
             affinity={"owner_agent_id": owner_agent_id, "subject_type": subject_type, "subject_id": subject_id},
         )
         return {"results": ranked[:limit]}
@@ -2235,6 +2256,7 @@ class AIMemory:
             tuple(params + [max(limit * 12, self.config.memory_policy.search_scan_limit // 2)]),
         )
         vector_hits = self._vector_hit_map("archive_summary_index", query, limit=max(limit * 4, 24))
+        fts_hits = self._fts_hit_map(["archive_summary_index"], query, limit=max(limit * 6, 36))
         ranked = self._rank_rows(
             query,
             rows,
@@ -2247,6 +2269,7 @@ class AIMemory:
             threshold=threshold,
             filters=filters,
             vector_hits=vector_hits,
+            fts_hits=fts_hits,
             affinity={
                 "owner_agent_id": owner_agent_id,
                 "subject_type": subject_type,
@@ -2309,6 +2332,7 @@ class AIMemory:
         if namespace_filter:
             sql_filters.append("s.namespace_key = ?")
             params.append(namespace_filter)
+        fts_rows = self._search_text_records(["interaction_turn", "interaction_snapshot"], query, limit=max(limit * 6, 24))
         rows = self.db.fetch_all(
             f"""
             SELECT ct.id, ct.session_id, ct.role, ct.turn_type, ct.speaker_participant_id, ct.target_participant_id, ct.salience_score, s.owner_agent_id, s.subject_type, s.subject_id, s.interaction_type, ct.content AS text, ct.metadata, ct.created_at AS updated_at
@@ -2320,6 +2344,26 @@ class AIMemory:
             """,
             tuple(params + [max(limit * 12, self.config.memory_policy.search_scan_limit // 2)]),
         )
+        turn_ids = [
+            row["record_id"]
+            for row in fts_rows
+            if row.get("collection") == "interaction_turn"
+        ]
+        if turn_ids:
+            placeholders = ", ".join("?" for _ in turn_ids)
+            rows = self._merge_rows_by_id(
+                rows,
+                self.db.fetch_all(
+                    f"""
+                    SELECT ct.id, ct.session_id, ct.role, ct.turn_type, ct.speaker_participant_id, ct.target_participant_id, ct.salience_score, s.owner_agent_id, s.subject_type, s.subject_id, s.interaction_type, ct.content AS text, ct.metadata, ct.created_at AS updated_at
+                    FROM conversation_turns ct
+                    JOIN sessions s ON s.id = ct.session_id
+                    WHERE {' AND '.join(sql_filters)} AND ct.id IN ({placeholders})
+                    """,
+                    tuple(params + turn_ids),
+                ),
+            )
+        fts_hits = self._fts_hit_map(["interaction_turn", "interaction_snapshot"], query, limit=max(limit * 6, 24))
         ranked = self._rank_rows(
             query,
             rows,
@@ -2332,6 +2376,7 @@ class AIMemory:
             threshold=threshold,
             filters=filters,
             vector_hits={},
+            fts_hits=fts_hits,
             affinity={
                 "owner_agent_id": owner_agent_id,
                 "subject_type": subject_type,
@@ -2373,6 +2418,25 @@ class AIMemory:
             """,
             tuple(snapshot_params + [max(limit * 6, 12)]),
         )
+        snapshot_ids = [
+            row["record_id"]
+            for row in fts_rows
+            if row.get("collection") == "interaction_snapshot"
+        ]
+        if snapshot_ids:
+            placeholders = ", ".join("?" for _ in snapshot_ids)
+            snapshot_rows = self._merge_rows_by_id(
+                snapshot_rows,
+                self.db.fetch_all(
+                    f"""
+                    SELECT wms.id, wms.session_id, wms.owner_agent_id, wms.subject_type, wms.subject_id, wms.interaction_type, wms.summary AS text, wms.metadata, wms.updated_at
+                    FROM working_memory_snapshots wms
+                    JOIN sessions s ON s.id = wms.session_id
+                    WHERE {' AND '.join(snapshot_filters)} AND wms.id IN ({placeholders})
+                    """,
+                    tuple(snapshot_params + snapshot_ids),
+                ),
+            )
         ranked.extend(
             self._rank_rows(
                 query,
@@ -2386,6 +2450,7 @@ class AIMemory:
                 threshold=threshold,
                 filters=filters,
                 vector_hits={},
+                fts_hits=fts_hits,
                 affinity={
                     "owner_agent_id": owner_agent_id,
                     "subject_type": subject_type,
@@ -2436,18 +2501,68 @@ class AIMemory:
         if namespace_filter:
             sql_filters.append("namespace_key = ?")
             params.append(namespace_filter)
+        fts_rows = self._search_text_records(["execution_run", "execution_observation"], query, limit=max(limit * 6, 24))
         runs = self.db.fetch_all(f"SELECT * FROM runs WHERE {' AND '.join(sql_filters)} ORDER BY updated_at DESC LIMIT 80", tuple(params))
+        run_ids = [row["record_id"] for row in fts_rows if row.get("collection") == "execution_run"]
+        if run_ids:
+            placeholders = ", ".join("?" for _ in run_ids)
+            runs = self._merge_rows_by_id(
+                runs,
+                self.db.fetch_all(
+                    f"SELECT * FROM runs WHERE {' AND '.join(sql_filters)} AND id IN ({placeholders})",
+                    tuple(params + run_ids),
+                ),
+            )
+        fts_hits = self._fts_hit_map(["execution_run", "execution_observation"], query, limit=max(limit * 6, 24))
         prepared: list[dict[str, Any]] = []
+        prepared_ids: set[str] = set()
         for run in runs:
             item = _deserialize_row(run) or dict(run)
             item["text"] = " ".join(part for part in [str(item.get("goal") or ""), str(item.get("status") or "")] if part)
             prepared.append(item)
+            prepared_ids.add(str(item.get("id") or ""))
             observations = self.db.fetch_all("SELECT * FROM observations WHERE run_id = ? ORDER BY created_at DESC LIMIT 12", (run["id"],))
             for observation in observations:
                 obs_item = _deserialize_row(observation) or dict(observation)
                 obs_item["text"] = str(obs_item.get("content") or "")
                 obs_item["updated_at"] = obs_item.get("created_at")
                 prepared.append(obs_item)
+                prepared_ids.add(str(obs_item.get("id") or ""))
+        observation_ids = [row["record_id"] for row in fts_rows if row.get("collection") == "execution_observation"]
+        if observation_ids:
+            observation_filters = ["1 = 1"]
+            observation_params: list[Any] = []
+            if user_id:
+                observation_filters.append("r.user_id = ?")
+                observation_params.append(user_id)
+            if owner_agent_id:
+                observation_filters.append("(r.owner_agent_id = ? OR (r.owner_agent_id IS NULL AND r.agent_id = ?))")
+                observation_params.extend([owner_agent_id, owner_agent_id])
+            if session_id:
+                observation_filters.append("r.session_id = ?")
+                observation_params.append(session_id)
+            if namespace_filter:
+                observation_filters.append("r.namespace_key = ?")
+                observation_params.append(namespace_filter)
+            placeholders = ", ".join("?" for _ in observation_ids)
+            extra_observations = self.db.fetch_all(
+                f"""
+                SELECT o.*, r.user_id, r.owner_agent_id, r.agent_id, r.namespace_key
+                FROM observations o
+                JOIN runs r ON r.id = o.run_id
+                WHERE {' AND '.join(observation_filters)} AND o.id IN ({placeholders})
+                """,
+                tuple(observation_params + observation_ids),
+            )
+            for observation in extra_observations:
+                obs_item = _deserialize_row(observation) or dict(observation)
+                obs_id = str(obs_item.get("id") or "")
+                if not obs_id or obs_id in prepared_ids:
+                    continue
+                obs_item["text"] = str(obs_item.get("content") or "")
+                obs_item["updated_at"] = obs_item.get("created_at")
+                prepared.append(obs_item)
+                prepared_ids.add(obs_id)
         ranked = self._rank_rows(
             query,
             prepared,
@@ -2460,6 +2575,7 @@ class AIMemory:
             threshold=threshold,
             filters=filters,
             vector_hits={},
+            fts_hits=fts_hits,
             affinity={"owner_agent_id": owner_agent_id},
         )
         return {"results": ranked[:limit]}
@@ -2556,7 +2672,10 @@ class AIMemory:
                 now,
             ),
         )
-        return {"snapshot": self.get_snapshot(snapshot_id), "compressed": True, "turn_count": len(turns)}
+        snapshot = self.get_snapshot(snapshot_id)
+        if snapshot is not None:
+            self._index_interaction_snapshot(snapshot)
+        return {"snapshot": snapshot, "compressed": True, "turn_count": len(turns)}
 
     def get_snapshot(self, snapshot_id: str) -> dict[str, Any] | None:
         return _deserialize_row(self.db.fetch_one("SELECT * FROM working_memory_snapshots WHERE id = ?", (snapshot_id,)))
@@ -2593,6 +2712,7 @@ class AIMemory:
         removed = 0
         for item in snapshots[keep_recent:]:
             self.db.execute("DELETE FROM working_memory_snapshots WHERE id = ?", (item["id"],))
+            self._delete_text_search_record(item["id"])
             removed += 1
         return {"removed": removed, "kept": min(keep_recent, len(snapshots))}
 
@@ -3581,7 +3701,7 @@ class AIMemory:
 
     def _index_memory(self, memory: dict[str, Any]) -> None:
         keywords = extract_keywords(memory["text"])
-        index_text = " ".join(keywords[:24]) or str(memory.get("summary") or "")[:120]
+        index_text = self._memory_index_text(memory)
         self.db.execute(
             """
             INSERT INTO memory_index(record_id, domain, scope, user_id, owner_agent_id, subject_type, subject_id, interaction_type, namespace_key, session_id, text, keywords, score_boost, updated_at, metadata)
@@ -3619,6 +3739,7 @@ class AIMemory:
                 json_dumps({"content_id": memory.get("content_id"), **dict(memory.get("metadata", {}))}),
             ),
         )
+        self._index_memory_search_record(memory, text=index_text, keywords=keywords)
         self._index_semantic_record(
             collection="memory_index",
             record_id=memory["id"],
@@ -3637,6 +3758,7 @@ class AIMemory:
         self.db.execute("DELETE FROM memory_index WHERE record_id = ?", (memory_id,))
         self.db.execute("DELETE FROM semantic_index_cache WHERE record_id = ?", (memory_id,))
         self.db.execute("DELETE FROM memory_links WHERE source_memory_id = ? OR target_memory_id = ?", (memory_id, memory_id))
+        self._delete_text_search_record(memory_id)
         self.vector_index.delete("memory_index", memory_id)
         self.graph_store.delete_reference(memory_id)
 
@@ -3673,6 +3795,19 @@ class AIMemory:
                 payload["updated_at"],
                 json_dumps(payload.get("metadata", {})),
             ),
+        )
+        self._upsert_text_search_record(
+            record_id=payload["id"],
+            domain="knowledge",
+            collection="knowledge_chunk_index",
+            title=payload.get("title"),
+            text=payload["content"],
+            keywords=keywords,
+            updated_at=payload.get("updated_at"),
+            owner_agent_id=payload.get("owner_agent_id"),
+            subject_type=payload.get("source_subject_type"),
+            subject_id=payload.get("source_subject_id"),
+            namespace_key=payload.get("namespace_key"),
         )
         self._index_semantic_record(
             collection="knowledge_chunk_index",
@@ -3721,6 +3856,19 @@ class AIMemory:
                 payload["updated_at"],
                 json_dumps(payload.get("metadata", {})),
             ),
+        )
+        self._upsert_text_search_record(
+            record_id=payload["record_id"],
+            domain="skill",
+            collection="skill_index",
+            title=payload.get("name"),
+            text=" ".join(part for part in [payload.get("description"), payload["text"]] if part),
+            keywords=keywords,
+            updated_at=payload.get("updated_at"),
+            owner_agent_id=payload.get("owner_agent_id"),
+            subject_type=payload.get("source_subject_type"),
+            subject_id=payload.get("source_subject_id"),
+            namespace_key=payload.get("namespace_key"),
         )
         self._index_semantic_record(
             collection="skill_index",
@@ -3776,6 +3924,20 @@ class AIMemory:
                 payload["updated_at"],
                 json_dumps(payload.get("metadata", {})),
             ),
+        )
+        self._upsert_text_search_record(
+            record_id=payload["record_id"],
+            domain="skill",
+            collection="skill_reference_index",
+            title=payload.get("title"),
+            text=payload["text"],
+            keywords=keywords,
+            path=payload.get("relative_path"),
+            updated_at=payload.get("updated_at"),
+            owner_agent_id=payload.get("owner_agent_id"),
+            subject_type=payload.get("source_subject_type"),
+            subject_id=payload.get("source_subject_id"),
+            namespace_key=payload.get("namespace_key"),
         )
         self._index_semantic_record(
             collection="skill_reference_index",
@@ -3833,6 +3995,22 @@ class AIMemory:
                 payload["updated_at"],
                 json_dumps(payload.get("metadata", {})),
             ),
+        )
+        self._upsert_text_search_record(
+            record_id=payload["record_id"],
+            domain="archive",
+            collection="archive_summary_index",
+            title=payload.get("domain"),
+            text=payload["text"],
+            keywords=list(keywords),
+            updated_at=payload.get("updated_at"),
+            user_id=payload.get("user_id"),
+            owner_agent_id=payload.get("owner_agent_id"),
+            subject_type=payload.get("subject_type"),
+            subject_id=payload.get("subject_id"),
+            interaction_type=payload.get("interaction_type"),
+            session_id=payload.get("session_id"),
+            namespace_key=payload.get("namespace_key"),
         )
         self._index_semantic_record(
             collection="archive_summary_index",
@@ -3900,6 +4078,416 @@ class AIMemory:
 
     def _embedding_for_text(self, text: str) -> list[float]:
         return embed_text(text, dims=int(self.config.embeddings.dimensions))
+
+    def _lexical_index_text(self, *parts: Any, limit: int = 256) -> str:
+        tokens: list[str] = []
+        for part in parts:
+            if part in (None, ""):
+                continue
+            tokens.extend(tokenize(str(part)))
+        unique = list(dict.fromkeys(token for token in tokens if token))
+        return " ".join(unique[:limit])
+
+    def _text_search_query(self, query: str, *, max_terms: int = 14) -> str:
+        normalized = normalize_text(query)
+        if not normalized:
+            return ""
+        clauses: list[str] = []
+        phrase = normalized.replace('"', " ").strip()
+        if phrase:
+            clauses.append(f'"{phrase}"')
+        for token in list(dict.fromkeys(tokenize(normalized)))[:max_terms]:
+            cleaned = token.replace('"', " ").strip()
+            if cleaned:
+                clauses.append(f'"{cleaned}"')
+        return " OR ".join(dict.fromkeys(clauses))
+
+    def _upsert_text_search_record(
+        self,
+        *,
+        record_id: str,
+        domain: str,
+        collection: str,
+        text: str,
+        title: str | None = None,
+        keywords: list[str] | None = None,
+        path: str | None = None,
+        updated_at: str | None = None,
+        user_id: str | None = None,
+        owner_agent_id: str | None = None,
+        subject_type: str | None = None,
+        subject_id: str | None = None,
+        interaction_type: str | None = None,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        namespace_key: str | None = None,
+    ) -> None:
+        title_text = str(title or "")
+        body_text = str(text or "")
+        path_text = str(path or "")
+        keyword_list = [str(item).strip() for item in (keywords or []) if str(item).strip()]
+        keyword_text = " ".join(dict.fromkeys(keyword_list))
+        lexical = self._lexical_index_text(title_text, body_text, keyword_text, path_text)
+        if not any(item.strip() for item in (title_text, body_text, keyword_text, lexical, path_text)):
+            self._delete_text_search_record(record_id)
+            return
+        self._delete_text_search_record(record_id)
+        self.db.execute(
+            """
+            INSERT INTO text_search_index(
+                record_id, domain, collection, title, text, keywords, lexical, path, updated_at,
+                user_id, owner_agent_id, subject_type, subject_id, interaction_type, session_id, run_id, namespace_key
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                record_id,
+                domain,
+                collection,
+                title_text,
+                body_text,
+                keyword_text,
+                lexical,
+                path_text,
+                str(updated_at or ""),
+                user_id,
+                owner_agent_id,
+                subject_type,
+                subject_id,
+                interaction_type,
+                session_id,
+                run_id,
+                namespace_key,
+            ),
+        )
+
+    def _delete_text_search_record(self, record_id: str) -> None:
+        self.db.execute("DELETE FROM text_search_index WHERE record_id = ?", (record_id,))
+
+    def _search_text_records(self, collections: list[str] | tuple[str, ...], query: str, *, limit: int) -> list[dict[str, Any]]:
+        match_query = self._text_search_query(query)
+        if not match_query or not collections:
+            return []
+        placeholders = ", ".join("?" for _ in collections)
+        try:
+            rows = self.db.fetch_all(
+                f"""
+                SELECT
+                    record_id,
+                    collection,
+                    bm25(text_search_index, 3.2, 1.2, 1.8, 4.4, 2.1) AS bm25_score
+                FROM text_search_index
+                WHERE text_search_index MATCH ?
+                  AND collection IN ({placeholders})
+                ORDER BY bm25_score ASC
+                LIMIT ?
+                """,
+                tuple([match_query, *collections, max(1, limit)]),
+            )
+        except Exception:
+            return []
+        results: list[dict[str, Any]] = []
+        window = max(1, limit)
+        for index, row in enumerate(rows):
+            raw_score = float(row.get("bm25_score", 1.0) or 1.0)
+            base = 1.0 / (1.0 + abs(raw_score))
+            rank_bonus = max(0.0, 1.0 - (index / window))
+            results.append(
+                {
+                    "record_id": str(row.get("record_id") or ""),
+                    "collection": str(row.get("collection") or ""),
+                    "score": round((0.68 * base) + (0.32 * rank_bonus), 6),
+                }
+            )
+        return results
+
+    def _fts_hit_map(self, collections: list[str] | tuple[str, ...], query: str, *, limit: int) -> dict[str, float]:
+        hits: dict[str, float] = {}
+        for row in self._search_text_records(collections, query, limit=limit):
+            record_id = str(row.get("record_id") or "")
+            if not record_id:
+                continue
+            hits[record_id] = max(hits.get(record_id, 0.0), float(row.get("score", 0.0) or 0.0))
+        return hits
+
+    def _merge_rows_by_id(self, *groups: list[dict[str, Any]], id_key: str = "id") -> list[dict[str, Any]]:
+        merged: dict[str, dict[str, Any]] = {}
+        for group in groups:
+            for row in group:
+                record_id = str(row.get(id_key) or row.get("record_id") or "")
+                if record_id and record_id not in merged:
+                    merged[record_id] = row
+        return list(merged.values())
+
+    def _index_memory_search_record(self, memory: dict[str, Any], *, text: str, keywords: list[str]) -> None:
+        self._upsert_text_search_record(
+            record_id=memory["id"],
+            domain="memory",
+            collection="memory_index",
+            title=memory.get("summary"),
+            text=text,
+            keywords=keywords,
+            updated_at=memory.get("updated_at"),
+            user_id=memory.get("user_id"),
+            owner_agent_id=memory.get("owner_agent_id") or memory.get("agent_id"),
+            subject_type=memory.get("subject_type"),
+            subject_id=memory.get("subject_id"),
+            interaction_type=memory.get("interaction_type"),
+            session_id=memory.get("session_id"),
+            run_id=memory.get("run_id"),
+            namespace_key=memory.get("namespace_key"),
+        )
+
+    def _index_interaction_turn(self, session: dict[str, Any], *, turn_id: str, role: str, content: str, turn_type: str | None, updated_at: str) -> None:
+        self._upsert_text_search_record(
+            record_id=turn_id,
+            domain="interaction",
+            collection="interaction_turn",
+            title=" ".join(part for part in [session.get("title"), role, turn_type] if part),
+            text=content,
+            keywords=extract_keywords(content),
+            updated_at=updated_at,
+            user_id=session.get("user_id"),
+            owner_agent_id=session.get("owner_agent_id") or session.get("agent_id"),
+            subject_type=session.get("subject_type"),
+            subject_id=session.get("subject_id"),
+            interaction_type=session.get("interaction_type"),
+            session_id=session.get("id"),
+            namespace_key=session.get("namespace_key"),
+        )
+
+    def _index_interaction_snapshot(self, snapshot: dict[str, Any]) -> None:
+        self._upsert_text_search_record(
+            record_id=snapshot["id"],
+            domain="interaction",
+            collection="interaction_snapshot",
+            title=f"snapshot {snapshot.get('session_id') or ''}".strip(),
+            text=str(snapshot.get("summary") or ""),
+            keywords=extract_keywords(str(snapshot.get("summary") or "")),
+            updated_at=snapshot.get("updated_at"),
+            owner_agent_id=snapshot.get("owner_agent_id"),
+            subject_type=snapshot.get("subject_type"),
+            subject_id=snapshot.get("subject_id"),
+            interaction_type=snapshot.get("interaction_type"),
+            session_id=snapshot.get("session_id"),
+            run_id=snapshot.get("run_id"),
+            namespace_key=snapshot.get("namespace_key"),
+        )
+
+    def _index_execution_run(self, run: dict[str, Any]) -> None:
+        text = " ".join(part for part in [str(run.get("goal") or ""), str(run.get("status") or "")] if part).strip()
+        self._upsert_text_search_record(
+            record_id=run["id"],
+            domain="execution",
+            collection="execution_run",
+            title=run.get("goal"),
+            text=text,
+            keywords=extract_keywords(text),
+            updated_at=run.get("updated_at"),
+            user_id=run.get("user_id"),
+            owner_agent_id=run.get("owner_agent_id") or run.get("agent_id"),
+            subject_type=run.get("subject_type"),
+            subject_id=run.get("subject_id"),
+            interaction_type=run.get("interaction_type"),
+            session_id=run.get("session_id"),
+            run_id=run.get("id"),
+            namespace_key=run.get("namespace_key"),
+        )
+
+    def _index_execution_observation(self, observation: dict[str, Any], *, run: dict[str, Any] | None = None) -> None:
+        run_row = dict(run or {})
+        text = str(observation.get("content") or observation.get("text") or "")
+        title = str(observation.get("kind") or "observation")
+        self._upsert_text_search_record(
+            record_id=observation["id"],
+            domain="execution",
+            collection="execution_observation",
+            title=title,
+            text=text,
+            keywords=extract_keywords(" ".join(part for part in [title, text] if part)),
+            updated_at=observation.get("created_at") or observation.get("updated_at"),
+            user_id=run_row.get("user_id"),
+            owner_agent_id=run_row.get("owner_agent_id") or run_row.get("agent_id"),
+            subject_type=run_row.get("subject_type"),
+            subject_id=run_row.get("subject_id"),
+            interaction_type=run_row.get("interaction_type"),
+            session_id=observation.get("session_id") or run_row.get("session_id"),
+            run_id=observation.get("run_id"),
+            namespace_key=run_row.get("namespace_key"),
+        )
+
+    def _memory_index_text(self, memory: dict[str, Any]) -> str:
+        summary_text = str(memory.get("summary") or "").strip()
+        body_text = str(memory.get("text") or "")
+        if len(body_text) <= 720:
+            return body_text
+        return "\n".join(part for part in [summary_text, body_text[:720]] if part)
+
+    def _expected_text_search_count(self) -> int:
+        statements = [
+            "SELECT COUNT(*) AS count FROM memory_index",
+            "SELECT COUNT(*) AS count FROM knowledge_chunk_index",
+            "SELECT COUNT(*) AS count FROM skill_index",
+            "SELECT COUNT(*) AS count FROM skill_reference_index",
+            "SELECT COUNT(*) AS count FROM archive_summary_index",
+            "SELECT COUNT(*) AS count FROM conversation_turns",
+            "SELECT COUNT(*) AS count FROM working_memory_snapshots",
+            "SELECT COUNT(*) AS count FROM runs",
+            "SELECT COUNT(*) AS count FROM observations",
+        ]
+        total = 0
+        for statement in statements:
+            row = self.db.fetch_one(statement)
+            total += int((row or {}).get("count", 0) or 0)
+        return total
+
+    def _sync_text_search_index(self) -> None:
+        try:
+            current = int((self.db.fetch_one("SELECT COUNT(*) AS count FROM text_search_index") or {}).get("count", 0) or 0)
+        except Exception:
+            return
+        expected = self._expected_text_search_count()
+        if current == expected:
+            return
+        self.db.execute("DELETE FROM text_search_index")
+        self._rebuild_text_search_index()
+
+    def _rebuild_text_search_index(self) -> None:
+        memory_limit = max(
+            1,
+            int((self.db.fetch_one("SELECT COUNT(*) AS count FROM short_term_memories WHERE status = 'active'") or {}).get("count", 0) or 0)
+            + int((self.db.fetch_one("SELECT COUNT(*) AS count FROM long_term_memories WHERE status = 'active'") or {}).get("count", 0) or 0),
+        )
+        for memory in self._list_memory_rows(scope="all", filters=["status = 'active'"], limit=memory_limit):
+            self._index_memory_search_record(memory, text=self._memory_index_text(memory), keywords=extract_keywords(memory.get("text")))
+
+        knowledge_rows = self.db.fetch_all(
+            """
+            SELECT dc.id, dc.content AS text, d.title, d.updated_at, d.owner_agent_id, d.source_subject_type, d.source_subject_id, d.namespace_key
+            FROM document_chunks dc
+            JOIN documents d ON d.id = dc.document_id
+            WHERE d.status = 'active'
+            """
+        )
+        for row in knowledge_rows:
+            text = str(row.get("text") or "")
+            self._upsert_text_search_record(
+                record_id=row["id"],
+                domain="knowledge",
+                collection="knowledge_chunk_index",
+                title=row.get("title"),
+                text=text,
+                keywords=extract_keywords(" ".join(part for part in [row.get("title"), text] if part)),
+                updated_at=row.get("updated_at"),
+                owner_agent_id=row.get("owner_agent_id"),
+                subject_type=row.get("source_subject_type"),
+                subject_id=row.get("source_subject_id"),
+                namespace_key=row.get("namespace_key"),
+            )
+
+        for row in self.db.fetch_all("SELECT * FROM skill_index"):
+            text = " ".join(part for part in [row.get("description"), row.get("text")] if part)
+            self._upsert_text_search_record(
+                record_id=row["record_id"],
+                domain="skill",
+                collection="skill_index",
+                title=row.get("name"),
+                text=text,
+                keywords=_loads(row.get("keywords"), []),
+                updated_at=row.get("updated_at"),
+                owner_agent_id=row.get("owner_agent_id"),
+                subject_type=row.get("source_subject_type"),
+                subject_id=row.get("source_subject_id"),
+                namespace_key=row.get("namespace_key"),
+            )
+
+        for row in self.db.fetch_all("SELECT * FROM skill_reference_index"):
+            self._upsert_text_search_record(
+                record_id=row["record_id"],
+                domain="skill",
+                collection="skill_reference_index",
+                title=row.get("title"),
+                text=str(row.get("text") or ""),
+                keywords=_loads(row.get("keywords"), []),
+                path=row.get("relative_path"),
+                updated_at=row.get("updated_at"),
+                owner_agent_id=row.get("owner_agent_id"),
+                subject_type=row.get("source_subject_type"),
+                subject_id=row.get("source_subject_id"),
+                namespace_key=row.get("namespace_key"),
+            )
+
+        for row in self.db.fetch_all("SELECT * FROM archive_summary_index"):
+            self._upsert_text_search_record(
+                record_id=row["record_id"],
+                domain="archive",
+                collection="archive_summary_index",
+                title=row.get("domain"),
+                text=str(row.get("text") or ""),
+                keywords=_loads(row.get("keywords"), []),
+                updated_at=row.get("updated_at"),
+                user_id=row.get("user_id"),
+                owner_agent_id=row.get("owner_agent_id"),
+                subject_type=row.get("subject_type"),
+                subject_id=row.get("subject_id"),
+                interaction_type=row.get("interaction_type"),
+                session_id=row.get("session_id"),
+                namespace_key=row.get("namespace_key"),
+            )
+
+        interaction_turns = self.db.fetch_all(
+            """
+            SELECT ct.id, ct.role, ct.turn_type, ct.content, ct.created_at, s.id AS session_id, s.title, s.user_id, s.owner_agent_id, s.agent_id, s.subject_type, s.subject_id, s.interaction_type, s.namespace_key
+            FROM conversation_turns ct
+            JOIN sessions s ON s.id = ct.session_id
+            """
+        )
+        for row in interaction_turns:
+            self._index_interaction_turn(
+                {
+                    "id": row.get("session_id"),
+                    "title": row.get("title"),
+                    "user_id": row.get("user_id"),
+                    "owner_agent_id": row.get("owner_agent_id"),
+                    "agent_id": row.get("agent_id"),
+                    "subject_type": row.get("subject_type"),
+                    "subject_id": row.get("subject_id"),
+                    "interaction_type": row.get("interaction_type"),
+                    "namespace_key": row.get("namespace_key"),
+                },
+                turn_id=row["id"],
+                role=str(row.get("role") or ""),
+                content=str(row.get("content") or ""),
+                turn_type=row.get("turn_type"),
+                updated_at=str(row.get("created_at") or ""),
+            )
+
+        for snapshot in _deserialize_rows(self.db.fetch_all("SELECT * FROM working_memory_snapshots")):
+            self._index_interaction_snapshot(snapshot)
+
+        for run in _deserialize_rows(self.db.fetch_all("SELECT * FROM runs")):
+            self._index_execution_run(run)
+        observation_rows = self.db.fetch_all(
+            """
+            SELECT o.*, r.user_id, r.owner_agent_id, r.agent_id, r.subject_type, r.subject_id, r.interaction_type, r.namespace_key
+            FROM observations o
+            JOIN runs r ON r.id = o.run_id
+            """
+        )
+        for row in observation_rows:
+            self._index_execution_observation(
+                _deserialize_row(row) or dict(row),
+                run={
+                    "user_id": row.get("user_id"),
+                    "owner_agent_id": row.get("owner_agent_id"),
+                    "agent_id": row.get("agent_id"),
+                    "subject_type": row.get("subject_type"),
+                    "subject_id": row.get("subject_id"),
+                    "interaction_type": row.get("interaction_type"),
+                    "session_id": row.get("session_id"),
+                    "namespace_key": row.get("namespace_key"),
+                },
+            )
 
     def _link_memory_relations(self, memory: dict[str, Any]) -> None:
         self.db.execute("DELETE FROM memory_links WHERE source_memory_id = ?", (memory["id"],))
@@ -3971,6 +4559,7 @@ class AIMemory:
         threshold: float,
         filters: dict[str, Any] | None,
         vector_hits: dict[str, float],
+        fts_hits: dict[str, float],
         affinity: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         ranked = self._rank_rows(
@@ -3985,6 +4574,7 @@ class AIMemory:
             threshold=threshold,
             filters=filters,
             vector_hits=vector_hits,
+            fts_hits=fts_hits,
             affinity=affinity,
         )
         for item in ranked:
@@ -4005,6 +4595,7 @@ class AIMemory:
         threshold: float,
         filters: dict[str, Any] | None,
         vector_hits: dict[str, float],
+        fts_hits: dict[str, float],
         affinity: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         ranked: list[dict[str, Any]] = []
@@ -4021,7 +4612,8 @@ class AIMemory:
                 embedding=item.get("embedding"),
                 updated_at=item.get(updated_at_key),
                 importance=importance_getter(item),
-                boost=vector_hits.get(record_id, 0.0) * 0.16,
+                lexical_score=fts_hits.get(record_id, 0.0),
+                boost=vector_hits.get(record_id, 0.0) * 0.12,
                 half_life_days=half_life_days,
             )
             if affinity:

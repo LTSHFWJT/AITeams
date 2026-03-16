@@ -47,6 +47,25 @@ def _overlap_score(query_tokens: set[str], candidate_tokens: set[str]) -> float:
     return intersection / max(1, len(query_tokens))
 
 
+def _token_weight(token: str) -> float:
+    cleaned = str(token or "").strip()
+    if not cleaned:
+        return 0.0
+    if cleaned.isdigit():
+        return 0.8
+    return 1.0 + min(1.4, len(cleaned) / 6.0)
+
+
+def _weighted_overlap_score(query_tokens: set[str], candidate_tokens: set[str]) -> float:
+    if not query_tokens or not candidate_tokens:
+        return 0.0
+    denominator = sum(_token_weight(token) for token in query_tokens)
+    if denominator <= 0:
+        return 0.0
+    numerator = sum(_token_weight(token) for token in query_tokens if token in candidate_tokens)
+    return numerator / denominator
+
+
 def _coerce_keywords(value: str | list[str] | None) -> list[str]:
     if isinstance(value, list):
         return [str(item) for item in value if str(item).strip()]
@@ -66,6 +85,7 @@ def score_record(
     embedding: str | list[float] | None = None,
     updated_at: str | None = None,
     importance: float = 0.5,
+    lexical_score: float = 0.0,
     boost: float = 0.0,
     half_life_days: float = 30.0,
 ) -> tuple[float, dict[str, float]]:
@@ -83,18 +103,20 @@ def score_record(
             dense_vector if isinstance(dense_vector, list) and dense_vector else hash_embedding(text_normalized),
         ),
     )
-    sparse_score = _overlap_score(query_tokens, text_tokens)
-    keyword_score = _overlap_score(query_tokens, keyword_tokens)
+    sparse_score = _weighted_overlap_score(query_tokens, text_tokens)
+    keyword_score = _weighted_overlap_score(query_tokens, keyword_tokens)
     exact_score = 1.0 if query_normalized and query_normalized in text_normalized else 0.0
     recency_score = recency_multiplier(updated_at, half_life_days)
     importance_score = max(0.0, min(1.0, float(importance or 0.0)))
+    lexical_score = max(0.0, min(1.0, float(lexical_score or 0.0)))
 
     score = (
-        (0.42 * dense_score)
-        + (0.24 * sparse_score)
-        + (0.12 * keyword_score)
+        (0.36 * dense_score)
+        + (0.18 * sparse_score)
+        + (0.1 * keyword_score)
+        + (0.13 * lexical_score)
         + (0.08 * exact_score)
-        + (0.08 * recency_score)
+        + (0.09 * recency_score)
         + (0.06 * importance_score)
         + boost
     )
@@ -102,6 +124,7 @@ def score_record(
         "dense": round(dense_score, 6),
         "sparse": round(sparse_score, 6),
         "keyword": round(keyword_score, 6),
+        "lexical": round(lexical_score, 6),
         "exact": round(exact_score, 6),
         "recency": round(recency_score, 6),
         "importance": round(importance_score, 6),

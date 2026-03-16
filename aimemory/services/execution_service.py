@@ -159,7 +159,11 @@ class ExecutionService(ServiceBase):
             """,
             (observation_id, run_id, task_id, session_id, kind, content, json_dumps(metadata or {}), now),
         )
-        return self._deserialize_row(self.db.fetch_one("SELECT * FROM observations WHERE id = ?", (observation_id,)))
+        observation = self._deserialize_row(self.db.fetch_one("SELECT * FROM observations WHERE id = ?", (observation_id,)))
+        if observation is not None:
+            run = self.get_run(run_id)
+            self._kernel()._index_execution_observation(observation, run=run)
+        return observation
 
     def get_run_timeline(self, run_id: str) -> dict[str, Any]:
         return {

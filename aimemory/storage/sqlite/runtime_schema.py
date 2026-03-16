@@ -171,6 +171,28 @@ EXTRA_SCHEMA_STATEMENTS = [
         metadata TEXT
     )
     """,
+    """
+    CREATE VIRTUAL TABLE IF NOT EXISTS text_search_index USING fts5(
+        record_id UNINDEXED,
+        domain UNINDEXED,
+        collection UNINDEXED,
+        title,
+        text,
+        keywords,
+        lexical,
+        path,
+        updated_at UNINDEXED,
+        user_id UNINDEXED,
+        owner_agent_id UNINDEXED,
+        subject_type UNINDEXED,
+        subject_id UNINDEXED,
+        interaction_type UNINDEXED,
+        session_id UNINDEXED,
+        run_id UNINDEXED,
+        namespace_key UNINDEXED,
+        tokenize = 'unicode61 remove_diacritics 2'
+    )
+    """,
 ]
 
 POST_MIGRATION_SCHEMA_STATEMENTS = [
