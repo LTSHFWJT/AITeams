@@ -3090,18 +3090,30 @@ class AIMemory:
 
     def storage_layout(self, **scope_kwargs: Any) -> dict[str, Any]:
         scope = self._resolve_scope(**scope_kwargs)
+        memory_vector_path = str(getattr(self.vector_index, "memory_path", self.config.memory_path))
+        competency_vector_path = str(getattr(self.vector_index, "competency_path", self.config.competency_path))
         return {
             "scope": scope,
+            "root_dir": str(self.config.root_dir),
+            "memory_dir": str(self.config.memory_path),
+            "competency_dir": str(self.config.competency_path),
+            "sqlite_path": str(self.config.sqlite_path),
             "relational_backend": "sqlite",
             "content_backend": "lmdb",
             "lmdb_path": str(self.config.lmdb_path),
+            "object_store_path": str(self.config.object_store_path),
             "vector_backend": self._resolve_vector_backend_name(),
+            "vector_paths": {
+                "memory": memory_vector_path,
+                "competency": competency_vector_path,
+            },
             "graph_backend": self._resolve_graph_backend_name(),
             "domains": {
                 "long_term_memory": {
                     "tables": ["long_term_memories", "memory_index"],
                     "lmdb_bucket": "long_term",
                     "object_prefix": self._object_store_prefix(scope, "memory"),
+                    "vector_path": memory_vector_path,
                     "scope": str(MemoryScope.LONG_TERM),
                     "strategy": "dedupe + semantic distill + hybrid retrieval",
                     "compression_threshold_chars": self.config.memory_policy.long_term_char_threshold,
@@ -3110,6 +3122,7 @@ class AIMemory:
                     "tables": ["conversation_turns", "working_memory_snapshots", "short_term_memories"],
                     "lmdb_bucket": "short_term",
                     "object_prefix": self._object_store_prefix(scope, "interaction"),
+                    "vector_path": memory_vector_path,
                     "scope": str(MemoryScope.SESSION),
                     "strategy": "session turns + salience compression + promotion",
                     "compression_threshold_chars": self.config.memory_policy.short_term_char_threshold,
@@ -3117,17 +3130,20 @@ class AIMemory:
                 "knowledge": {
                     "tables": ["documents", "document_chunks", "knowledge_chunk_index"],
                     "object_prefix": self._object_store_prefix(scope, "knowledge"),
+                    "vector_path": competency_vector_path,
                     "strategy": "chunk + semantic index + lightweight rerank",
                 },
                 "skill": {
                     "tables": ["skills", "skill_versions", "skill_files", "skill_reference_chunks", "skill_index", "skill_reference_index"],
                     "object_prefix": self._object_store_prefix(scope, "skill"),
+                    "vector_path": competency_vector_path,
                     "strategy": "versioned procedural memory + semantic search",
                 },
                 "archive": {
                     "tables": ["archive_memories", "archive_summaries", "archive_summary_index"],
                     "lmdb_bucket": "archive",
                     "object_prefix": self._object_store_prefix(scope, "archive"),
+                    "vector_path": memory_vector_path,
                     "strategy": "budget compression + low-cost summary retrieval",
                     "compression_threshold_chars": self.config.memory_policy.archive_char_threshold,
                 },

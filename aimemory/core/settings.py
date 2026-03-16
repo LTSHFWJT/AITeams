@@ -63,6 +63,8 @@ class EmbeddingLiteConfig:
 @dataclass(slots=True)
 class AIMemoryConfig:
     root_dir: str | Path = ".aimemory"
+    memory_path: str | Path | None = None
+    competency_path: str | Path | None = None
     sqlite_path: str | Path | None = None
     lmdb_path: str | Path | None = None
     object_store_path: str | Path | None = None
@@ -108,11 +110,15 @@ class AIMemoryConfig:
 
     def resolved(self) -> "AIMemoryConfig":
         root_dir = ensure_dir(self.root_dir)
-        sqlite_path = Path(self.sqlite_path) if self.sqlite_path else root_dir / "data" / "aimemory.db"
-        lmdb_path = Path(self.lmdb_path) if self.lmdb_path else root_dir / "lmdb"
-        object_store_path = Path(self.object_store_path) if self.object_store_path else root_dir / "objects"
-        lancedb_path = Path(self.lancedb_path) if self.lancedb_path else root_dir / "lancedb"
+        memory_path = Path(self.memory_path) if self.memory_path else root_dir / "memory"
+        competency_path = Path(self.competency_path) if self.competency_path else root_dir / "competency"
+        sqlite_path = Path(self.sqlite_path) if self.sqlite_path else root_dir / "aimemory.db"
+        lmdb_path = Path(self.lmdb_path) if self.lmdb_path else memory_path / "lmdb"
+        object_store_path = Path(self.object_store_path) if self.object_store_path else competency_path / "objects"
+        lancedb_path = Path(self.lancedb_path) if self.lancedb_path else root_dir
 
+        ensure_dir(memory_path)
+        ensure_dir(competency_path)
         ensure_dir(sqlite_path.parent)
         ensure_dir(lmdb_path)
         ensure_dir(object_store_path)
@@ -121,6 +127,8 @@ class AIMemoryConfig:
         return replace(
             self,
             root_dir=root_dir,
+            memory_path=memory_path.resolve(),
+            competency_path=competency_path.resolve(),
             sqlite_path=sqlite_path.resolve(),
             lmdb_path=lmdb_path.resolve(),
             object_store_path=object_store_path.resolve(),
