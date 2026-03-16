@@ -105,11 +105,13 @@ MEMORY_TABLE_MAP = {
 MEMORY_BUCKET_MAP = {
     str(MemoryScope.SESSION): "short_term",
     str(MemoryScope.LONG_TERM): "long_term",
+    "archive": "archive",
 }
 
 MEMORY_TABLE_SELECT = """
     SELECT
         id,
+        bundle_id,
         content_id,
         user_id,
         agent_id,
@@ -191,6 +193,7 @@ class AIMemory:
         self._normalize_memory_management_tables()
         self.db.execute("UPDATE skills SET owner_agent_id = COALESCE(owner_agent_id, owner_id) WHERE owner_agent_id IS NULL")
         self._normalize_archive_management_table()
+        self._backfill_memory_bundles()
 
     def _normalize_memory_management_tables(self) -> None:
         for table_name in MEMORY_TABLE_MAP.values():
@@ -263,6 +266,252 @@ class AIMemory:
                 return scope
         return str(MemoryScope.LONG_TERM)
 
+    def _memory_bundle_scope_key(
+        self,
+        *,
+        scope: str,
+        user_id: str | None,
+        owner_agent_id: str | None,
+        subject_type: str | None,
+        subject_id: str | None,
+        interaction_type: str | None,
+        namespace_key: str | None,
+    ) -> str:
+        return "|".join(
+            [
+                f"scope={scope}",
+                f"user={user_id or ''}",
+                f"owner={owner_agent_id or ''}",
+                f"subject_type={subject_type or ''}",
+                f"subject_id={subject_id or ''}",
+                f"interaction={interaction_type or ''}",
+                f"namespace={namespace_key or ''}",
+            ]
+        )
+
+    def _bundle_payload(self, bundle_row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "bundle_id": bundle_row["id"],
+            "scope": bundle_row["scope"],
+            "scope_key": bundle_row["scope_key"],
+            "user_id": bundle_row.get("user_id"),
+            "owner_agent_id": bundle_row.get("owner_agent_id"),
+            "subject_type": bundle_row.get("subject_type"),
+            "subject_id": bundle_row.get("subject_id"),
+            "interaction_type": bundle_row.get("interaction_type"),
+            "namespace_key": bundle_row.get("namespace_key"),
+            "items": [],
+            "metadata": _loads(bundle_row.get("metadata"), {}),
+            "updated_at": bundle_row.get("updated_at"),
+        }
+
+    def _ensure_memory_bundle(
+        self,
+        *,
+        scope: str,
+        user_id: str | None,
+        owner_agent_id: str | None,
+        subject_type: str | None,
+        subject_id: str | None,
+        interaction_type: str | None,
+        namespace_key: str | None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        scope_key = self._memory_bundle_scope_key(
+            scope=scope,
+            user_id=user_id,
+            owner_agent_id=owner_agent_id,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            interaction_type=interaction_type,
+            namespace_key=namespace_key,
+        )
+        existing = self.db.fetch_one("SELECT * FROM memory_bundles WHERE scope_key = ?", (scope_key,))
+        now = utcnow_iso()
+        if existing is not None:
+            merged_metadata = merge_metadata(_loads(existing.get("metadata"), {}), metadata or {})
+            self.db.execute(
+                """
+                UPDATE memory_bundles
+                SET user_id = ?, owner_agent_id = ?, subject_type = ?, subject_id = ?, interaction_type = ?, namespace_key = ?, metadata = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    user_id,
+                    owner_agent_id,
+                    subject_type,
+                    subject_id,
+                    interaction_type,
+                    namespace_key,
+                    json_dumps(merged_metadata),
+                    now,
+                    existing["id"],
+                ),
+            )
+            updated = self.db.fetch_one("SELECT * FROM memory_bundles WHERE id = ?", (existing["id"],))
+            assert updated is not None
+            return updated
+        bundle_id = make_uuid7()
+        self.db.execute(
+            """
+            INSERT INTO memory_bundles(id, scope, scope_key, user_id, owner_agent_id, subject_type, subject_id, interaction_type, namespace_key, metadata, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                bundle_id,
+                scope,
+                scope_key,
+                user_id,
+                owner_agent_id,
+                subject_type,
+                subject_id,
+                interaction_type,
+                namespace_key,
+                json_dumps(metadata or {}),
+                now,
+                now,
+            ),
+        )
+        bundle = self.db.fetch_one("SELECT * FROM memory_bundles WHERE id = ?", (bundle_id,))
+        assert bundle is not None
+        self.memory_content_store.put_json(self._memory_bucket_for_scope(scope), self._bundle_payload(bundle), key=bundle_id)
+        return bundle
+
+    def _get_memory_bundle(self, scope: str, bundle_id: str, *, bundle_row: dict[str, Any] | None = None) -> dict[str, Any]:
+        bundle = self.memory_content_store.get_json(self._memory_bucket_for_scope(scope), bundle_id, None)
+        if isinstance(bundle, dict):
+            bundle.setdefault("items", [])
+            bundle.setdefault("scope", scope)
+            bundle.setdefault("bundle_id", bundle_id)
+            return bundle
+        row = bundle_row or self.db.fetch_one("SELECT * FROM memory_bundles WHERE id = ?", (bundle_id,))
+        if row is None:
+            return {"bundle_id": bundle_id, "scope": scope, "items": [], "metadata": {}, "updated_at": utcnow_iso()}
+        payload = self._bundle_payload(row)
+        self.memory_content_store.put_json(self._memory_bucket_for_scope(scope), payload, key=bundle_id)
+        return payload
+
+    def _put_memory_bundle(self, scope: str, bundle_id: str, payload: dict[str, Any]) -> None:
+        now = utcnow_iso()
+        normalized = dict(payload)
+        normalized["bundle_id"] = bundle_id
+        normalized["scope"] = scope
+        normalized["items"] = list(normalized.get("items") or [])
+        normalized["updated_at"] = now
+        self.memory_content_store.put_json(self._memory_bucket_for_scope(scope), normalized, key=bundle_id)
+        self.db.execute("UPDATE memory_bundles SET updated_at = ? WHERE id = ?", (now, bundle_id))
+
+    def _find_bundle_item(
+        self,
+        bundle: dict[str, Any] | None,
+        *,
+        record_id: str | None = None,
+        content_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        if not isinstance(bundle, dict):
+            return None
+        for item in list(bundle.get("items") or []):
+            if record_id and item.get("record_id") == record_id:
+                return item
+            if content_id and item.get("content_id") == content_id:
+                return item
+        return None
+
+    def _upsert_bundle_item(self, scope: str, bundle_id: str, item_payload: dict[str, Any]) -> dict[str, Any]:
+        bundle = self._get_memory_bundle(scope, bundle_id)
+        items = list(bundle.get("items") or [])
+        replaced = False
+        for index, item in enumerate(items):
+            if item.get("record_id") == item_payload.get("record_id") or item.get("content_id") == item_payload.get("content_id"):
+                items[index] = dict(item_payload)
+                replaced = True
+                break
+        if not replaced:
+            items.append(dict(item_payload))
+        bundle["items"] = items
+        self._put_memory_bundle(scope, bundle_id, bundle)
+        return dict(item_payload)
+
+    def _bundle_memory_item_payload(self, row: dict[str, Any], *, text: str) -> dict[str, Any]:
+        return {
+            "record_id": row["id"],
+            "content_id": row["content_id"],
+            "text": text,
+            "summary": row.get("summary"),
+            "importance": float(row.get("importance", 0.5) or 0.0),
+            "status": row.get("status", "active"),
+            "source": row.get("source"),
+            "memory_type": row.get("memory_type"),
+            "session_id": row.get("session_id"),
+            "run_id": row.get("run_id"),
+            "source_session_id": row.get("source_session_id"),
+            "source_run_id": row.get("source_run_id"),
+            "metadata": _loads(row.get("metadata"), {}),
+            "created_at": row.get("created_at"),
+            "updated_at": row.get("updated_at"),
+            "archived_at": row.get("archived_at"),
+        }
+
+    def _bundle_archive_item_payload(self, row: dict[str, Any], *, summary: str, content: str, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+        return {
+            "record_id": row["id"],
+            "content_id": row["content_id"],
+            "summary": summary,
+            "content": content,
+            "status": "active",
+            "domain": row.get("domain"),
+            "source_id": row.get("source_id"),
+            "source_type": row.get("source_type"),
+            "session_id": row.get("session_id"),
+            "metadata": metadata or _loads(row.get("metadata"), {}),
+            "created_at": row.get("created_at"),
+            "updated_at": row.get("updated_at"),
+        }
+
+    def _backfill_memory_bundles(self) -> None:
+        for table_name in MEMORY_TABLE_MAP.values():
+            scope = self._memory_scope_from_table(table_name)
+            rows = self.db.fetch_all(f"{self._memory_row_sql(table_name)} WHERE COALESCE(bundle_id, '') = ''")
+            for row in rows:
+                bundle = self._ensure_memory_bundle(
+                    scope=scope,
+                    user_id=row.get("user_id"),
+                    owner_agent_id=row.get("owner_agent_id") or row.get("agent_id"),
+                    subject_type=row.get("subject_type"),
+                    subject_id=row.get("subject_id"),
+                    interaction_type=row.get("interaction_type"),
+                    namespace_key=row.get("namespace_key"),
+                    metadata={},
+                )
+                text = self.memory_content_store.get_text(self._memory_bucket_for_scope(scope), row["content_id"]) or ""
+                self._upsert_bundle_item(scope, bundle["id"], self._bundle_memory_item_payload({**row, "bundle_id": bundle["id"]}, text=text))
+                self.db.execute(f"UPDATE {table_name} SET bundle_id = ? WHERE id = ?", (bundle["id"], row["id"]))
+
+        archive_rows = self.db.fetch_all("SELECT * FROM archive_memories WHERE COALESCE(bundle_id, '') = ''")
+        for row in archive_rows:
+            bundle = self._ensure_memory_bundle(
+                scope="archive",
+                user_id=row.get("user_id"),
+                owner_agent_id=row.get("owner_agent_id"),
+                subject_type=row.get("subject_type"),
+                subject_id=row.get("subject_id"),
+                interaction_type=row.get("interaction_type"),
+                namespace_key=row.get("namespace_key"),
+                metadata={},
+            )
+            archive_payload = self.memory_content_store.get_json("archive", row["content_id"], {}) or {}
+            self._upsert_bundle_item(
+                "archive",
+                bundle["id"],
+                self._bundle_archive_item_payload(
+                    {**row, "bundle_id": bundle["id"]},
+                    summary=str(archive_payload.get("summary") or row.get("summary") or ""),
+                    content=str(archive_payload.get("content") or ""),
+                    metadata=archive_payload.get("metadata") or _loads(row.get("metadata"), {}),
+                ),
+            )
+            self.db.execute("UPDATE archive_memories SET bundle_id = ? WHERE id = ?", (bundle["id"], row["id"]))
+
     def _memory_table_for_id(self, memory_id: str) -> str | None:
         for table_name in MEMORY_TABLE_MAP.values():
             if self.db.fetch_one(f"SELECT id FROM {table_name} WHERE id = ?", (memory_id,)):
@@ -279,16 +528,38 @@ class AIMemory:
         item["scope"] = self._memory_scope_from_table(table_name)
         return item
 
-    def _hydrate_memory_row(self, table_name: str, row: dict[str, Any] | None) -> dict[str, Any] | None:
+    def _hydrate_memory_row(
+        self,
+        table_name: str,
+        row: dict[str, Any] | None,
+        *,
+        bundle_cache: dict[tuple[str, str], dict[str, Any]] | None = None,
+    ) -> dict[str, Any] | None:
         item = _deserialize_row(self._memory_row_with_scope(table_name, row))
         if item is None:
             return None
+        bucket = self._memory_bucket_for_scope(item["scope"])
+        bundle_id = str(item.get("bundle_id") or "").strip()
         content_id = item.get("content_id")
-        item["text"] = self.memory_content_store.get_text(self._memory_bucket_for_scope(item["scope"]), content_id) if content_id else ""
+        text = ""
+        if bundle_id:
+            cache_key = (bucket, bundle_id)
+            bundle = (bundle_cache or {}).get(cache_key)
+            if bundle is None:
+                bundle = self._get_memory_bundle(item["scope"], bundle_id)
+                if bundle_cache is not None:
+                    bundle_cache[cache_key] = bundle
+            bundle_item = self._find_bundle_item(bundle, record_id=item["id"], content_id=content_id)
+            if bundle_item is not None:
+                text = str(bundle_item.get("text") or "")
+        if not text and content_id:
+            text = self.memory_content_store.get_text(bucket, content_id) or ""
+        item["text"] = text
         return item
 
     def _hydrate_memory_rows(self, table_name: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return [item for item in (self._hydrate_memory_row(table_name, row) for row in rows) if item is not None]
+        bundle_cache: dict[tuple[str, str], dict[str, Any]] = {}
+        return [item for item in (self._hydrate_memory_row(table_name, row, bundle_cache=bundle_cache) for row in rows) if item is not None]
 
     def _list_memory_rows(
         self,
@@ -510,7 +781,6 @@ class AIMemory:
         importance = float(kwargs.pop("importance", row.get("importance", 0.5)))
         status = str(kwargs.pop("status", row.get("status", "active")))
         now = utcnow_iso()
-        self.memory_content_store.put_text(self._memory_bucket_for_scope(row["scope"]), text, key=row["content_id"])
         self.db.execute(
             f"""
             UPDATE {table_name}
@@ -519,6 +789,23 @@ class AIMemory:
             """,
             (summary, importance, status, json_dumps(metadata), now, memory_id),
         )
+        bundle_id = str(row.get("bundle_id") or "").strip()
+        if bundle_id:
+            self._upsert_bundle_item(
+                row["scope"],
+                bundle_id,
+                self._bundle_memory_item_payload(
+                    {
+                        **row,
+                        "summary": summary,
+                        "importance": importance,
+                        "status": status,
+                        "metadata": metadata,
+                        "updated_at": now,
+                    },
+                    text=text,
+                ),
+            )
         self._record_memory_event(memory_id, "UPDATE", {"text": text, "metadata": metadata, "status": status})
         updated = self.get(memory_id)
         assert updated is not None
@@ -527,6 +814,20 @@ class AIMemory:
         else:
             self._delete_memory_index(memory_id)
         updated["_event"] = "UPDATE"
+        warning = self._maybe_compact_memory_scope(
+            scope=row["scope"],
+            bundle_id=bundle_id,
+            user_id=updated.get("user_id"),
+            owner_agent_id=updated.get("owner_agent_id"),
+            subject_type=updated.get("subject_type"),
+            subject_id=updated.get("subject_id"),
+            interaction_type=updated.get("interaction_type"),
+            namespace_key=updated.get("namespace_key"),
+            session_id=updated.get("session_id"),
+            source=updated.get("source"),
+        )
+        if warning is not None:
+            updated["memory_overflow_warning"] = warning
         return updated
 
     def delete(self, memory_id: str) -> dict[str, Any]:
@@ -537,6 +838,13 @@ class AIMemory:
         assert table_name is not None
         now = utcnow_iso()
         self.db.execute(f"UPDATE {table_name} SET status = ?, updated_at = ? WHERE id = ?", ("deleted", now, memory_id))
+        bundle_id = str(row.get("bundle_id") or "").strip()
+        if bundle_id:
+            self._upsert_bundle_item(
+                row["scope"],
+                bundle_id,
+                self._bundle_memory_item_payload({**row, "status": "deleted", "updated_at": now}, text=row["text"]),
+            )
         self._delete_memory_index(memory_id)
         self._record_memory_event(memory_id, "DELETE", {"deleted_at": now})
         result = dict(row)
@@ -2032,15 +2340,25 @@ class AIMemory:
         payload = {"memory": memory, "metadata": metadata}
         archive_id = make_id("arch")
         content_id = make_uuid7()
-        self.memory_content_store.put_json("archive", payload, key=content_id)
         summary_text = memory.get("summary") or build_summary(split_sentences(memory["text"]), max_sentences=3, max_chars=240)
+        archive_bundle = self._ensure_memory_bundle(
+            scope="archive",
+            user_id=memory.get("user_id"),
+            owner_agent_id=memory.get("owner_agent_id") or memory.get("agent_id"),
+            subject_type=memory.get("subject_type"),
+            subject_id=memory.get("subject_id"),
+            interaction_type=memory.get("interaction_type"),
+            namespace_key=memory.get("namespace_key"),
+            metadata=self._scope_metadata(memory),
+        )
         self.db.execute(
             """
-            INSERT INTO archive_memories(id, content_id, domain, source_id, user_id, owner_agent_id, subject_type, subject_id, interaction_type, namespace_key, source_type, session_id, summary, metadata, content_format, created_at, updated_at, last_rehydrated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO archive_memories(id, bundle_id, content_id, domain, source_id, user_id, owner_agent_id, subject_type, subject_id, interaction_type, namespace_key, source_type, session_id, summary, metadata, content_format, created_at, updated_at, last_rehydrated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 archive_id,
+                archive_bundle["id"],
                 content_id,
                 "memory",
                 memory_id,
@@ -2060,6 +2378,28 @@ class AIMemory:
                 None,
             ),
         )
+        self._upsert_bundle_item(
+            "archive",
+            archive_bundle["id"],
+            self._bundle_archive_item_payload(
+                {
+                    "id": archive_id,
+                    "bundle_id": archive_bundle["id"],
+                    "content_id": content_id,
+                    "domain": "memory",
+                    "source_id": memory_id,
+                    "source_type": "memory",
+                    "session_id": memory.get("session_id"),
+                    "summary": summary_text,
+                    "metadata": merge_metadata(metadata, self._scope_metadata(memory)),
+                    "created_at": now,
+                    "updated_at": now,
+                },
+                summary=summary_text,
+                content=json_dumps(payload),
+                metadata=merge_metadata(metadata, self._scope_metadata(memory)),
+            ),
+        )
         summary_id = make_id("archsum")
         highlights = [memory["text"], summary_text]
         self.db.execute(
@@ -2072,6 +2412,12 @@ class AIMemory:
         table_name = self._memory_table_for_id(memory_id)
         assert table_name is not None
         self.db.execute(f"UPDATE {table_name} SET status = ?, archived_at = ?, updated_at = ? WHERE id = ?", ("archived", now, now, memory_id))
+        if memory.get("bundle_id"):
+            self._upsert_bundle_item(
+                memory["scope"],
+                str(memory["bundle_id"]),
+                self._bundle_memory_item_payload({**memory, "status": "archived", "updated_at": now, "archived_at": now}, text=memory["text"]),
+            )
         self._delete_memory_index(memory_id)
         self._index_archive_summary(
             {
@@ -2130,14 +2476,24 @@ class AIMemory:
         }
         archive_id = make_id("arch")
         content_id = make_uuid7()
-        self.memory_content_store.put_json("archive", payload, key=content_id)
+        archive_bundle = self._ensure_memory_bundle(
+            scope="archive",
+            user_id=session.get("user_id"),
+            owner_agent_id=session.get("owner_agent_id") or session.get("agent_id"),
+            subject_type=session.get("subject_type"),
+            subject_id=session.get("subject_id"),
+            interaction_type=session.get("interaction_type"),
+            namespace_key=session.get("namespace_key"),
+            metadata=self._scope_metadata(session),
+        )
         self.db.execute(
             """
-            INSERT INTO archive_memories(id, content_id, domain, source_id, user_id, owner_agent_id, subject_type, subject_id, interaction_type, namespace_key, source_type, session_id, summary, metadata, content_format, created_at, updated_at, last_rehydrated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO archive_memories(id, bundle_id, content_id, domain, source_id, user_id, owner_agent_id, subject_type, subject_id, interaction_type, namespace_key, source_type, session_id, summary, metadata, content_format, created_at, updated_at, last_rehydrated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 archive_id,
+                archive_bundle["id"],
                 content_id,
                 "session",
                 session_id,
@@ -2155,6 +2511,28 @@ class AIMemory:
                 now,
                 now,
                 None,
+            ),
+        )
+        self._upsert_bundle_item(
+            "archive",
+            archive_bundle["id"],
+            self._bundle_archive_item_payload(
+                {
+                    "id": archive_id,
+                    "bundle_id": archive_bundle["id"],
+                    "content_id": content_id,
+                    "domain": "session",
+                    "source_id": session_id,
+                    "source_type": "session",
+                    "session_id": session_id,
+                    "summary": compression.summary,
+                    "metadata": merge_metadata(metadata, self._scope_metadata(session)),
+                    "created_at": now,
+                    "updated_at": now,
+                },
+                summary=compression.summary,
+                content=json_dumps(payload),
+                metadata=merge_metadata(metadata, self._scope_metadata(session)),
             ),
         )
         summary_id = make_id("archsum")
@@ -2189,6 +2567,12 @@ class AIMemory:
                 table_name = self._memory_table_for_id(item["id"])
                 if table_name:
                     self.db.execute(f"UPDATE {table_name} SET status = ?, archived_at = ?, updated_at = ? WHERE id = ?", ("archived", now, now, item["id"]))
+                if item.get("bundle_id"):
+                    self._upsert_bundle_item(
+                        item["scope"],
+                        str(item["bundle_id"]),
+                        self._bundle_memory_item_payload({**item, "status": "archived", "updated_at": now, "archived_at": now}, text=item["text"]),
+                    )
                 self._delete_memory_index(item["id"])
         return {
             "archive": self.get_archive_unit(archive_id),
@@ -2199,6 +2583,12 @@ class AIMemory:
         archive = _deserialize_row(self.db.fetch_one("SELECT * FROM archive_memories WHERE id = ?", (archive_unit_id,)))
         if archive is None:
             return None
+        bundle_id = str(archive.get("bundle_id") or "").strip()
+        if bundle_id:
+            bundle = self._get_memory_bundle("archive", bundle_id)
+            bundle_item = self._find_bundle_item(bundle, record_id=archive_unit_id, content_id=archive.get("content_id"))
+            if bundle_item is not None:
+                archive["content"] = bundle_item.get("content")
         archive["summaries"] = _deserialize_rows(self.db.fetch_all("SELECT * FROM archive_summaries WHERE archive_unit_id = ? ORDER BY created_at DESC", (archive_unit_id,)), ("highlights", "metadata"))
         return archive
 
@@ -3692,17 +4082,29 @@ class AIMemory:
         metadata = merge_metadata(metadata or {}, self._scope_metadata(resolved_scope))
         now = utcnow_iso()
         table_name = self._memory_table_for_scope(scope)
-        existing, relation = self._find_existing_memory(
-            cleaned,
+        bundle = self._ensure_memory_bundle(
+            scope=scope,
             user_id=user_id,
             owner_agent_id=owner_agent_id,
             subject_type=subject_type,
             subject_id=subject_id,
             interaction_type=interaction_type,
             namespace_key=namespace_key,
-            session_id=session_id,
-            scope=scope,
+            metadata=self._scope_metadata(resolved_scope),
         )
+        existing, relation = (None, None)
+        if source != "auto_compression":
+            existing, relation = self._find_existing_memory(
+                cleaned,
+                user_id=user_id,
+                owner_agent_id=owner_agent_id,
+                subject_type=subject_type,
+                subject_id=subject_id,
+                interaction_type=interaction_type,
+                namespace_key=namespace_key,
+                session_id=session_id,
+                scope=scope,
+            )
         if existing is not None and relation == "duplicate":
             merged_metadata = merge_metadata(existing.get("metadata"), metadata)
             new_importance = max(float(existing.get("importance", 0.5) or 0.0), float(importance))
@@ -3711,16 +4113,44 @@ class AIMemory:
             self.db.execute(
                 f"""
                 UPDATE {existing_table}
-                SET importance = ?, namespace_key = ?, metadata = ?, updated_at = ?
+                SET importance = ?, namespace_key = ?, metadata = ?, updated_at = ?, bundle_id = ?
                 WHERE id = ?
                 """,
-                (new_importance, namespace_key or existing.get("namespace_key"), json_dumps(merged_metadata), now, existing["id"]),
+                (new_importance, namespace_key or existing.get("namespace_key"), json_dumps(merged_metadata), now, bundle["id"], existing["id"]),
+            )
+            self._upsert_bundle_item(
+                existing["scope"],
+                bundle["id"],
+                self._bundle_memory_item_payload(
+                    {
+                        **existing,
+                        "bundle_id": bundle["id"],
+                        "importance": new_importance,
+                        "metadata": merged_metadata,
+                        "updated_at": now,
+                    },
+                    text=existing["text"],
+                ),
             )
             self._record_memory_event(existing["id"], "DUPLICATE_TOUCH", {"incoming_text": cleaned})
             touched = self.get(existing["id"])
             assert touched is not None
             self._index_memory(touched)
             touched["_event"] = "DUPLICATE"
+            warning = self._maybe_compact_memory_scope(
+                scope=scope,
+                bundle_id=bundle["id"],
+                user_id=user_id,
+                owner_agent_id=owner_agent_id,
+                subject_type=subject_type,
+                subject_id=subject_id,
+                interaction_type=interaction_type,
+                namespace_key=namespace_key,
+                session_id=session_id,
+                source=source,
+            )
+            if warning is not None:
+                touched["memory_overflow_warning"] = warning
             return touched
         if existing is not None and relation == "merge":
             merged_text = merge_text_fragments([existing["text"], cleaned], max_sentences=6, max_chars=480)
@@ -3729,33 +4159,61 @@ class AIMemory:
             new_importance = max(float(existing.get("importance", 0.5) or 0.0), float(importance))
             existing_table = self._memory_table_for_id(existing["id"])
             assert existing_table is not None
-            self.memory_content_store.put_text(self._memory_bucket_for_scope(existing["scope"]), merged_text, key=existing["content_id"])
             self.db.execute(
                 f"""
                 UPDATE {existing_table}
-                SET summary = ?, importance = ?, namespace_key = ?, metadata = ?, updated_at = ?
+                SET summary = ?, importance = ?, namespace_key = ?, metadata = ?, updated_at = ?, bundle_id = ?
                 WHERE id = ?
                 """,
-                (merged_summary, new_importance, namespace_key or existing.get("namespace_key"), json_dumps(merged_metadata), now, existing["id"]),
+                (merged_summary, new_importance, namespace_key or existing.get("namespace_key"), json_dumps(merged_metadata), now, bundle["id"], existing["id"]),
+            )
+            self._upsert_bundle_item(
+                existing["scope"],
+                bundle["id"],
+                self._bundle_memory_item_payload(
+                    {
+                        **existing,
+                        "bundle_id": bundle["id"],
+                        "summary": merged_summary,
+                        "importance": new_importance,
+                        "metadata": merged_metadata,
+                        "updated_at": now,
+                    },
+                    text=merged_text,
+                ),
             )
             self._record_memory_event(existing["id"], "MERGE", {"incoming_text": cleaned})
             merged = self.get(existing["id"])
             assert merged is not None
             self._index_memory(merged)
             merged["_event"] = "MERGE"
+            warning = self._maybe_compact_memory_scope(
+                scope=scope,
+                bundle_id=bundle["id"],
+                user_id=user_id,
+                owner_agent_id=owner_agent_id,
+                subject_type=subject_type,
+                subject_id=subject_id,
+                interaction_type=interaction_type,
+                namespace_key=namespace_key,
+                session_id=session_id,
+                source=source,
+            )
+            if warning is not None:
+                merged["memory_overflow_warning"] = warning
             return merged
 
         memory_id = make_id("mem")
         content_id = make_uuid7()
         summary = build_summary(split_sentences(cleaned), max_sentences=3, max_chars=220)
-        self.memory_content_store.put_text(self._memory_bucket_for_scope(scope), cleaned, key=content_id)
         self.db.execute(
             f"""
-            INSERT INTO {table_name}(id, content_id, user_id, agent_id, owner_agent_id, subject_type, subject_id, interaction_type, namespace_key, session_id, run_id, source_session_id, source_run_id, memory_type, summary, importance, status, source, metadata, content_format, created_at, updated_at, archived_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO {table_name}(id, bundle_id, content_id, user_id, agent_id, owner_agent_id, subject_type, subject_id, interaction_type, namespace_key, session_id, run_id, source_session_id, source_run_id, memory_type, summary, importance, status, source, metadata, content_format, created_at, updated_at, archived_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 memory_id,
+                bundle["id"],
                 content_id,
                 user_id,
                 owner_agent_id,
@@ -3780,11 +4238,50 @@ class AIMemory:
                 None,
             ),
         )
+        self._upsert_bundle_item(
+            scope,
+            bundle["id"],
+            self._bundle_memory_item_payload(
+                {
+                    "id": memory_id,
+                    "bundle_id": bundle["id"],
+                    "content_id": content_id,
+                    "summary": summary,
+                    "importance": float(importance),
+                    "status": "active",
+                    "source": source,
+                    "memory_type": memory_type,
+                    "session_id": session_id,
+                    "run_id": run_id,
+                    "source_session_id": session_id,
+                    "source_run_id": run_id,
+                    "metadata": metadata,
+                    "created_at": now,
+                    "updated_at": now,
+                    "archived_at": None,
+                },
+                text=cleaned,
+            ),
+        )
         self._record_memory_event(memory_id, "ADD", {"text": cleaned, "scope": scope})
         created = self.get(memory_id)
         assert created is not None
         self._index_memory(created)
         created["_event"] = "ADD"
+        warning = self._maybe_compact_memory_scope(
+            scope=scope,
+            bundle_id=bundle["id"],
+            user_id=user_id,
+            owner_agent_id=owner_agent_id,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            interaction_type=interaction_type,
+            namespace_key=namespace_key,
+            session_id=session_id,
+            source=source,
+        )
+        if warning is not None:
+            created["memory_overflow_warning"] = warning
         return created
 
     def _find_existing_memory(
@@ -3800,7 +4297,7 @@ class AIMemory:
         session_id: str | None,
         scope: str,
     ) -> tuple[dict[str, Any] | None, str | None]:
-        filters = ["user_id = ?", "status = 'active'"]
+        filters = ["user_id = ?", "status = 'active'", "(source IS NULL OR source != 'auto_compression')"]
         params: list[Any] = [user_id]
         if owner_agent_id:
             filters.append("(owner_agent_id = ? OR (owner_agent_id IS NULL AND agent_id = ?))")
@@ -3844,6 +4341,163 @@ class AIMemory:
         if best_merge is not None:
             return best_merge, "merge"
         return None, None
+
+    def _find_generated_memory_by_bundle(self, scope: str, bundle_id: str) -> dict[str, Any] | None:
+        if not bundle_id:
+            return None
+        rows = self._list_memory_rows(
+            scope=scope,
+            filters=["bundle_id = ?", "status = 'active'", "source = 'auto_compression'"],
+            params=[bundle_id],
+            limit=1,
+        )
+        return rows[0] if rows else None
+
+    def _scope_rows_for_bundle(
+        self,
+        scope: str,
+        bundle_id: str,
+        *,
+        active_only: bool = True,
+        include_generated: bool = True,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        filters = ["bundle_id = ?"]
+        params: list[Any] = [bundle_id]
+        if active_only:
+            filters.append("status = 'active'")
+        if not include_generated:
+            filters.append("(source IS NULL OR source != 'auto_compression')")
+        return self._list_memory_rows(scope=scope, filters=filters, params=params, limit=limit)
+
+    def _maybe_compact_memory_scope(
+        self,
+        *,
+        scope: str,
+        bundle_id: str | None,
+        user_id: str | None,
+        owner_agent_id: str | None,
+        subject_type: str | None,
+        subject_id: str | None,
+        interaction_type: str | None,
+        namespace_key: str | None,
+        session_id: str | None,
+        source: str | None,
+    ) -> dict[str, Any] | None:
+        if scope not in {str(MemoryScope.SESSION), str(MemoryScope.LONG_TERM)}:
+            return None
+        if not bundle_id or source == "auto_compression":
+            return None
+
+        policy = self.config.memory_policy
+        threshold_chars = (
+            int(policy.short_term_char_threshold)
+            if scope == str(MemoryScope.SESSION)
+            else int(policy.long_term_char_threshold)
+        )
+        budget_chars = (
+            int(policy.short_term_compression_budget_chars)
+            if scope == str(MemoryScope.SESSION)
+            else int(policy.long_term_compression_budget_chars)
+        )
+        active_rows = self._scope_rows_for_bundle(scope, bundle_id, active_only=True, include_generated=False)
+        total_chars = sum(len(str(item.get("text") or "")) for item in active_rows)
+        if total_chars <= threshold_chars or not active_rows:
+            return None
+
+        compression = compress_records(
+            [
+                {
+                    "id": item["id"],
+                    "text": str(item.get("summary") or item.get("text") or ""),
+                    "score": float(item.get("importance", 0.5) or 0.5),
+                    "metadata": {"bundle_id": bundle_id},
+                }
+                for item in active_rows
+                if str(item.get("summary") or item.get("text") or "").strip()
+            ],
+            domain_hint="short_term" if scope == str(MemoryScope.SESSION) else "long_term",
+            budget_chars=budget_chars,
+            diversity_lambda=policy.diversity_lambda,
+            policy=policy,
+        )
+        kept_ids = set(compression.kept_ids or ([active_rows[0]["id"]] if active_rows else []))
+        table_name = self._memory_table_for_scope(scope)
+        now = utcnow_iso()
+
+        for item in active_rows:
+            next_status = "active" if item["id"] in kept_ids else "compressed"
+            if next_status == item.get("status"):
+                continue
+            self.db.execute(
+                f"UPDATE {table_name} SET status = ?, updated_at = ?, archived_at = ? WHERE id = ?",
+                (next_status, now, now if next_status == "compressed" else item.get("archived_at"), item["id"]),
+            )
+            self._upsert_bundle_item(
+                scope,
+                bundle_id,
+                self._bundle_memory_item_payload({**item, "status": next_status, "updated_at": now, "archived_at": now}, text=item["text"]),
+            )
+            if next_status == "compressed":
+                self._delete_memory_index(item["id"])
+
+        generated_metadata = merge_metadata(
+            self._scope_metadata(
+                {
+                    "user_id": user_id,
+                    "owner_agent_id": owner_agent_id,
+                    "subject_type": subject_type,
+                    "subject_id": subject_id,
+                    "interaction_type": interaction_type,
+                    "namespace_key": namespace_key,
+                }
+            ),
+            {
+                "generated": True,
+                "compression": {
+                    "scope": scope,
+                    "source_count": len(active_rows),
+                    "source_ids": [item["id"] for item in active_rows],
+                    "kept_ids": list(kept_ids),
+                    "threshold_chars": threshold_chars,
+                    "total_chars": total_chars,
+                },
+            },
+        )
+        generated = self._find_generated_memory_by_bundle(scope, bundle_id)
+        if generated is not None:
+            generated_row = self.update(
+                generated["id"],
+                text=compression.summary,
+                metadata=generated_metadata,
+                importance=max(0.78, float(generated.get("importance", 0.78) or 0.0)),
+                status="active",
+            )
+        else:
+            generated_row = self._remember(
+                compression.summary,
+                user_id=user_id,
+                owner_agent_id=owner_agent_id,
+                subject_type=subject_type,
+                subject_id=subject_id,
+                interaction_type=interaction_type,
+                namespace_key=namespace_key,
+                session_id=session_id,
+                long_term=scope == str(MemoryScope.LONG_TERM),
+                source="auto_compression",
+                metadata=generated_metadata,
+                memory_type=str(MemoryType.RELATIONSHIP_SUMMARY),
+                importance=0.82,
+            )
+        return {
+            "scope": scope,
+            "bundle_id": bundle_id,
+            "threshold_chars": threshold_chars,
+            "total_chars": total_chars,
+            "triggered": True,
+            "generated_memory_id": generated_row.get("id"),
+            "compression": compression.as_dict(),
+        }
 
     def _record_memory_event(self, memory_id: str, event_type: str, payload: dict[str, Any]) -> None:
         self.db.execute(
@@ -3904,7 +4558,7 @@ class AIMemory:
                 json_dumps(keywords),
                 round(float(memory.get("importance", 0.5) or 0.0) * 0.08, 6),
                 memory["updated_at"],
-                json_dumps({"content_id": memory.get("content_id"), **dict(memory.get("metadata", {}))}),
+                json_dumps({"bundle_id": memory.get("bundle_id"), "content_id": memory.get("content_id"), **dict(memory.get("metadata", {}))}),
             ),
         )
         self._index_memory_search_record(memory, text=index_text, keywords=keywords)
@@ -3916,7 +4570,7 @@ class AIMemory:
             semantic_source_text=memory["text"],
             updated_at=memory["updated_at"],
             quality=float(memory.get("importance", 0.5) or 0.0),
-            metadata={"content_id": memory.get("content_id"), "memory_type": memory.get("memory_type"), "scope": memory.get("scope"), **dict(memory.get("metadata", {}))},
+            metadata={"bundle_id": memory.get("bundle_id"), "content_id": memory.get("content_id"), "memory_type": memory.get("memory_type"), "scope": memory.get("scope"), **dict(memory.get("metadata", {}))},
             keywords=keywords,
         )
         self.graph_store.upsert_node("memory", memory["id"], memory.get("summary") or memory["text"][:120], memory.get("metadata"))

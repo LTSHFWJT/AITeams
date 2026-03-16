@@ -68,14 +68,7 @@ class AgentStoreAPI:
 
     def store_long_term_memory(self, text: str, **kwargs: Any) -> dict[str, Any]:
         result = self.memory.remember_long_term(text, **kwargs)
-        result["compression"] = self.compress_long_term_memories(
-            owner_agent_id=result.get("owner_agent_id") or result.get("agent_id"),
-            subject_type=result.get("subject_type"),
-            subject_id=result.get("subject_id"),
-            interaction_type=result.get("interaction_type"),
-            user_id=result.get("user_id"),
-            namespace_key=result.get("namespace_key"),
-        )
+        result["compression"] = dict(result.get("memory_overflow_warning") or {"triggered": False})
         return result
 
     def get_long_term_memory(self, memory_id: str) -> dict[str, Any]:
@@ -127,14 +120,7 @@ class AgentStoreAPI:
     def update_long_term_memory(self, memory_id: str, **kwargs: Any) -> dict[str, Any]:
         self._require_memory_scope(memory_id, str(MemoryScope.LONG_TERM))
         result = self.memory.update(memory_id, **kwargs)
-        result["compression"] = self.compress_long_term_memories(
-            owner_agent_id=result.get("owner_agent_id") or result.get("agent_id"),
-            subject_type=result.get("subject_type"),
-            subject_id=result.get("subject_id"),
-            interaction_type=result.get("interaction_type"),
-            user_id=result.get("user_id"),
-            namespace_key=result.get("namespace_key"),
-        )
+        result["compression"] = dict(result.get("memory_overflow_warning") or {"triggered": False})
         return result
 
     def delete_long_term_memory(self, memory_id: str) -> dict[str, Any]:
@@ -168,15 +154,7 @@ class AgentStoreAPI:
 
     def store_short_term_memory(self, text: str, **kwargs: Any) -> dict[str, Any]:
         result = self.memory.remember_short_term(text, **kwargs)
-        result["compression"] = self.compress_short_term_memories(
-            session_id=result.get("session_id"),
-            owner_agent_id=result.get("owner_agent_id") or result.get("agent_id"),
-            subject_type=result.get("subject_type"),
-            subject_id=result.get("subject_id"),
-            interaction_type=result.get("interaction_type"),
-            user_id=result.get("user_id"),
-            namespace_key=result.get("namespace_key"),
-        )
+        result["compression"] = dict(result.get("memory_overflow_warning") or {"triggered": False})
         return result
 
     def get_short_term_memory(self, memory_id: str) -> dict[str, Any]:
@@ -228,15 +206,7 @@ class AgentStoreAPI:
     def update_short_term_memory(self, memory_id: str, **kwargs: Any) -> dict[str, Any]:
         record = self._require_memory_scope(memory_id, str(MemoryScope.SESSION))
         result = self.memory.update(memory_id, **kwargs)
-        result["compression"] = self.compress_short_term_memories(
-            session_id=result.get("session_id") or record.get("session_id"),
-            owner_agent_id=result.get("owner_agent_id") or result.get("agent_id"),
-            subject_type=result.get("subject_type"),
-            subject_id=result.get("subject_id"),
-            interaction_type=result.get("interaction_type"),
-            user_id=result.get("user_id"),
-            namespace_key=result.get("namespace_key"),
-        )
+        result["compression"] = dict(result.get("memory_overflow_warning") or {"triggered": False, "session_id": result.get("session_id") or record.get("session_id")})
         return result
 
     def delete_short_term_memory(self, memory_id: str) -> dict[str, Any]:
@@ -309,14 +279,24 @@ class AgentStoreAPI:
             "scope": scope,
         }
         content_id = make_uuid7()
-        self.memory.memory_content_store.put_json("archive", payload, key=content_id)
+        bundle = self.memory._ensure_memory_bundle(
+            scope="archive",
+            user_id=scope.get("user_id"),
+            owner_agent_id=scope.get("owner_agent_id"),
+            subject_type=scope.get("subject_type"),
+            subject_id=scope.get("subject_id"),
+            interaction_type=scope.get("interaction_type"),
+            namespace_key=scope.get("namespace_key"),
+            metadata=self.memory._scope_metadata(scope),
+        )
         self.memory.db.execute(
             """
-            INSERT INTO archive_memories(id, content_id, domain, source_id, user_id, owner_agent_id, subject_type, subject_id, interaction_type, namespace_key, source_type, session_id, summary, metadata, content_format, created_at, updated_at, last_rehydrated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO archive_memories(id, bundle_id, content_id, domain, source_id, user_id, owner_agent_id, subject_type, subject_id, interaction_type, namespace_key, source_type, session_id, summary, metadata, content_format, created_at, updated_at, last_rehydrated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 archive_id,
+                bundle["id"],
                 content_id,
                 archive_domain,
                 source_id,
@@ -334,6 +314,28 @@ class AgentStoreAPI:
                 now,
                 now,
                 None,
+            ),
+        )
+        self.memory._upsert_bundle_item(
+            "archive",
+            bundle["id"],
+            self.memory._bundle_archive_item_payload(
+                {
+                    "id": archive_id,
+                    "bundle_id": bundle["id"],
+                    "content_id": content_id,
+                    "domain": archive_domain,
+                    "source_id": source_id,
+                    "source_type": source_type,
+                    "session_id": session_id,
+                    "summary": summary,
+                    "metadata": merge_metadata(metadata, self.memory._scope_metadata(scope)),
+                    "created_at": now,
+                    "updated_at": now,
+                },
+                summary=summary,
+                content=content or "",
+                metadata=merge_metadata(metadata, self.memory._scope_metadata(scope)),
             ),
         )
         summary_id = make_id("archsum")
@@ -451,14 +453,6 @@ class AgentStoreAPI:
         content = kwargs.pop("content", None)
         source_type = str(kwargs.pop("source_type", archive.get("source_type") or "manual"))
         now = utcnow_iso()
-        if content is not None:
-            payload = {
-                "summary": summary,
-                "content": content,
-                "metadata": metadata,
-                "scope": scope,
-            }
-            self.memory.memory_content_store.put_json("archive", payload, key=archive["content_id"])
         self.memory.db.execute(
             """
             UPDATE archive_memories
@@ -479,6 +473,23 @@ class AgentStoreAPI:
                 archive_unit_id,
             ),
         )
+        if archive.get("bundle_id"):
+            self.memory._upsert_bundle_item(
+                "archive",
+                str(archive["bundle_id"]),
+                self.memory._bundle_archive_item_payload(
+                    {
+                        **archive,
+                        "summary": summary,
+                        "source_type": source_type,
+                        "updated_at": now,
+                        "metadata": merge_metadata(metadata, self.memory._scope_metadata(scope)),
+                    },
+                    summary=summary,
+                    content=str(content if content is not None else archive.get("content") or ""),
+                    metadata=merge_metadata(metadata, self.memory._scope_metadata(scope)),
+                ),
+            )
         latest_summary = archive["summaries"][0] if archive.get("summaries") else None
         summary_id = latest_summary["id"] if latest_summary else make_id("archsum")
         highlights = [item for item in [summary, content] if item]
@@ -524,8 +535,15 @@ class AgentStoreAPI:
             self.memory.vector_index.delete("archive_summary_index", summary["id"])
         self.memory.graph_store.delete_reference(archive_unit_id)
         self.memory.db.execute("DELETE FROM archive_summaries WHERE archive_unit_id = ?", (archive_unit_id,))
-        if archive.get("content_id"):
-            self.memory.memory_content_store.delete("archive", archive["content_id"])
+        if archive.get("bundle_id"):
+            bundle = self.memory._get_memory_bundle("archive", str(archive["bundle_id"]))
+            items = [
+                item
+                for item in list(bundle.get("items") or [])
+                if item.get("record_id") != archive_unit_id and item.get("content_id") != archive.get("content_id")
+            ]
+            bundle["items"] = items
+            self.memory._put_memory_bundle("archive", str(archive["bundle_id"]), bundle)
         self.memory.db.execute("DELETE FROM archive_memories WHERE id = ?", (archive_unit_id,))
         return {"id": archive_unit_id, "deleted": True, "archive": archive}
 

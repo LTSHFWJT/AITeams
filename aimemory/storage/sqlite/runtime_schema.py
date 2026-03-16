@@ -1,4 +1,13 @@
 ADDITIONAL_COLUMNS: dict[str, dict[str, str]] = {
+    "short_term_memories": {
+        "bundle_id": "TEXT",
+    },
+    "long_term_memories": {
+        "bundle_id": "TEXT",
+    },
+    "archive_memories": {
+        "bundle_id": "TEXT",
+    },
     "sessions": {
         "owner_agent_id": "TEXT",
         "interaction_type": "TEXT",
@@ -84,6 +93,27 @@ ADDITIONAL_COLUMNS: dict[str, dict[str, str]] = {
 }
 
 EXTRA_SCHEMA_STATEMENTS = [
+    """
+    CREATE TABLE IF NOT EXISTS memory_bundles (
+        id TEXT PRIMARY KEY,
+        scope TEXT NOT NULL,
+        scope_key TEXT NOT NULL UNIQUE,
+        user_id TEXT,
+        owner_agent_id TEXT,
+        subject_type TEXT,
+        subject_id TEXT,
+        interaction_type TEXT,
+        namespace_key TEXT,
+        metadata TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_memory_bundles_scope ON memory_bundles(scope, owner_agent_id, subject_type, subject_id, interaction_type, updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_memory_bundles_namespace ON memory_bundles(namespace_key, updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_short_term_memories_bundle ON short_term_memories(bundle_id, updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_long_term_memories_bundle ON long_term_memories(bundle_id, updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_archive_memories_bundle ON archive_memories(bundle_id, created_at)",
     """
     CREATE TABLE IF NOT EXISTS participants (
         id TEXT PRIMARY KEY,

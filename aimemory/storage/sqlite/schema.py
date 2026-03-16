@@ -151,8 +151,25 @@ SCHEMA_STATEMENTS = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS memory_bundles (
+        id TEXT PRIMARY KEY,
+        scope TEXT NOT NULL,
+        scope_key TEXT NOT NULL UNIQUE,
+        user_id TEXT,
+        owner_agent_id TEXT,
+        subject_type TEXT,
+        subject_id TEXT,
+        interaction_type TEXT,
+        namespace_key TEXT,
+        metadata TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS short_term_memories (
         id TEXT PRIMARY KEY,
+        bundle_id TEXT,
         content_id TEXT NOT NULL UNIQUE,
         user_id TEXT NOT NULL,
         agent_id TEXT,
@@ -180,6 +197,7 @@ SCHEMA_STATEMENTS = [
     """
     CREATE TABLE IF NOT EXISTS long_term_memories (
         id TEXT PRIMARY KEY,
+        bundle_id TEXT,
         content_id TEXT NOT NULL UNIQUE,
         user_id TEXT NOT NULL,
         agent_id TEXT,
@@ -399,6 +417,7 @@ SCHEMA_STATEMENTS = [
     """
     CREATE TABLE IF NOT EXISTS archive_memories (
         id TEXT PRIMARY KEY,
+        bundle_id TEXT,
         content_id TEXT NOT NULL UNIQUE,
         domain TEXT NOT NULL,
         source_id TEXT NOT NULL,
@@ -555,9 +574,13 @@ SCHEMA_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_short_term_memories_scope ON short_term_memories(user_id, session_id, status, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_short_term_memories_owner ON short_term_memories(owner_agent_id, subject_type, subject_id, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_short_term_memories_namespace ON short_term_memories(namespace_key, updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_short_term_memories_bundle ON short_term_memories(bundle_id, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_long_term_memories_scope ON long_term_memories(user_id, status, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_long_term_memories_owner ON long_term_memories(owner_agent_id, subject_type, subject_id, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_long_term_memories_namespace ON long_term_memories(namespace_key, updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_long_term_memories_bundle ON long_term_memories(bundle_id, updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_memory_bundles_scope ON memory_bundles(scope, owner_agent_id, subject_type, subject_id, interaction_type, updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_memory_bundles_namespace ON memory_bundles(namespace_key, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_memory_events_memory ON memory_events(memory_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_documents_source ON documents(source_id, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_chunks_document ON document_chunks(document_id, chunk_index)",
@@ -571,5 +594,6 @@ SCHEMA_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_archive_memories_scope ON archive_memories(user_id, session_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_archive_memories_owner ON archive_memories(owner_agent_id, subject_type, subject_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_archive_memories_namespace ON archive_memories(namespace_key, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_archive_memories_bundle ON archive_memories(bundle_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_archive_index_scope ON archive_summary_index(user_id, session_id, updated_at)",
 ]
