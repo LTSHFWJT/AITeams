@@ -276,10 +276,17 @@ class InteractionService(ServiceBase):
         return self._kernel().prune_session_snapshots(session_id, **kwargs)
 
     def clear_session(self, session_id: str) -> dict[str, Any]:
+        turn_rows = self.db.fetch_all("SELECT id FROM conversation_turns WHERE session_id = ?", (session_id,))
+        snapshot_rows = self.db.fetch_all("SELECT id FROM working_memory_snapshots WHERE session_id = ?", (session_id,))
         self.db.execute("DELETE FROM conversation_turns WHERE session_id = ?", (session_id,))
         self.db.execute("DELETE FROM working_memory_snapshots WHERE session_id = ?", (session_id,))
         self.db.execute("DELETE FROM session_participants WHERE session_id = ?", (session_id,))
         self.db.execute("DELETE FROM tool_states WHERE session_id = ?", (session_id,))
         self.db.execute("DELETE FROM session_variables WHERE session_id = ?", (session_id,))
+        kernel = self._kernel()
+        for row in turn_rows:
+            kernel._delete_auxiliary_index_record(row["id"], collection="interaction_turn")
+        for row in snapshot_rows:
+            kernel._delete_auxiliary_index_record(row["id"], collection="interaction_snapshot")
         self.db.execute("UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?", (str(SessionStatus.CLOSED), utcnow_iso(), session_id))
         return {"message": "Session cleared", "session_id": session_id}

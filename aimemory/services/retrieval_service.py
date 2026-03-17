@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from typing import Any
 
+from aimemory.core.router import DEFAULT_RETRIEVAL_DOMAINS
 from aimemory.memory_intelligence.models import MemoryScopeContext
 from aimemory.querying.filters import filter_records
 
 
 class RetrievalService:
-    def __init__(self, db, config, router, reranker=None, index_backend=None, graph_backend=None, recall_planner=None):
+    def __init__(self, db, config, router=None, reranker=None, index_backend=None, graph_backend=None, recall_planner=None):
         self.db = db
         self.config = config
         self.router = router
@@ -74,9 +75,7 @@ class RetrievalService:
         limit: int = 10,
         threshold: float = 0.0,
     ) -> dict[str, Any]:
-        selected_domains = list(domains or self.router.route(query=query, session_id=session_id))
-        if "memory" not in selected_domains:
-            selected_domains.append("memory")
+        selected_domains = list(dict.fromkeys(domains or DEFAULT_RETRIEVAL_DOMAINS))
         result = self._kernel().query(
             query,
             user_id=user_id,

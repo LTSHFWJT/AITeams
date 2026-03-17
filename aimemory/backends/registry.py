@@ -46,7 +46,14 @@ class GraphStore(Protocol):
 
 class LanceDBVectorIndex:
     name = "lancedb"
-    MEMORY_COLLECTIONS = {"memory_index", "archive_summary_index"}
+    MEMORY_COLLECTIONS = {
+        "memory_index",
+        "archive_summary_index",
+        "interaction_turn",
+        "interaction_snapshot",
+        "execution_run",
+        "execution_observation",
+    }
     COMPETENCY_COLLECTIONS = {"knowledge_chunk_index", "skill_index", "skill_reference_index"}
 
     def __init__(self, config):

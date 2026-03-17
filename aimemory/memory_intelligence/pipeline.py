@@ -3,7 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 from aimemory.algorithms.affinity import coverage_ratio, tokens_density
-from aimemory.core.text import cosine_similarity, extract_keywords, hash_embedding, normalize_text
+from aimemory.algorithms.dedupe import semantic_similarity
+from aimemory.core.text import character_ngrams, normalize_text, tokenize
 from aimemory.memory_intelligence.models import (
     FactCandidate,
     MemoryAction,
@@ -148,14 +149,31 @@ class MemoryIntelligencePipeline:
         normalized_right = self._canonical_text(right.text)
         if normalized_left == normalized_right:
             return 1.0
+        base_similarity = semantic_similarity(normalized_left, normalized_right)
+        left_tokens = set(tokenize(normalized_left))
+        right_tokens = set(tokenize(normalized_right))
+        left_ngrams = set(character_ngrams(normalized_left, min_n=2, max_n=4))
+        right_ngrams = set(character_ngrams(normalized_right, min_n=2, max_n=4))
+        char_overlap = 0.0
+        if left_ngrams and right_ngrams:
+            char_overlap = len(left_ngrams & right_ngrams) / max(1, len(left_ngrams | right_ngrams))
+        token_overlap = 0.0
+        if left_tokens and right_tokens:
+            token_overlap = len(left_tokens & right_tokens) / max(1, len(left_tokens | right_tokens))
+        coverage = max(coverage_ratio(normalized_left, normalized_right), coverage_ratio(normalized_right, normalized_left))
         containment = 1.0 if normalized_left in normalized_right or normalized_right in normalized_left else 0.0
-        embedding = max(0.0, cosine_similarity(hash_embedding(left.text), hash_embedding(right.text)))
-        left_keywords = set(left.metadata.get("keywords") or extract_keywords(left.text))
-        right_keywords = set(right.metadata.get("keywords") or extract_keywords(right.text))
-        overlap = 0.0
-        if left_keywords and right_keywords:
-            overlap = len(left_keywords & right_keywords) / max(1, len(left_keywords | right_keywords))
-        return min(1.0, (0.55 * embedding) + (0.25 * overlap) + (0.2 * containment))
+        score = (
+            (0.72 * base_similarity)
+            + (0.08 * char_overlap)
+            + (0.1 * coverage)
+            + (0.1 * token_overlap)
+            + (0.05 * containment)
+        )
+        if base_similarity >= 0.52 and coverage >= 0.62 and (char_overlap >= 0.3 or token_overlap >= 0.46):
+            score += 0.22
+        elif base_similarity >= 0.46 and coverage >= 0.58 and char_overlap >= 0.24 and token_overlap >= 0.42:
+            score += 0.12
+        return min(1.0, score)
 
     def _canonical_text(self, text: str) -> str:
         return normalize_text(text).strip(" .,!?:;，。！？；：")
@@ -163,15 +181,19 @@ class MemoryIntelligencePipeline:
     def _merge_candidates(self, existing: FactCandidate, incoming: FactCandidate) -> FactCandidate:
         prefer_incoming = self._prefer_incoming(existing, incoming)
         chosen = incoming if prefer_incoming else existing
-        merged_keywords = list(
-            dict.fromkeys(
-                list(existing.metadata.get("keywords") or extract_keywords(existing.text))
-                + list(incoming.metadata.get("keywords") or extract_keywords(incoming.text))
-            )
-        )
         merged_metadata = dict(existing.metadata)
         merged_metadata.update(incoming.metadata)
-        merged_metadata["keywords"] = merged_keywords
+        existing_keywords = existing.metadata.get("keywords")
+        incoming_keywords = incoming.metadata.get("keywords")
+        if isinstance(existing_keywords, list) or isinstance(incoming_keywords, list):
+            merged_metadata["keywords"] = list(
+                dict.fromkeys(
+                    [
+                        *([str(item) for item in existing_keywords] if isinstance(existing_keywords, list) else []),
+                        *([str(item) for item in incoming_keywords] if isinstance(incoming_keywords, list) else []),
+                    ]
+                )
+            )
         return FactCandidate(
             text=chosen.text,
             memory_type=chosen.memory_type,

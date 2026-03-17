@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import math
+from collections import Counter
 from datetime import datetime, timezone
 from typing import Any
 
-from aimemory.core.text import cosine_similarity, hash_embedding, normalize_text, tokenize
+from aimemory.core.text import character_ngrams, cosine_similarity, hash_embedding, normalize_text, tokenize
 from aimemory.core.utils import json_loads
 
 
@@ -66,13 +67,41 @@ def _weighted_overlap_score(query_tokens: set[str], candidate_tokens: set[str]) 
     return numerator / denominator
 
 
+def _weighted_jaccard_score(left_tokens: list[str], right_tokens: list[str]) -> float:
+    if not left_tokens or not right_tokens:
+        return 0.0
+    left_counts = Counter(left_tokens)
+    right_counts = Counter(right_tokens)
+    keys = set(left_counts) | set(right_counts)
+    if not keys:
+        return 0.0
+    intersection = 0.0
+    union = 0.0
+    for key in keys:
+        weight = _token_weight(key)
+        intersection += min(left_counts.get(key, 0), right_counts.get(key, 0)) * weight
+        union += max(left_counts.get(key, 0), right_counts.get(key, 0)) * weight
+    return intersection / union if union else 0.0
+
+
+def _char_ngram_score(left_text: str, right_text: str) -> float:
+    left = set(character_ngrams(left_text[:320], min_n=2, max_n=4))
+    right = set(character_ngrams(right_text[:960], min_n=2, max_n=4))
+    if not left or not right:
+        return 0.0
+    union = left | right
+    if not union:
+        return 0.0
+    return len(left & right) / len(union)
+
+
 def _coerce_keywords(value: str | list[str] | None) -> list[str]:
     if isinstance(value, list):
-        return [str(item) for item in value if str(item).strip()]
+        return tokenize(" ".join(str(item).strip() for item in value if str(item).strip()))
     if isinstance(value, str):
         loaded = json_loads(value)
         if isinstance(loaded, list):
-            return [str(item) for item in loaded if str(item).strip()]
+            return tokenize(" ".join(str(item).strip() for item in loaded if str(item).strip()))
         return tokenize(value)
     return []
 
@@ -91,40 +120,50 @@ def score_record(
 ) -> tuple[float, dict[str, float]]:
     query_normalized = normalize_text(query)
     text_normalized = normalize_text(text)
-    query_tokens = set(tokenize(query_normalized))
-    text_tokens = set(tokenize(text_normalized))
+    query_token_list = tokenize(query_normalized)
+    text_token_list = tokenize(text_normalized)
+    query_tokens = set(query_token_list)
+    text_tokens = set(text_token_list)
     keyword_tokens = set(_coerce_keywords(keywords))
 
     dense_vector = json_loads(embedding) if isinstance(embedding, str) else embedding
+    query_embedding = hash_embedding(query_normalized)
     dense_score = max(
         0.0,
         cosine_similarity(
-            hash_embedding(query_normalized),
+            query_embedding,
             dense_vector if isinstance(dense_vector, list) and dense_vector else hash_embedding(text_normalized),
         ),
     )
     sparse_score = _weighted_overlap_score(query_tokens, text_tokens)
     keyword_score = _weighted_overlap_score(query_tokens, keyword_tokens)
+    weighted_sparse_score = _weighted_jaccard_score(query_token_list, text_token_list)
+    char_score = _char_ngram_score(query_normalized, text_normalized)
     exact_score = 1.0 if query_normalized and query_normalized in text_normalized else 0.0
     recency_score = recency_multiplier(updated_at, half_life_days)
     importance_score = max(0.0, min(1.0, float(importance or 0.0)))
     lexical_score = max(0.0, min(1.0, float(lexical_score or 0.0)))
+    lexical_signal = max(lexical_score, (0.72 * lexical_score) + (0.28 * max(sparse_score, keyword_score, char_score)))
 
     score = (
-        (0.36 * dense_score)
-        + (0.18 * sparse_score)
-        + (0.1 * keyword_score)
-        + (0.13 * lexical_score)
-        + (0.08 * exact_score)
-        + (0.09 * recency_score)
-        + (0.06 * importance_score)
+        (0.31 * dense_score)
+        + (0.17 * sparse_score)
+        + (0.12 * weighted_sparse_score)
+        + (0.08 * keyword_score)
+        + (0.14 * lexical_signal)
+        + (0.08 * char_score)
+        + (0.04 * exact_score)
+        + (0.04 * recency_score)
+        + (0.02 * importance_score)
         + boost
     )
     breakdown = {
         "dense": round(dense_score, 6),
         "sparse": round(sparse_score, 6),
+        "weighted_sparse": round(weighted_sparse_score, 6),
         "keyword": round(keyword_score, 6),
-        "lexical": round(lexical_score, 6),
+        "lexical": round(lexical_signal, 6),
+        "char_ngram": round(char_score, 6),
         "exact": round(exact_score, 6),
         "recency": round(recency_score, 6),
         "importance": round(importance_score, 6),

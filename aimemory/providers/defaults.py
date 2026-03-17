@@ -4,7 +4,6 @@ from datetime import datetime, timezone
 from typing import Any
 
 from aimemory.algorithms.affinity import (
-    DOMAIN_PROTOTYPES,
     MEMORY_TYPE_PROTOTYPES,
     best_label,
     blend_score_maps,
@@ -12,14 +11,12 @@ from aimemory.algorithms.affinity import (
     coverage_ratio,
     normalize_score_map,
     prototype_affinities,
-    ranked_labels,
     tokens_density,
 )
 from aimemory.algorithms.distill import AdaptiveDistiller
 from aimemory.algorithms.retrieval import mmr_rerank, score_record
 from aimemory.core.capabilities import capability_dict
 from aimemory.core.governance import governance_scope_rules, resolve_strategy_scope
-from aimemory.core.router import RetrievalRouter
 from aimemory.core.text import normalize_text
 from aimemory.domains.memory.models import MemoryType
 from aimemory.memory_intelligence.models import (
@@ -66,14 +63,10 @@ def _contextual_type_affinity(
 
 
 def infer_query_profile(query: str, *, context: MemoryScopeContext, policy: MemoryPolicy) -> dict[str, Any]:
-    router = RetrievalRouter()
-    domain_scores = prototype_affinities(query, DOMAIN_PROTOTYPES)
-    if context.session_id:
-        domain_scores["interaction"] = round(domain_scores.get("interaction", 0.0) + 0.08, 6)
+    del policy
     type_scores = _contextual_type_affinity(query, context=context)
     focus_memory_types = choose_labels(type_scores, preferred=[str(MemoryType.SEMANTIC)], top_n=4)
-    selected_domains = router.route(query, session_id=context.session_id)
-    primary_scope = "session" if context.session_id and domain_scores.get("interaction", 0.0) >= domain_scores.get("memory", 0.0) * 0.85 else "long-term"
+    primary_scope = "session" if context.session_id else "long-term"
     strategy_scope = resolve_strategy_scope(
         best_label(type_scores, default=str(MemoryType.SEMANTIC)),
         agent_id=context.agent_id,
@@ -89,11 +82,11 @@ def infer_query_profile(query: str, *, context: MemoryScopeContext, policy: Memo
         "focus_memory_types": focus_memory_types,
         "preferred_scope": primary_scope,
         "strategy_scope": strategy_scope,
-        "needs_interaction": "interaction" in selected_domains,
-        "needs_execution": "execution" in selected_domains,
-        "needs_archive": "archive" in selected_domains,
-        "handoff_domains": [domain for domain in selected_domains if domain != "memory"],
-        "domain_scores": normalize_score_map(domain_scores),
+        "needs_interaction": False,
+        "needs_execution": False,
+        "needs_archive": False,
+        "handoff_domains": [],
+        "domain_scores": {},
         "type_scores": type_scores,
     }
 
@@ -337,6 +330,7 @@ class HybridReranker:
         context: MemoryScopeContext,
         policy: MemoryPolicy | None = None,
     ) -> list[dict[str, Any]]:
+        del domain
         query_profile = infer_query_profile(query, context=context, policy=policy or MemoryPolicy())
         focus_types = set(query_profile["focus_memory_types"])
         ranked: list[dict[str, Any]] = []
@@ -359,12 +353,10 @@ class HybridReranker:
                 score += 0.03
             if context.actor_id and metadata.get("actor_id") == context.actor_id:
                 score += 0.03
-            if domain in query_profile["handoff_domains"]:
-                score += 0.04
             graph_context = dict(updated.get("graph_context") or {})
             score += min(0.06, float(graph_context.get("matched_relation_count", 0)) * 0.02)
             updated["score"] = round(score, 6)
-            updated["score_breakdown"] = {**breakdown, "domain_bias": 0.04 if domain in query_profile["handoff_domains"] else 0.0}
+            updated["score_breakdown"] = {**breakdown, "domain_bias": 0.0}
             ranked.append(updated)
         ranked.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
         return mmr_rerank(ranked, lambda_value=(policy or MemoryPolicy()).diversity_lambda)
@@ -423,18 +415,6 @@ class AdaptiveRecallPlanner:
                     "score_bias": 0.03 if secondary_scope == "long-term" else 0.01,
                     "memory_types": focus_memory_types[:2],
                     "strategy_scopes": ["user", "agent", "run"],
-                }
-            )
-        if profile["needs_interaction"] and context.session_id:
-            stages.append(
-                {
-                    "name": "session-evidence",
-                    "scope": "session",
-                    "limit": max(1, secondary_limit // 2 or 1),
-                    "targetable": False,
-                    "score_bias": 0.06,
-                    "memory_types": [str(MemoryType.EPISODIC), str(MemoryType.PROCEDURAL), str(MemoryType.SEMANTIC)],
-                    "strategy_scopes": [strategy_scope, "run"],
                 }
             )
         return {

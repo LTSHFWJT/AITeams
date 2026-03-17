@@ -110,6 +110,7 @@ def _format_skill_execution_context(context: dict[str, Any] | None) -> str:
         ("constraints", "Constraints"),
         ("risks", "Risks"),
         ("highlights", "Highlights"),
+        ("supporting_passages", "Supporting Passages"),
     )
     for key, title in sections:
         values = [str(item).strip() for item in list(payload.get(key) or []) if str(item).strip()]
@@ -276,6 +277,7 @@ class AIMemory:
         )
         self.db.execute("UPDATE archive_memories SET source_type = COALESCE(source_type, domain) WHERE source_type IS NULL")
         self._sync_text_search_index()
+        self._sync_contextual_semantic_indexes()
 
     def _memory_table_for_scope(self, scope: str) -> str:
         return MEMORY_TABLE_MAP.get(scope, MEMORY_TABLE_MAP[str(MemoryScope.LONG_TERM)])
@@ -631,6 +633,18 @@ class AIMemory:
             {str(row["record_id"]): row for row in index_rows},
             {str(row["record_id"]): row for row in semantic_rows},
         )
+
+    def _merge_hit_maps(self, *maps: dict[str, float]) -> dict[str, float]:
+        merged: dict[str, float] = {}
+        for item in maps:
+            for key, value in item.items():
+                merged[key] = max(merged.get(key, 0.0), float(value or 0.0))
+        return merged
+
+    def _delete_auxiliary_index_record(self, record_id: str, *, collection: str) -> None:
+        self.db.execute("DELETE FROM semantic_index_cache WHERE record_id = ?", (record_id,))
+        self._delete_text_search_record(record_id)
+        self.vector_index.delete(collection, record_id)
 
     def _resolve_vector_backend_name(self) -> str:
         return "lancedb"
@@ -2912,31 +2926,41 @@ class AIMemory:
             sql_filters.append("s.namespace_key = ?")
             params.append(namespace_filter)
         fts_rows = self._search_text_records(["interaction_turn", "interaction_snapshot"], query, limit=max(limit * 6, 24))
+        turn_vector_hits = self._vector_hit_map("interaction_turn", query, limit=max(limit * 6, 24))
+        snapshot_vector_hits = self._vector_hit_map("interaction_snapshot", query, limit=max(limit * 6, 24))
+        vector_hits = self._merge_hit_maps(turn_vector_hits, snapshot_vector_hits)
         rows = self.db.fetch_all(
             f"""
-            SELECT ct.id, ct.session_id, ct.role, ct.turn_type, ct.speaker_participant_id, ct.target_participant_id, ct.salience_score, s.owner_agent_id, s.subject_type, s.subject_id, s.interaction_type, ct.content AS text, ct.metadata, ct.created_at AS updated_at
+            SELECT ct.id, ct.session_id, ct.role, ct.turn_type, ct.speaker_participant_id, ct.target_participant_id, ct.salience_score, s.owner_agent_id, s.subject_type, s.subject_id, s.interaction_type, ct.content AS text, ct.metadata, ct.created_at AS updated_at, sic.embedding
             FROM conversation_turns ct
             JOIN sessions s ON s.id = ct.session_id
+            LEFT JOIN semantic_index_cache sic ON sic.record_id = ct.id AND sic.collection = 'interaction_turn'
             WHERE {' AND '.join(sql_filters)}
             ORDER BY ct.created_at DESC
             LIMIT ?
             """,
             tuple(params + [max(limit * 12, self.config.memory_policy.search_scan_limit // 2)]),
         )
-        turn_ids = [
-            row["record_id"]
-            for row in fts_rows
-            if row.get("collection") == "interaction_turn"
-        ]
+        turn_ids = list(
+            dict.fromkeys(
+                [
+                    row["record_id"]
+                    for row in fts_rows
+                    if row.get("collection") == "interaction_turn"
+                ]
+                + list(turn_vector_hits.keys())
+            )
+        )
         if turn_ids:
             placeholders = ", ".join("?" for _ in turn_ids)
             rows = self._merge_rows_by_id(
                 rows,
                 self.db.fetch_all(
                     f"""
-                    SELECT ct.id, ct.session_id, ct.role, ct.turn_type, ct.speaker_participant_id, ct.target_participant_id, ct.salience_score, s.owner_agent_id, s.subject_type, s.subject_id, s.interaction_type, ct.content AS text, ct.metadata, ct.created_at AS updated_at
+                    SELECT ct.id, ct.session_id, ct.role, ct.turn_type, ct.speaker_participant_id, ct.target_participant_id, ct.salience_score, s.owner_agent_id, s.subject_type, s.subject_id, s.interaction_type, ct.content AS text, ct.metadata, ct.created_at AS updated_at, sic.embedding
                     FROM conversation_turns ct
                     JOIN sessions s ON s.id = ct.session_id
+                    LEFT JOIN semantic_index_cache sic ON sic.record_id = ct.id AND sic.collection = 'interaction_turn'
                     WHERE {' AND '.join(sql_filters)} AND ct.id IN ({placeholders})
                     """,
                     tuple(params + turn_ids),
@@ -2954,7 +2978,7 @@ class AIMemory:
             half_life_days=self.config.memory_policy.short_term_half_life_days,
             threshold=threshold,
             filters=filters,
-            vector_hits={},
+            vector_hits=vector_hits,
             fts_hits=fts_hits,
             affinity={
                 "owner_agent_id": owner_agent_id,
@@ -2988,29 +3012,36 @@ class AIMemory:
             snapshot_params.append(namespace_filter)
         snapshot_rows = self.db.fetch_all(
             f"""
-            SELECT wms.id, wms.session_id, wms.owner_agent_id, wms.subject_type, wms.subject_id, wms.interaction_type, wms.summary AS text, wms.metadata, wms.updated_at
+            SELECT wms.id, wms.session_id, wms.owner_agent_id, wms.subject_type, wms.subject_id, wms.interaction_type, wms.summary AS text, wms.metadata, wms.updated_at, sic.embedding
             FROM working_memory_snapshots wms
             JOIN sessions s ON s.id = wms.session_id
+            LEFT JOIN semantic_index_cache sic ON sic.record_id = wms.id AND sic.collection = 'interaction_snapshot'
             WHERE {' AND '.join(snapshot_filters)}
             ORDER BY wms.updated_at DESC
             LIMIT ?
             """,
             tuple(snapshot_params + [max(limit * 6, 12)]),
         )
-        snapshot_ids = [
-            row["record_id"]
-            for row in fts_rows
-            if row.get("collection") == "interaction_snapshot"
-        ]
+        snapshot_ids = list(
+            dict.fromkeys(
+                [
+                    row["record_id"]
+                    for row in fts_rows
+                    if row.get("collection") == "interaction_snapshot"
+                ]
+                + list(snapshot_vector_hits.keys())
+            )
+        )
         if snapshot_ids:
             placeholders = ", ".join("?" for _ in snapshot_ids)
             snapshot_rows = self._merge_rows_by_id(
                 snapshot_rows,
                 self.db.fetch_all(
                     f"""
-                    SELECT wms.id, wms.session_id, wms.owner_agent_id, wms.subject_type, wms.subject_id, wms.interaction_type, wms.summary AS text, wms.metadata, wms.updated_at
+                    SELECT wms.id, wms.session_id, wms.owner_agent_id, wms.subject_type, wms.subject_id, wms.interaction_type, wms.summary AS text, wms.metadata, wms.updated_at, sic.embedding
                     FROM working_memory_snapshots wms
                     JOIN sessions s ON s.id = wms.session_id
+                    LEFT JOIN semantic_index_cache sic ON sic.record_id = wms.id AND sic.collection = 'interaction_snapshot'
                     WHERE {' AND '.join(snapshot_filters)} AND wms.id IN ({placeholders})
                     """,
                     tuple(snapshot_params + snapshot_ids),
@@ -3028,7 +3059,7 @@ class AIMemory:
                 half_life_days=self.config.memory_policy.short_term_half_life_days,
                 threshold=threshold,
                 filters=filters,
-                vector_hits={},
+                vector_hits=vector_hits,
                 fts_hits=fts_hits,
                 affinity={
                     "owner_agent_id": owner_agent_id,
@@ -3081,14 +3112,41 @@ class AIMemory:
             sql_filters.append("namespace_key = ?")
             params.append(namespace_filter)
         fts_rows = self._search_text_records(["execution_run", "execution_observation"], query, limit=max(limit * 6, 24))
-        runs = self.db.fetch_all(f"SELECT * FROM runs WHERE {' AND '.join(sql_filters)} ORDER BY updated_at DESC LIMIT 80", tuple(params))
-        run_ids = [row["record_id"] for row in fts_rows if row.get("collection") == "execution_run"]
+        run_vector_hits = self._vector_hit_map("execution_run", query, limit=max(limit * 6, 24))
+        observation_vector_hits = self._vector_hit_map("execution_observation", query, limit=max(limit * 6, 24))
+        vector_hits = self._merge_hit_maps(run_vector_hits, observation_vector_hits)
+        runs = self.db.fetch_all(
+            f"""
+            SELECT r.*, sic.embedding
+            FROM runs r
+            LEFT JOIN semantic_index_cache sic ON sic.record_id = r.id AND sic.collection = 'execution_run'
+            WHERE {' AND '.join(sql_filters)}
+            ORDER BY r.updated_at DESC
+            LIMIT 80
+            """,
+            tuple(params),
+        )
+        run_ids = list(
+            dict.fromkeys(
+                [
+                    row["record_id"]
+                    for row in fts_rows
+                    if row.get("collection") == "execution_run"
+                ]
+                + list(run_vector_hits.keys())
+            )
+        )
         if run_ids:
             placeholders = ", ".join("?" for _ in run_ids)
             runs = self._merge_rows_by_id(
                 runs,
                 self.db.fetch_all(
-                    f"SELECT * FROM runs WHERE {' AND '.join(sql_filters)} AND id IN ({placeholders})",
+                    f"""
+                    SELECT r.*, sic.embedding
+                    FROM runs r
+                    LEFT JOIN semantic_index_cache sic ON sic.record_id = r.id AND sic.collection = 'execution_run'
+                    WHERE {' AND '.join(sql_filters)} AND r.id IN ({placeholders})
+                    """,
                     tuple(params + run_ids),
                 ),
             )
@@ -3100,14 +3158,39 @@ class AIMemory:
             item["text"] = " ".join(part for part in [str(item.get("goal") or ""), str(item.get("status") or "")] if part)
             prepared.append(item)
             prepared_ids.add(str(item.get("id") or ""))
-            observations = self.db.fetch_all("SELECT * FROM observations WHERE run_id = ? ORDER BY created_at DESC LIMIT 12", (run["id"],))
+            observations = self.db.fetch_all(
+                """
+                SELECT o.*, sic.embedding
+                FROM observations o
+                LEFT JOIN semantic_index_cache sic ON sic.record_id = o.id AND sic.collection = 'execution_observation'
+                WHERE o.run_id = ?
+                ORDER BY o.created_at DESC
+                LIMIT 12
+                """,
+                (run["id"],),
+            )
             for observation in observations:
                 obs_item = _deserialize_row(observation) or dict(observation)
                 obs_item["text"] = str(obs_item.get("content") or "")
                 obs_item["updated_at"] = obs_item.get("created_at")
+                obs_item.setdefault("owner_agent_id", item.get("owner_agent_id"))
+                obs_item.setdefault("agent_id", item.get("agent_id"))
+                obs_item.setdefault("user_id", item.get("user_id"))
+                obs_item.setdefault("subject_type", item.get("subject_type"))
+                obs_item.setdefault("subject_id", item.get("subject_id"))
+                obs_item.setdefault("session_id", item.get("session_id"))
                 prepared.append(obs_item)
                 prepared_ids.add(str(obs_item.get("id") or ""))
-        observation_ids = [row["record_id"] for row in fts_rows if row.get("collection") == "execution_observation"]
+        observation_ids = list(
+            dict.fromkeys(
+                [
+                    row["record_id"]
+                    for row in fts_rows
+                    if row.get("collection") == "execution_observation"
+                ]
+                + list(observation_vector_hits.keys())
+            )
+        )
         if observation_ids:
             observation_filters = ["1 = 1"]
             observation_params: list[Any] = []
@@ -3126,9 +3209,10 @@ class AIMemory:
             placeholders = ", ".join("?" for _ in observation_ids)
             extra_observations = self.db.fetch_all(
                 f"""
-                SELECT o.*, r.user_id, r.owner_agent_id, r.agent_id, r.namespace_key
+                SELECT o.*, r.user_id, r.owner_agent_id, r.agent_id, r.namespace_key, sic.embedding
                 FROM observations o
                 JOIN runs r ON r.id = o.run_id
+                LEFT JOIN semantic_index_cache sic ON sic.record_id = o.id AND sic.collection = 'execution_observation'
                 WHERE {' AND '.join(observation_filters)} AND o.id IN ({placeholders})
                 """,
                 tuple(observation_params + observation_ids),
@@ -3153,7 +3237,7 @@ class AIMemory:
             half_life_days=self.config.memory_policy.archive_half_life_days,
             threshold=threshold,
             filters=filters,
-            vector_hits={},
+            vector_hits=vector_hits,
             fts_hits=fts_hits,
             affinity={"owner_agent_id": owner_agent_id},
         )
@@ -3291,7 +3375,7 @@ class AIMemory:
         removed = 0
         for item in snapshots[keep_recent:]:
             self.db.execute("DELETE FROM working_memory_snapshots WHERE id = ?", (item["id"],))
-            self._delete_text_search_record(item["id"])
+            self._delete_auxiliary_index_record(item["id"], collection="interaction_snapshot")
             removed += 1
         return {"removed": removed, "kept": min(keep_recent, len(snapshots))}
 
@@ -3796,6 +3880,7 @@ class AIMemory:
                 "redundancy_score": 0.0,
                 "metadata": {},
                 "evidence_spans": [],
+                "supporting_passages": [],
                 "provider": "skipped",
             }
         compressor = self._domain_compressors.get(str(domain))
@@ -3844,6 +3929,7 @@ class AIMemory:
                     "redundancy_score": float(external.get("redundancy_score") or 0.0),
                     "metadata": dict(external.get("metadata") or {}),
                     "evidence_spans": list(external.get("evidence_spans") or []),
+                    "supporting_passages": list(external.get("supporting_passages") or []),
                 }
             else:
                 raise TypeError("compressor must return CompressionResult, dict, or str")
@@ -5347,13 +5433,14 @@ class AIMemory:
         )
 
     def _index_interaction_turn(self, session: dict[str, Any], *, turn_id: str, role: str, content: str, turn_type: str | None, updated_at: str) -> None:
+        keywords = extract_keywords(content)
         self._upsert_text_search_record(
             record_id=turn_id,
             domain="interaction",
             collection="interaction_turn",
             title=" ".join(part for part in [session.get("title"), role, turn_type] if part),
             text=content,
-            keywords=extract_keywords(content),
+            keywords=keywords,
             updated_at=updated_at,
             user_id=session.get("user_id"),
             owner_agent_id=session.get("owner_agent_id") or session.get("agent_id"),
@@ -5363,15 +5450,34 @@ class AIMemory:
             session_id=session.get("id"),
             namespace_key=session.get("namespace_key"),
         )
+        self._index_semantic_record(
+            collection="interaction_turn",
+            record_id=turn_id,
+            domain="interaction",
+            text=content,
+            updated_at=updated_at,
+            quality=0.66,
+            metadata={
+                "session_id": session.get("id"),
+                "role": role,
+                "turn_type": turn_type,
+                "subject_type": session.get("subject_type"),
+                "subject_id": session.get("subject_id"),
+                "interaction_type": session.get("interaction_type"),
+            },
+            keywords=keywords,
+        )
 
     def _index_interaction_snapshot(self, snapshot: dict[str, Any]) -> None:
+        summary = str(snapshot.get("summary") or "")
+        keywords = extract_keywords(summary)
         self._upsert_text_search_record(
             record_id=snapshot["id"],
             domain="interaction",
             collection="interaction_snapshot",
             title=f"snapshot {snapshot.get('session_id') or ''}".strip(),
-            text=str(snapshot.get("summary") or ""),
-            keywords=extract_keywords(str(snapshot.get("summary") or "")),
+            text=summary,
+            keywords=keywords,
             updated_at=snapshot.get("updated_at"),
             owner_agent_id=snapshot.get("owner_agent_id"),
             subject_type=snapshot.get("subject_type"),
@@ -5381,16 +5487,43 @@ class AIMemory:
             run_id=snapshot.get("run_id"),
             namespace_key=snapshot.get("namespace_key"),
         )
+        semantic_text = "\n".join(
+            part
+            for part in [
+                summary,
+                str(snapshot.get("plan") or "").strip(),
+                str(snapshot.get("scratchpad") or "").strip(),
+            ]
+            if part
+        )
+        self._index_semantic_record(
+            collection="interaction_snapshot",
+            record_id=snapshot["id"],
+            domain="interaction",
+            text=summary,
+            semantic_source_text=semantic_text or summary,
+            updated_at=snapshot.get("updated_at"),
+            quality=0.76,
+            metadata={
+                "session_id": snapshot.get("session_id"),
+                "run_id": snapshot.get("run_id"),
+                "subject_type": snapshot.get("subject_type"),
+                "subject_id": snapshot.get("subject_id"),
+                "interaction_type": snapshot.get("interaction_type"),
+            },
+            keywords=keywords,
+        )
 
     def _index_execution_run(self, run: dict[str, Any]) -> None:
         text = " ".join(part for part in [str(run.get("goal") or ""), str(run.get("status") or "")] if part).strip()
+        keywords = extract_keywords(text)
         self._upsert_text_search_record(
             record_id=run["id"],
             domain="execution",
             collection="execution_run",
             title=run.get("goal"),
             text=text,
-            keywords=extract_keywords(text),
+            keywords=keywords,
             updated_at=run.get("updated_at"),
             user_id=run.get("user_id"),
             owner_agent_id=run.get("owner_agent_id") or run.get("agent_id"),
@@ -5401,18 +5534,34 @@ class AIMemory:
             run_id=run.get("id"),
             namespace_key=run.get("namespace_key"),
         )
+        self._index_semantic_record(
+            collection="execution_run",
+            record_id=run["id"],
+            domain="execution",
+            text=text,
+            updated_at=run.get("updated_at"),
+            quality=0.68,
+            metadata={
+                "run_id": run.get("id"),
+                "status": run.get("status"),
+                "subject_type": run.get("subject_type"),
+                "subject_id": run.get("subject_id"),
+            },
+            keywords=keywords,
+        )
 
     def _index_execution_observation(self, observation: dict[str, Any], *, run: dict[str, Any] | None = None) -> None:
         run_row = dict(run or {})
         text = str(observation.get("content") or observation.get("text") or "")
         title = str(observation.get("kind") or "observation")
+        keywords = extract_keywords(" ".join(part for part in [title, text] if part))
         self._upsert_text_search_record(
             record_id=observation["id"],
             domain="execution",
             collection="execution_observation",
             title=title,
             text=text,
-            keywords=extract_keywords(" ".join(part for part in [title, text] if part)),
+            keywords=keywords,
             updated_at=observation.get("created_at") or observation.get("updated_at"),
             user_id=run_row.get("user_id"),
             owner_agent_id=run_row.get("owner_agent_id") or run_row.get("agent_id"),
@@ -5422,6 +5571,24 @@ class AIMemory:
             session_id=observation.get("session_id") or run_row.get("session_id"),
             run_id=observation.get("run_id"),
             namespace_key=run_row.get("namespace_key"),
+        )
+        semantic_text = "\n".join(part for part in [title, text] if part).strip()
+        self._index_semantic_record(
+            collection="execution_observation",
+            record_id=observation["id"],
+            domain="execution",
+            text=text,
+            semantic_source_text=semantic_text or text,
+            updated_at=observation.get("created_at") or observation.get("updated_at"),
+            quality=0.72,
+            metadata={
+                "run_id": observation.get("run_id"),
+                "task_id": observation.get("task_id"),
+                "kind": observation.get("kind"),
+                "subject_type": run_row.get("subject_type"),
+                "subject_id": run_row.get("subject_id"),
+            },
+            keywords=keywords,
         )
 
     def _memory_index_text(self, memory: dict[str, Any]) -> str:
@@ -5459,6 +5626,91 @@ class AIMemory:
             return
         self.db.execute("DELETE FROM text_search_index")
         self._rebuild_text_search_index()
+
+    def _sync_contextual_semantic_indexes(self) -> None:
+        try:
+            expected = sum(
+                int((self.db.fetch_one(statement) or {}).get("count", 0) or 0)
+                for statement in (
+                    "SELECT COUNT(*) AS count FROM conversation_turns",
+                    "SELECT COUNT(*) AS count FROM working_memory_snapshots",
+                    "SELECT COUNT(*) AS count FROM runs",
+                    "SELECT COUNT(*) AS count FROM observations",
+                )
+            )
+            current = int(
+                (
+                    self.db.fetch_one(
+                        """
+                        SELECT COUNT(*) AS count
+                        FROM semantic_index_cache
+                        WHERE collection IN ('interaction_turn', 'interaction_snapshot', 'execution_run', 'execution_observation')
+                        """
+                    )
+                    or {}
+                ).get("count", 0)
+                or 0
+            )
+        except Exception:
+            return
+        if current >= expected:
+            return
+        self._rebuild_contextual_semantic_indexes()
+
+    def _rebuild_contextual_semantic_indexes(self) -> None:
+        interaction_turns = self.db.fetch_all(
+            """
+            SELECT ct.id, ct.role, ct.turn_type, ct.content, ct.created_at, s.id AS session_id, s.title, s.user_id, s.owner_agent_id, s.agent_id, s.subject_type, s.subject_id, s.interaction_type, s.namespace_key
+            FROM conversation_turns ct
+            JOIN sessions s ON s.id = ct.session_id
+            """
+        )
+        for row in interaction_turns:
+            self._index_interaction_turn(
+                {
+                    "id": row.get("session_id"),
+                    "title": row.get("title"),
+                    "user_id": row.get("user_id"),
+                    "owner_agent_id": row.get("owner_agent_id"),
+                    "agent_id": row.get("agent_id"),
+                    "subject_type": row.get("subject_type"),
+                    "subject_id": row.get("subject_id"),
+                    "interaction_type": row.get("interaction_type"),
+                    "namespace_key": row.get("namespace_key"),
+                },
+                turn_id=row["id"],
+                role=str(row.get("role") or ""),
+                content=str(row.get("content") or ""),
+                turn_type=row.get("turn_type"),
+                updated_at=str(row.get("created_at") or ""),
+            )
+
+        for snapshot in _deserialize_rows(self.db.fetch_all("SELECT * FROM working_memory_snapshots")):
+            self._index_interaction_snapshot(snapshot)
+
+        for run in _deserialize_rows(self.db.fetch_all("SELECT * FROM runs")):
+            self._index_execution_run(run)
+        observation_rows = self.db.fetch_all(
+            """
+            SELECT o.*, r.user_id, r.owner_agent_id, r.agent_id, r.subject_type, r.subject_id, r.interaction_type, r.namespace_key
+            FROM observations o
+            JOIN runs r ON r.id = o.run_id
+            """
+        )
+        for row in observation_rows:
+            self._index_execution_observation(
+                _deserialize_row(row) or dict(row),
+                run={
+                    "user_id": row.get("user_id"),
+                    "owner_agent_id": row.get("owner_agent_id"),
+                    "agent_id": row.get("agent_id"),
+                    "subject_type": row.get("subject_type"),
+                    "subject_id": row.get("subject_id"),
+                    "interaction_type": row.get("interaction_type"),
+                    "session_id": row.get("session_id"),
+                    "namespace_key": row.get("namespace_key"),
+                },
+            )
 
     def _rebuild_text_search_index(self) -> None:
         memory_limit = max(

@@ -5,9 +5,9 @@ from typing import Any
 
 from aimemory.algorithms.dedupe import semantic_similarity
 from aimemory.algorithms.distill import AdaptiveDistiller, DistilledUnitCandidate
-from aimemory.algorithms.retrieval import estimate_tokens, mmr_rerank
+from aimemory.algorithms.retrieval import estimate_tokens
 from aimemory.algorithms.segmentation import segment_text
-from aimemory.core.text import build_summary, split_sentences
+from aimemory.core.text import cosine_similarity
 from aimemory.memory_intelligence.policies import MemoryPolicy
 
 
@@ -27,6 +27,7 @@ class CompressionResult:
     redundancy_score: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
     evidence_spans: list[dict[str, Any]] = field(default_factory=list)
+    supporting_passages: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -44,6 +45,7 @@ class CompressionResult:
             "redundancy_score": round(float(self.redundancy_score), 6),
             "metadata": dict(self.metadata),
             "evidence_spans": [dict(item) for item in self.evidence_spans],
+            "supporting_passages": list(self.supporting_passages),
         }
 
 
@@ -103,7 +105,7 @@ def compress_records(
         units,
         query=query,
         domain_hint=domain_hint,
-        limit=max(max_highlights * 6, effective_policy.max_candidates * 6, min(len(units), 48), 24),
+        limit=max(max_highlights * 6, effective_policy.max_candidates * 6, min(len(units), 64), 24),
     )
     if not candidates:
         return _fallback_result(records, budget_chars=budget_chars, max_sentences=max_sentences)
@@ -117,15 +119,7 @@ def compress_records(
     if not selected:
         return _fallback_result(records, budget_chars=budget_chars, max_sentences=max_sentences)
 
-    selected_ordered = sorted(
-        selected,
-        key=lambda item: (
-            int(item.metadata.get("section_index", 0) or 0),
-            int(item.metadata.get("paragraph_index", 0) or 0),
-            int(item.metadata.get("sentence_index", -1) or -1),
-            str(item.id),
-        ),
-    )
+    selected_ordered = sorted(selected, key=_unit_position_key)
     highlights = _build_highlights(selected_ordered, budget_chars=budget_chars, max_highlights=max_highlights)
     kept_ids = list(
         dict.fromkeys(
@@ -138,9 +132,17 @@ def compress_records(
     facts, constraints, steps, risks = _build_structured_slots(selected_ordered, budget_chars=budget_chars)
     summary = _build_summary_text(
         selected_ordered,
-        highlights=highlights,
         budget_chars=budget_chars,
         max_sentences=max_sentences,
+    )
+    supporting_passages = _build_supporting_passages(
+        selected_ordered,
+        summary=summary,
+        highlights=highlights,
+        steps=steps,
+        constraints=constraints,
+        risks=risks,
+        budget_chars=budget_chars,
     )
 
     return CompressionResult(
@@ -174,6 +176,7 @@ def compress_records(
             }
             for item in selected_ordered
         ],
+        supporting_passages=supporting_passages,
     )
 
 
@@ -222,6 +225,82 @@ def _select_candidates(
     if not candidates:
         return []
 
+    ordered_candidates = sorted(
+        candidates,
+        key=lambda item: (
+            item.score,
+            item.centrality_score,
+            item.coverage_score,
+            item.information_score,
+        ),
+        reverse=True,
+    )
+    selected: list[DistilledUnitCandidate] = []
+    seen_ids: set[str] = set()
+    used_chars = 0
+
+    for candidate in _seed_candidates(ordered_candidates):
+        if candidate.id in seen_ids:
+            continue
+        if any(_shares_container(candidate, existing) for existing in selected):
+            continue
+        cost = _candidate_cost(candidate)
+        if selected and used_chars + cost > budget_chars:
+            continue
+        selected.append(candidate)
+        seen_ids.add(candidate.id)
+        used_chars += cost
+
+    while len(selected) < max_highlights:
+        best_candidate: DistilledUnitCandidate | None = None
+        best_gain = float("-inf")
+        for candidate in ordered_candidates:
+            if candidate.id in seen_ids:
+                continue
+            if any(_shares_container(candidate, existing) for existing in selected):
+                continue
+            cost = _candidate_cost(candidate)
+            if selected and used_chars + cost > budget_chars and used_chars >= int(budget_chars * 0.6):
+                continue
+            gain = _candidate_gain(
+                candidate,
+                selected,
+                budget_chars=budget_chars,
+                diversity_lambda=diversity_lambda,
+            )
+            if gain > best_gain:
+                best_gain = gain
+                best_candidate = candidate
+        if best_candidate is None:
+            break
+        if selected and best_gain <= 0.0:
+            break
+        selected.append(best_candidate)
+        seen_ids.add(best_candidate.id)
+        used_chars += _candidate_cost(best_candidate)
+        if used_chars >= budget_chars:
+            break
+
+    selected, used_chars = _complete_numbered_sequences(
+        selected,
+        ordered_candidates,
+        budget_chars=budget_chars,
+        max_highlights=max_highlights,
+        used_chars=used_chars,
+    )
+    selected, _used_chars = _ensure_slot_coverage(
+        selected,
+        ordered_candidates,
+        budget_chars=budget_chars,
+        max_highlights=max_highlights,
+        used_chars=used_chars,
+    )
+    if not selected and ordered_candidates:
+        selected.append(ordered_candidates[0])
+    return selected
+
+
+def _seed_candidates(candidates: list[DistilledUnitCandidate]) -> list[DistilledUnitCandidate]:
     grouped: dict[tuple[Any, ...], list[DistilledUnitCandidate]] = {}
     for candidate in candidates:
         key = (
@@ -231,70 +310,97 @@ def _select_candidates(
         )
         grouped.setdefault(key, []).append(candidate)
 
-    seeded: list[DistilledUnitCandidate] = []
+    seeds: list[DistilledUnitCandidate] = []
     for _key, group in sorted(
         grouped.items(),
-        key=lambda item: max(candidate.score for candidate in item[1]),
+        key=lambda item: max(candidate.score + (0.18 * candidate.centrality_score) for candidate in item[1]),
         reverse=True,
-    )[: max(1, min(4, len(grouped)))]:
-        seeded.append(max(group, key=lambda candidate: candidate.score))
-    seeded.extend(_slot_seed_candidates(candidates))
+    )[: max(1, min(3, len(grouped)))]:
+        seeds.append(max(group, key=lambda candidate: (candidate.score, candidate.centrality_score)))
 
-    selected: list[DistilledUnitCandidate] = []
-    seen_ids: set[str] = set()
-    used_chars = 0
-    for candidate in seeded:
-        if candidate.id in seen_ids:
-            continue
-        if selected and used_chars + len(candidate.text) > budget_chars:
-            continue
-        selected.append(candidate)
-        seen_ids.add(candidate.id)
-        used_chars += len(candidate.text)
-
-    selected, used_chars = _complete_numbered_sequences(
-        selected,
-        candidates,
-        budget_chars=budget_chars,
-        max_highlights=max_highlights,
-        used_chars=used_chars,
+    slot_pools = (
+        [item for item in candidates if _is_step_candidate(item)],
+        [item for item in candidates if _is_constraint_candidate(item)],
+        [item for item in candidates if _is_risk_candidate(item)],
     )
-    seen_ids = {item.id for item in selected}
-
-    reranked = mmr_rerank(
-        [{"id": candidate.id, "text": candidate.text, "score": candidate.score} for candidate in candidates],
-        lambda_value=diversity_lambda,
-        limit=max(len(candidates), max_highlights),
+    slot_keys = (
+        lambda item: (item.actionability_score, item.score),
+        lambda item: (item.constraint_score, item.score),
+        lambda item: (item.risk_score, item.score),
     )
-    by_id = {candidate.id: candidate for candidate in candidates}
-    for item in reranked:
-        candidate = by_id[item["id"]]
-        if candidate.id in seen_ids:
-            continue
-        if len(selected) >= max_highlights:
-            break
-        if any(semantic_similarity(candidate.text, existing.text) >= 0.94 for existing in selected):
-            continue
-        next_chars = used_chars + len(candidate.text)
-        if selected and next_chars > budget_chars and used_chars >= int(budget_chars * 0.72):
-            continue
-        selected.append(candidate)
-        seen_ids.add(candidate.id)
-        used_chars = next_chars
-        if used_chars >= budget_chars:
-            break
+    for pool, key_function in zip(slot_pools, slot_keys):
+        if pool:
+            seeds.append(max(pool, key=key_function))
 
-    selected, used_chars = _ensure_slot_coverage(
-        selected,
-        candidates,
-        budget_chars=budget_chars,
-        max_highlights=max_highlights,
-        used_chars=used_chars,
+    deduped: list[DistilledUnitCandidate] = []
+    seen: set[str] = set()
+    for candidate in seeds:
+        if candidate.id in seen:
+            continue
+        deduped.append(candidate)
+        seen.add(candidate.id)
+    return deduped
+
+
+def _candidate_gain(
+    candidate: DistilledUnitCandidate,
+    selected: list[DistilledUnitCandidate],
+    *,
+    budget_chars: int,
+    diversity_lambda: float,
+) -> float:
+    novelty_penalty = max((_candidate_similarity(candidate, item) for item in selected), default=0.0)
+    section_key = _section_key(candidate)
+    source_key = str(candidate.metadata.get("source_id") or "")
+    covered_sections = {_section_key(item) for item in selected}
+    covered_sources = {str(item.metadata.get("source_id") or "") for item in selected}
+    section_bonus = 0.12 if section_key not in covered_sections else 0.0
+    source_bonus = 0.04 if source_key and source_key not in covered_sources else 0.0
+
+    slot_bonus = 0.0
+    if _is_step_candidate(candidate) and not any(_is_step_candidate(item) for item in selected):
+        slot_bonus += 0.08
+    if _is_constraint_candidate(candidate) and not any(_is_constraint_candidate(item) for item in selected):
+        slot_bonus += 0.07
+    if _is_risk_candidate(candidate) and not any(_is_risk_candidate(item) for item in selected):
+        slot_bonus += 0.07
+
+    sequence_bonus = _sequence_bonus(candidate, selected)
+    length_penalty = min(0.14, _candidate_cost(candidate) / max(1, budget_chars))
+    relevance = (
+        (0.44 * candidate.score)
+        + (0.18 * candidate.centrality_score)
+        + (0.12 * candidate.coverage_score)
+        + (0.08 * candidate.information_score)
+        + (0.08 * candidate.query_score)
+        + (0.06 * max(candidate.actionability_score, candidate.constraint_score, candidate.risk_score))
     )
+    diversity_penalty = max(0.08, 1.0 - diversity_lambda) * novelty_penalty
+    return round(relevance + section_bonus + source_bonus + slot_bonus + sequence_bonus - diversity_penalty - length_penalty, 6)
 
-    if not selected and candidates:
-        selected.append(candidates[0])
-    return selected
+
+def _candidate_cost(candidate: DistilledUnitCandidate) -> int:
+    text = str(candidate.text or "").strip()
+    if not text:
+        return 0
+    hard_cap = 220 if candidate.level in {"paragraph", "sentence"} else 280
+    return min(len(text), hard_cap)
+
+
+def _sequence_bonus(candidate: DistilledUnitCandidate, selected: list[DistilledUnitCandidate]) -> float:
+    ordinal = candidate.metadata.get("list_ordinal")
+    if not isinstance(ordinal, int):
+        return 0.0
+    section_key = _section_key(candidate)
+    for item in selected:
+        item_ordinal = item.metadata.get("list_ordinal")
+        if not isinstance(item_ordinal, int):
+            continue
+        if _section_key(item) != section_key:
+            continue
+        if abs(item_ordinal - ordinal) == 1:
+            return 0.1
+    return 0.04
 
 
 def _build_highlights(
@@ -310,46 +416,45 @@ def _build_highlights(
         text = _contextualized_text(candidate, max_chars=max_highlight_chars)
         if not text:
             continue
-        if highlights and (used_chars + len(text)) > budget_chars:
+        remaining_chars = budget_chars - used_chars
+        if remaining_chars <= 0:
+            break
+        if len(text) > remaining_chars:
+            if remaining_chars < 40:
+                continue
+            text = _contextualized_text(candidate, max_chars=remaining_chars)
+        if not text:
             continue
         highlights.append(text)
         used_chars += len(text)
         if len(highlights) >= max_highlights or used_chars >= budget_chars:
             break
     if not highlights and selected:
-        highlights.append(str(selected[0].text)[:budget_chars])
+        highlights.append(_trim_highlight_text(str(selected[0].text), max_chars=budget_chars))
     return highlights
 
 
 def _build_summary_text(
     selected: list[DistilledUnitCandidate],
     *,
-    highlights: list[str],
     budget_chars: int,
     max_sentences: int,
 ) -> str:
+    prioritized: list[DistilledUnitCandidate] = []
+    for pool in (
+        sorted([item for item in selected if _is_step_candidate(item)], key=lambda item: (_unit_position_key(item), -item.actionability_score)),
+        sorted([item for item in selected if _is_constraint_candidate(item)], key=lambda item: (item.constraint_score, item.score), reverse=True),
+        sorted([item for item in selected if _is_risk_candidate(item)], key=lambda item: (item.risk_score, item.score), reverse=True),
+        sorted(selected, key=lambda item: (item.score, item.centrality_score, item.information_score), reverse=True),
+    ):
+        for candidate in pool:
+            if candidate not in prioritized:
+                prioritized.append(candidate)
+
     summary_parts: list[str] = []
-    seen: set[str] = set()
-    max_part_chars = max(48, min(96, budget_chars // 2))
-    for predicate in (_is_step_candidate, _is_constraint_candidate, _is_risk_candidate):
-        for candidate in selected:
-            if not predicate(candidate):
-                continue
-            text = _contextualized_text(candidate, max_chars=max_part_chars)
-            normalized = text.strip()
-            if not normalized or normalized in seen:
-                continue
-            summary_parts.append(normalized)
-            seen.add(normalized)
-    for item in highlights:
-        normalized = str(item or "").strip()
-        if not normalized or normalized in seen:
-            continue
-        summary_parts.append(normalized)
-        seen.add(normalized)
-    if not summary_parts:
-        summary_parts = [item for item in highlights if str(item or "").strip()]
-    return build_summary(summary_parts, max_sentences=max_sentences, max_chars=budget_chars)
+    for candidate in prioritized:
+        summary_parts.append(_contextualized_text(candidate, max_chars=max(80, min(140, budget_chars // 2))))
+    return _join_parts(summary_parts, max_items=max_sentences, max_chars=budget_chars)
 
 
 def _build_structured_slots(
@@ -366,8 +471,9 @@ def _build_structured_slots(
         sorted(
             ranked,
             key=lambda item: (
-                item.information_score + (0.3 * item.structure_score),
                 item.score,
+                item.centrality_score,
+                item.information_score,
             ),
             reverse=True,
         ),
@@ -375,33 +481,28 @@ def _build_structured_slots(
         max_items=6,
     )
     constraints = _slot_texts(
-        [item for item in ranked if _is_constraint_candidate(item)],
+        sorted(
+            [item for item in ranked if _is_constraint_candidate(item)],
+            key=lambda item: (item.constraint_score, item.score),
+            reverse=True,
+        ),
         limit_chars=max(90, budget_chars // 3),
         max_items=5,
     )
     steps = _slot_texts(
-        [
-            item
-            for item in sorted(
-                ranked,
-                key=lambda item: (item.actionability_score + (0.08 if item.metadata.get("list_ordinal") else 0.0), item.score),
-                reverse=True,
-            )
-            if _is_step_candidate(item)
-        ],
+        sorted(
+            [item for item in ranked if _is_step_candidate(item)],
+            key=lambda item: (_unit_position_key(item), -item.actionability_score),
+        ),
         limit_chars=max(100, budget_chars // 2),
         max_items=6,
     )
     risks = _slot_texts(
-        [
-            item
-            for item in sorted(
-                ranked,
-                key=lambda item: (item.risk_score, item.constraint_score, item.score),
-                reverse=True,
-            )
-            if _is_risk_candidate(item)
-        ],
+        sorted(
+            [item for item in ranked if _is_risk_candidate(item)],
+            key=lambda item: (item.risk_score, item.score),
+            reverse=True,
+        ),
         limit_chars=max(90, budget_chars // 3),
         max_items=4,
     )
@@ -424,6 +525,42 @@ def _slot_texts(items: list[DistilledUnitCandidate], *, limit_chars: int, max_it
         if len(results) >= max_items or used_chars >= limit_chars:
             break
     return results
+
+
+def _unit_position_key(candidate: DistilledUnitCandidate) -> tuple[int, int, int, int]:
+    ordinal = candidate.metadata.get("list_ordinal")
+    return (
+        int(candidate.metadata.get("section_index", 0) or 0),
+        int(candidate.metadata.get("paragraph_index", 0) or 0),
+        int(ordinal if isinstance(ordinal, int) else 10_000),
+        int(candidate.metadata.get("sentence_index", -1) or -1),
+    )
+
+
+def _section_key(candidate: DistilledUnitCandidate) -> tuple[str, int]:
+    return (str(candidate.metadata.get("source_id") or ""), int(candidate.metadata.get("section_index", 0) or 0))
+
+
+def _shares_container(left: DistilledUnitCandidate, right: DistilledUnitCandidate) -> bool:
+    left_source = left.metadata.get("source_id")
+    right_source = right.metadata.get("source_id")
+    if left_source != right_source:
+        return False
+    left_section = int(left.metadata.get("section_index", 0) or 0)
+    right_section = int(right.metadata.get("section_index", 0) or 0)
+    if left_section != right_section:
+        return False
+    left_paragraph = int(left.metadata.get("paragraph_index", 0) or 0)
+    right_paragraph = int(right.metadata.get("paragraph_index", 0) or 0)
+    if left_paragraph != right_paragraph:
+        return False
+    return "sentence" in {str(left.level), str(right.level)}
+
+
+def _candidate_similarity(left: DistilledUnitCandidate, right: DistilledUnitCandidate) -> float:
+    if left.embedding and right.embedding and len(left.embedding) == len(right.embedding):
+        return max(0.0, cosine_similarity(left.embedding, right.embedding))
+    return semantic_similarity(left.text, right.text)
 
 
 def _coverage_score(candidates: list[DistilledUnitCandidate], selected: list[DistilledUnitCandidate]) -> float:
@@ -476,51 +613,96 @@ def _contextualized_text(candidate: DistilledUnitCandidate, *, max_chars: int) -
     return text
 
 
+def _full_contextualized_text(candidate: DistilledUnitCandidate) -> str:
+    text = str(candidate.text or "").strip()
+    if not text:
+        return ""
+    section_label = _section_label(candidate)
+    if not section_label:
+        return text
+    return f"[{section_label}] {text}"
+
+
 def _trim_highlight_text(text: str, *, max_chars: int) -> str:
     cleaned = str(text or "").strip()
     if len(cleaned) <= max_chars:
         return cleaned
-    return build_summary(split_sentences(cleaned), max_sentences=3, max_chars=max_chars)
+    units = [
+        unit
+        for unit in segment_text(cleaned, source_id="trim")
+        if unit.level in {"list_item", "sentence", "code_block", "table_block"}
+    ]
+    if not units:
+        return cleaned[:max_chars].rstrip()
+
+    parts: list[str] = []
+    for unit in units:
+        part = str(unit.text or "").strip()
+        if not part or part in parts:
+            continue
+        candidate = " ".join([*parts, part]) if parts else part
+        if parts and len(candidate) > max_chars:
+            break
+        if not parts and len(part) > max_chars:
+            return part[:max_chars].rstrip()
+        parts.append(part)
+    if parts:
+        return " ".join(parts)[:max_chars].rstrip()
+    return cleaned[:max_chars].rstrip()
+
+
+def _build_supporting_passages(
+    selected: list[DistilledUnitCandidate],
+    *,
+    summary: str,
+    highlights: list[str],
+    steps: list[str],
+    constraints: list[str],
+    risks: list[str],
+    budget_chars: int,
+) -> list[str]:
+    visible_text = "\n".join(
+        [
+            str(summary or ""),
+            *[str(item or "") for item in highlights],
+            *[str(item or "") for item in steps],
+            *[str(item or "") for item in constraints],
+            *[str(item or "") for item in risks],
+        ]
+    )
+    normalized_visible = visible_text.strip()
+    results: list[str] = []
+    used_chars = 0
+    max_chars = max(120, min(320, budget_chars))
+    for candidate in selected:
+        raw = str(candidate.text or "").strip()
+        if not raw:
+            continue
+        if raw in normalized_visible:
+            continue
+        passage = _full_contextualized_text(candidate)
+        if not passage or passage in results:
+            continue
+        if results and used_chars + len(passage) > max_chars:
+            continue
+        results.append(passage)
+        used_chars += len(passage)
+        if used_chars >= max_chars:
+            break
+    return results
 
 
 def _is_step_candidate(candidate: DistilledUnitCandidate) -> bool:
     ordered = isinstance(candidate.metadata.get("list_ordinal"), int)
-    imperative = candidate.actionability_score >= 0.34
-    heavy_constraint = candidate.constraint_score >= 0.42 and not ordered
-    return (ordered or imperative or candidate.level == "code_block") and not heavy_constraint
+    return ordered or candidate.actionability_score >= 0.34 or candidate.level == "code_block"
 
 
 def _is_constraint_candidate(candidate: DistilledUnitCandidate) -> bool:
-    return candidate.constraint_score >= 0.24
+    return candidate.constraint_score >= 0.22
 
 
 def _is_risk_candidate(candidate: DistilledUnitCandidate) -> bool:
-    return candidate.risk_score >= 0.24
-
-
-def _slot_seed_candidates(candidates: list[DistilledUnitCandidate]) -> list[DistilledUnitCandidate]:
-    seeds: list[DistilledUnitCandidate] = []
-    pools = (
-        [item for item in candidates if _is_step_candidate(item)],
-        [item for item in candidates if _is_constraint_candidate(item)],
-        [item for item in candidates if _is_risk_candidate(item)],
-    )
-    key_functions = (
-        lambda item: (item.actionability_score + (0.08 if item.metadata.get("list_ordinal") else 0.0), item.score),
-        lambda item: (item.constraint_score, item.score),
-        lambda item: (item.risk_score, item.score),
-    )
-    for pool, key_function in zip(pools, key_functions):
-        if pool:
-            seeds.append(max(pool, key=key_function))
-    deduped: list[DistilledUnitCandidate] = []
-    seen: set[str] = set()
-    for candidate in seeds:
-        if candidate.id in seen:
-            continue
-        deduped.append(candidate)
-        seen.add(candidate.id)
-    return deduped
+    return candidate.risk_score >= 0.14
 
 
 def _complete_numbered_sequences(
@@ -542,7 +724,10 @@ def _complete_numbered_sequences(
             candidate.metadata.get("section_index", 0),
             tuple(candidate.title_path),
         )
-        groups.setdefault(key, {})[ordinal] = candidate
+        ordinal_map = groups.setdefault(key, {})
+        current = ordinal_map.get(ordinal)
+        if current is None or _ordinal_representative_priority(candidate) > _ordinal_representative_priority(current):
+            ordinal_map[ordinal] = candidate
 
     queue: list[DistilledUnitCandidate] = []
     queued_ids: set[str] = set()
@@ -577,7 +762,9 @@ def _complete_numbered_sequences(
     ):
         if len(selected) >= max_highlights:
             break
-        next_chars = used_chars + len(candidate.text)
+        if any(_shares_container(candidate, item) for item in selected):
+            continue
+        next_chars = used_chars + _candidate_cost(candidate)
         if selected and next_chars > budget_chars and used_chars >= int(budget_chars * 0.72):
             selected, used_chars, fitted = _rebalance_for_candidate(
                 selected,
@@ -587,7 +774,7 @@ def _complete_numbered_sequences(
             )
             if not fitted:
                 continue
-            next_chars = used_chars + len(candidate.text)
+            next_chars = used_chars + _candidate_cost(candidate)
         selected.append(candidate)
         selected_ids.add(candidate.id)
         used_chars = next_chars
@@ -613,11 +800,15 @@ def _ensure_slot_coverage(
     for predicate, key_function in checks:
         if any(predicate(item) for item in selected):
             continue
-        pool = [item for item in candidates if predicate(item) and item.id not in selected_ids]
+        pool = [
+            item
+            for item in candidates
+            if predicate(item) and item.id not in selected_ids and not any(_shares_container(item, current) for current in selected)
+        ]
         if not pool or len(selected) >= max_highlights:
             continue
         candidate = max(pool, key=key_function)
-        next_chars = used_chars + len(candidate.text)
+        next_chars = used_chars + _candidate_cost(candidate)
         if selected and next_chars > budget_chars and used_chars >= int(budget_chars * 0.72):
             continue
         selected.append(candidate)
@@ -633,7 +824,8 @@ def _rebalance_for_candidate(
     used_chars: int,
     budget_chars: int,
 ) -> tuple[list[DistilledUnitCandidate], int, bool]:
-    if used_chars + len(candidate.text) <= budget_chars:
+    candidate_cost = _candidate_cost(candidate)
+    if used_chars + candidate_cost <= budget_chars:
         return selected, used_chars, True
     removable = sorted(selected, key=_removal_priority)
     removed_ids: set[str] = set()
@@ -642,8 +834,8 @@ def _rebalance_for_candidate(
         if _removal_priority(item) >= _removal_priority(candidate):
             continue
         removed_ids.add(item.id)
-        adjusted_chars -= len(item.text)
-        if adjusted_chars + len(candidate.text) <= budget_chars:
+        adjusted_chars -= _candidate_cost(item)
+        if adjusted_chars + candidate_cost <= budget_chars:
             retained = [item for item in selected if item.id not in removed_ids]
             return retained, adjusted_chars, True
     return selected, used_chars, False
@@ -651,17 +843,52 @@ def _rebalance_for_candidate(
 
 def _removal_priority(candidate: DistilledUnitCandidate) -> float:
     priority = float(candidate.score)
+    priority += 0.28 * float(candidate.centrality_score)
     if _is_step_candidate(candidate):
-        priority += 1.0
+        priority += 0.8
     if _is_constraint_candidate(candidate):
-        priority += 0.35
+        priority += 0.32
     if _is_risk_candidate(candidate):
-        priority += 0.45
+        priority += 0.38
     if candidate.metadata.get("list_ordinal"):
-        priority += 0.24
+        priority += 0.22
     if candidate.level == "code_block":
-        priority += 0.2
+        priority += 0.18
     return round(priority, 6)
+
+
+def _ordinal_representative_priority(candidate: DistilledUnitCandidate) -> tuple[float, ...]:
+    level_rank = {
+        "list_item": 4.0,
+        "code_block": 3.0,
+        "table_block": 2.5,
+        "paragraph": 2.0,
+        "sentence": 1.0,
+    }.get(str(candidate.level), 0.0)
+    return (
+        level_rank,
+        float(candidate.actionability_score),
+        float(candidate.score),
+        float(candidate.centrality_score),
+    )
+
+
+def _join_parts(parts: list[str], *, max_items: int, max_chars: int) -> str:
+    selected: list[str] = []
+    used_chars = 0
+    for part in parts:
+        cleaned = str(part or "").strip()
+        if not cleaned or cleaned in selected:
+            continue
+        if selected and used_chars + len(cleaned) > max_chars:
+            break
+        if not selected and len(cleaned) > max_chars:
+            return cleaned[:max_chars].rstrip()
+        selected.append(cleaned)
+        used_chars += len(cleaned)
+        if len(selected) >= max_items or used_chars >= max_chars:
+            break
+    return " ".join(selected)[:max_chars].rstrip()
 
 
 def _fallback_result(
@@ -675,7 +902,7 @@ def _fallback_result(
         for record in records
         if str(record.get("text") or record.get("content") or record.get("summary") or "").strip()
     ]
-    highlights = []
+    highlights: list[str] = []
     used_chars = 0
     kept_ids: list[str] = []
     for index, text in enumerate(texts):
@@ -687,7 +914,7 @@ def _fallback_result(
     if not highlights and texts:
         highlights.append(texts[0][:budget_chars])
         kept_ids.append(str(records[0].get("id") or records[0].get("record_id") or 0))
-    summary = build_summary(highlights, max_sentences=max_sentences, max_chars=budget_chars)
+    summary = _join_parts(highlights, max_items=max_sentences, max_chars=budget_chars)
     return CompressionResult(
         summary=summary,
         highlights=highlights,

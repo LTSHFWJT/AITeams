@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from aimemory.core.text import split_sentences
+from aimemory.core.text import cosine_similarity, hash_embedding, split_sentences
 
 
 MARKDOWN_HEADING_RE = re.compile(r"^\s*(#{1,6})\s+(.+?)\s*$")
@@ -12,6 +12,7 @@ NUMBERED_HEADING_RE = re.compile(r"^\s*(\d+(?:\.\d+){0,5})[\.\)]?\s+(.+?)\s*$")
 LIST_ITEM_RE = re.compile(r"^\s*((?:[-*+])|(?:\d+[\.\)]))\s+(.+?)\s*$")
 CODE_FENCE_RE = re.compile(r"^\s*```")
 TABLE_LINE_RE = re.compile(r"^\s*\|.*\|\s*$")
+CLAUSE_SPLIT_RE = re.compile(r"(?<=[,，;；:：])\s+")
 
 
 @dataclass(slots=True)
@@ -49,6 +50,15 @@ class TextBlock:
     title: str | None = None
     lines: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class SentenceRecord:
+    text: str
+    sentence_index: int
+    start_offset: int
+    end_offset: int
+    embedding: list[float] = field(default_factory=list)
 
 
 def segment_text(text: str | None, *, source_id: str = "text") -> list[TextUnit]:
@@ -118,16 +128,16 @@ def segment_text(text: str | None, *, source_id: str = "text") -> list[TextUnit]
             )
         )
 
-        local_cursor = start_offset
-        for sentence_index, sentence in enumerate(split_sentences(block_text)):
-            cleaned = sentence.strip()
+        sentence_records = _sentence_records(source, block_text, start_offset=start_offset, end_offset=end_offset)
+        for group in _semantic_sentence_groups(sentence_records):
+            cleaned = source[group[0].start_offset : group[-1].end_offset].strip()
+            if not cleaned:
+                cleaned = " ".join(record.text for record in group)
             if not cleaned:
                 continue
-            sentence_start = source.find(cleaned, local_cursor, end_offset + 1)
-            if sentence_start < 0:
-                sentence_start = local_cursor
-            sentence_end = sentence_start + len(cleaned)
-            local_cursor = sentence_end
+            sentence_start = group[0].start_offset
+            sentence_end = group[-1].end_offset
+            sentence_index = group[0].sentence_index
             units.append(
                 TextUnit(
                     id=f"{source_id}:sentence:{len(units)}",
@@ -139,7 +149,12 @@ def segment_text(text: str | None, *, source_id: str = "text") -> list[TextUnit]
                     sentence_index=sentence_index,
                     start_offset=sentence_start,
                     end_offset=sentence_end,
-                    metadata=base_metadata,
+                    metadata={
+                        **base_metadata,
+                        "sentence_span_start": group[0].sentence_index,
+                        "sentence_span_end": group[-1].sentence_index,
+                        "sentence_count": len(group),
+                    },
                 )
             )
         paragraph_index += 1
@@ -288,7 +303,7 @@ def _split_oversized_unit(
 ) -> list[TextChunk]:
     if unit.level in {"paragraph", "list_item"}:
         separator = " "
-        parts = split_sentences(unit.text)
+        parts = _semantic_parts(str(unit.text or ""), max_chars=max(96, min(chunk_size, 220)))
     else:
         separator = "\n"
         parts = [line.rstrip() for line in str(unit.text or "").splitlines() if line.strip()]
@@ -380,6 +395,149 @@ def _window_slices(text: str, *, chunk_size: int, overlap: int) -> list[str]:
             break
         start = max(start + 1, end - safe_overlap)
     return [item for item in results if item]
+
+
+def _sentence_records(source: str, block_text: str, *, start_offset: int, end_offset: int) -> list[SentenceRecord]:
+    records: list[SentenceRecord] = []
+    local_cursor = start_offset
+    for sentence_index, sentence in enumerate(split_sentences(block_text)):
+        cleaned = sentence.strip()
+        if not cleaned:
+            continue
+        sentence_start = source.find(cleaned, local_cursor, end_offset + 1)
+        if sentence_start < 0:
+            sentence_start = local_cursor
+        sentence_end = min(end_offset, sentence_start + len(cleaned))
+        local_cursor = sentence_end
+        records.append(
+            SentenceRecord(
+                text=cleaned,
+                sentence_index=sentence_index,
+                start_offset=sentence_start,
+                end_offset=sentence_end,
+                embedding=hash_embedding(cleaned),
+            )
+        )
+    return records
+
+
+def _semantic_sentence_groups(records: list[SentenceRecord], *, target_chars: int = 180, max_chars: int = 320) -> list[list[SentenceRecord]]:
+    if not records:
+        return []
+    if len(records) == 1:
+        return [[records[0]]]
+
+    groups: list[list[SentenceRecord]] = []
+    pending: list[SentenceRecord] = [records[0]]
+    short_break_chars = max(24, target_chars // 5)
+    medium_break_chars = max(56, target_chars // 2)
+    for record in records[1:]:
+        previous = pending[-1]
+        previous_similarity = _embedding_similarity(previous.embedding, record.embedding)
+        group_similarity = _embedding_similarity(_average_embedding([item.embedding for item in pending]), record.embedding)
+        surface_chars = record.end_offset - pending[0].start_offset
+        should_break = False
+        if surface_chars > max_chars and pending:
+            should_break = True
+        else:
+            cohesion = max(previous_similarity, group_similarity)
+            pending_chars = pending[-1].end_offset - pending[0].start_offset
+            if pending_chars >= short_break_chars and cohesion < 0.145:
+                should_break = True
+            elif len(pending) >= 2 and pending_chars >= medium_break_chars and cohesion < 0.18:
+                should_break = True
+            elif pending_chars >= target_chars and cohesion < 0.24:
+                should_break = True
+        if should_break:
+            groups.append(list(pending))
+            pending = [record]
+            continue
+        pending.append(record)
+    if pending:
+        groups.append(list(pending))
+    return groups
+
+
+def _semantic_parts(text: str, *, max_chars: int) -> list[str]:
+    sentences = [sentence.strip() for sentence in split_sentences(text) if sentence.strip()]
+    if not sentences:
+        return []
+
+    micro_parts: list[str] = []
+    clause_limit = max(64, min(max_chars, 180))
+    for sentence in sentences:
+        if len(sentence) <= clause_limit:
+            micro_parts.append(sentence)
+            continue
+        clauses = [part.strip() for part in CLAUSE_SPLIT_RE.split(sentence) if part.strip()]
+        if len(clauses) <= 1:
+            micro_parts.extend(_window_slices(sentence, chunk_size=clause_limit, overlap=max(16, clause_limit // 6)))
+            continue
+        pending: list[str] = []
+        for clause in clauses:
+            candidate = " ".join([*pending, clause]) if pending else clause
+            if pending and len(candidate) > clause_limit:
+                micro_parts.append(" ".join(pending))
+                pending = [clause]
+            else:
+                pending.append(clause)
+        if pending:
+            micro_parts.append(" ".join(pending))
+    if len(micro_parts) <= 1:
+        return micro_parts
+
+    embeddings = [hash_embedding(part) for part in micro_parts]
+    grouped: list[str] = []
+    pending_parts: list[str] = [micro_parts[0]]
+    pending_embeddings: list[list[float]] = [embeddings[0]]
+    for part, embedding in zip(micro_parts[1:], embeddings[1:]):
+        previous_similarity = _embedding_similarity(pending_embeddings[-1], embedding)
+        group_similarity = _embedding_similarity(_average_embedding(pending_embeddings), embedding)
+        candidate = " ".join([*pending_parts, part])
+        should_break = False
+        if len(candidate) > max_chars and pending_parts:
+            should_break = True
+        elif len(" ".join(pending_parts)) >= max(96, max_chars // 2) and max(previous_similarity, group_similarity) < 0.22:
+            should_break = True
+        if should_break:
+            grouped.append(" ".join(pending_parts))
+            pending_parts = [part]
+            pending_embeddings = [embedding]
+            continue
+        pending_parts.append(part)
+        pending_embeddings.append(embedding)
+    if pending_parts:
+        grouped.append(" ".join(pending_parts))
+    return grouped
+
+
+def _average_embedding(vectors: list[list[float]]) -> list[float]:
+    if not vectors:
+        return []
+    dims = len(vectors[0])
+    if dims <= 0:
+        return []
+    totals = [0.0] * dims
+    count = 0
+    for vector in vectors:
+        if len(vector) != dims:
+            continue
+        count += 1
+        for index, value in enumerate(vector):
+            totals[index] += value
+    if count <= 0:
+        return []
+    averaged = [value / count for value in totals]
+    norm = sum(value * value for value in averaged) ** 0.5
+    if norm <= 0:
+        return averaged
+    return [value / norm for value in averaged]
+
+
+def _embedding_similarity(left: list[float], right: list[float]) -> float:
+    if not left or not right or len(left) != len(right):
+        return 0.0
+    return max(0.0, cosine_similarity(left, right))
 
 
 def _blocks(text: str) -> list[TextBlock]:
@@ -478,14 +636,32 @@ def _heading_block(line: str) -> TextBlock | None:
 def _plain_blocks_from_lines(lines: list[str]) -> list[TextBlock]:
     blocks: list[TextBlock] = []
     paragraph_lines: list[str] = []
+    current_list_block: TextBlock | None = None
+
+    def flush_list_block() -> None:
+        nonlocal current_list_block
+        if current_list_block is None:
+            return
+        text = "\n".join(line.rstrip() for line in current_list_block.lines if str(line).strip()).strip()
+        if text:
+            current_list_block.text = text
+            current_list_block.metadata["continued_lines"] = max(0, len(current_list_block.lines) - 1)
+            blocks.append(current_list_block)
+        current_list_block = None
+
+    def flush_paragraph() -> None:
+        nonlocal paragraph_lines
+        if paragraph_lines:
+            paragraph_text = "\n".join(paragraph_lines).strip()
+            if paragraph_text:
+                blocks.append(TextBlock(block_type="paragraph", text=paragraph_text, lines=list(paragraph_lines)))
+            paragraph_lines = []
+
     for line in lines:
         list_match = LIST_ITEM_RE.match(line)
         if list_match:
-            if paragraph_lines:
-                paragraph_text = "\n".join(paragraph_lines).strip()
-                if paragraph_text:
-                    blocks.append(TextBlock(block_type="paragraph", text=paragraph_text, lines=list(paragraph_lines)))
-                paragraph_lines = []
+            flush_paragraph()
+            flush_list_block()
             marker = str(list_match.group(1)).strip()
             item_text = str(list_match.group(2)).strip()
             if item_text:
@@ -496,11 +672,16 @@ def _plain_blocks_from_lines(lines: list[str]) -> list[TextBlock]:
                 }
                 if ordinal_text:
                     metadata["list_ordinal"] = int(ordinal_text)
-                blocks.append(TextBlock(block_type="list_item", text=item_text, lines=[line], metadata=metadata))
+                current_list_block = TextBlock(block_type="list_item", text=item_text, lines=[item_text], metadata=metadata)
             continue
+        if current_list_block is not None:
+            if line[:1].isspace():
+                continuation = str(line).strip()
+                if continuation:
+                    current_list_block.lines.append(continuation)
+                continue
+            flush_list_block()
         paragraph_lines.append(line)
-    if paragraph_lines:
-        paragraph_text = "\n".join(paragraph_lines).strip()
-        if paragraph_text:
-            blocks.append(TextBlock(block_type="paragraph", text=paragraph_text, lines=list(paragraph_lines)))
+    flush_list_block()
+    flush_paragraph()
     return blocks
