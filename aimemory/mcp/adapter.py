@@ -133,7 +133,6 @@ class AIMemoryMCPAdapter:
         skill_write = {
             "name": {"type": "string"},
             "description": {"type": "string"},
-            "version": {"type": "string"},
             "prompt_template": {"type": "string"},
             "workflow": {},
             "schema": {"type": "object"},
@@ -161,7 +160,6 @@ class AIMemoryMCPAdapter:
         skill_reference_search = {
             "query": {"type": "string"},
             "skill_id": {"type": "string"},
-            "skill_version_id": {"type": "string"},
             "path_prefix": {"type": "string"},
             "limit": {"type": "integer", "default": 10},
             "threshold": {"type": "number", "default": 0.0},
@@ -251,14 +249,25 @@ class AIMemoryMCPAdapter:
             self._tool("skill_add", "保存或新增一个 agent skill。", skill_write, required=["name", "description"]),
             self._tool("skill_get", "通过 skill ID 获取完整 skill 内容。", {"skill_id": {"type": "string"}}, required=["skill_id"]),
             self._tool("skill_list", "列出当前 agent 的所有 skill metadata。", skill_list),
-            self._tool("skill_search", "按关键字检索 skill。", skill_search, required=["query"]),
+            self._tool("skill_search", "检索 skill 主体与执行上下文。", skill_search, required=["query"]),
             self._tool("skill_search_references", "检索 skill references 内的命中文本分块。", skill_reference_search, required=["query"]),
             self._tool(
-                "skill_reference_compress",
-                "对 skill reference 文件执行本地纯算法压缩。",
+                "skill_refresh_execution_context",
+                "根据 reference 文件刷新 skill 的常用执行上下文。",
                 {
                     "skill_id": {"type": "string"},
-                    "skill_version_id": {"type": "string"},
+                    "path_prefix": {"type": "string"},
+                    "budget_chars": {"type": "integer", "default": 900},
+                    "max_sentences": {"type": "integer", "default": 8},
+                    "max_highlights": {"type": "integer", "default": 12},
+                },
+                required=["skill_id"],
+            ),
+            self._tool(
+                "skill_reference_compress",
+                "对 skill reference 文件执行本地纯算法压缩，不修改已保存的执行上下文。",
+                {
+                    "skill_id": {"type": "string"},
                     "path_prefix": {"type": "string"},
                     "query": {"type": "string"},
                     "budget_chars": {"type": "integer", "default": 800},
@@ -359,6 +368,7 @@ class AIMemoryMCPAdapter:
             "skill_list": lambda: self.memory.api.skill.list(**payload),
             "skill_search": lambda: self.memory.api.skill.search(**payload),
             "skill_search_references": lambda: self.memory.api.skill.search_references(**payload),
+            "skill_refresh_execution_context": lambda: self.memory.api.skill.refresh_execution_context(payload["skill_id"], **{key: value for key, value in payload.items() if key != "skill_id"}),
             "skill_reference_compress": lambda: self.memory.api.skill.compress_references(payload["skill_id"], **{key: value for key, value in payload.items() if key != "skill_id"}),
             "skill_update": lambda: self.memory.api.skill.update(payload["skill_id"], **{key: value for key, value in payload.items() if key != "skill_id"}),
             "skill_delete": lambda: self.memory.api.skill.delete(payload["skill_id"]),

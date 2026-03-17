@@ -118,7 +118,7 @@ class LanceIndexStore:
             row.update(
                 {
                     "skill_id": self._string(payload.get("skill_id")),
-                    "version": self._string(payload.get("version")),
+                    "skill_snapshot_id": self._string(payload.get("skill_snapshot_id")),
                     "name": self._string(payload.get("name")),
                     "description": self._string(payload.get("description")),
                 }

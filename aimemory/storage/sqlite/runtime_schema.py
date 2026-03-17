@@ -62,6 +62,7 @@ ADDITIONAL_COLUMNS: dict[str, dict[str, str]] = {
         "capability_tags": "TEXT",
         "tool_affinity": "TEXT",
         "namespace_key": "TEXT",
+        "current_snapshot_id": "TEXT",
     },
     "memory_index": {
         "owner_agent_id": "TEXT",
@@ -154,7 +155,7 @@ EXTRA_SCHEMA_STATEMENTS = [
     CREATE TABLE IF NOT EXISTS skill_files (
         id TEXT PRIMARY KEY,
         skill_id TEXT NOT NULL,
-        skill_version_id TEXT NOT NULL,
+        skill_snapshot_id TEXT NOT NULL,
         object_id TEXT NOT NULL,
         relative_path TEXT NOT NULL,
         role TEXT NOT NULL,
@@ -163,14 +164,14 @@ EXTRA_SCHEMA_STATEMENTS = [
         checksum TEXT NOT NULL,
         metadata TEXT,
         created_at TEXT NOT NULL,
-        UNIQUE(skill_version_id, relative_path)
+        UNIQUE(skill_snapshot_id, relative_path)
     )
     """,
     """
     CREATE TABLE IF NOT EXISTS skill_reference_chunks (
         id TEXT PRIMARY KEY,
         skill_id TEXT NOT NULL,
-        skill_version_id TEXT NOT NULL,
+        skill_snapshot_id TEXT NOT NULL,
         file_id TEXT NOT NULL,
         object_id TEXT NOT NULL,
         relative_path TEXT NOT NULL,
@@ -186,7 +187,7 @@ EXTRA_SCHEMA_STATEMENTS = [
     CREATE TABLE IF NOT EXISTS skill_reference_index (
         record_id TEXT PRIMARY KEY,
         skill_id TEXT NOT NULL,
-        skill_version_id TEXT NOT NULL,
+        skill_snapshot_id TEXT NOT NULL,
         file_id TEXT NOT NULL,
         object_id TEXT NOT NULL,
         owner_agent_id TEXT,
@@ -235,11 +236,14 @@ POST_MIGRATION_SCHEMA_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_turns_speaker ON conversation_turns(session_id, speaker_participant_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_documents_owner ON documents(owner_agent_id, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_documents_namespace ON documents(namespace_key, updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_skills_status ON skills(status, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_skills_owner ON skills(owner_agent_id, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_skills_namespace ON skills(namespace_key, updated_at)",
-    "CREATE INDEX IF NOT EXISTS idx_skill_files_version ON skill_files(skill_version_id, relative_path)",
+    "CREATE INDEX IF NOT EXISTS idx_skills_lookup ON skills(name, owner_agent_id, namespace_key, updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_skills_current_snapshot ON skills(current_snapshot_id, updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_skill_files_snapshot ON skill_files(skill_snapshot_id, relative_path)",
     "CREATE INDEX IF NOT EXISTS idx_skill_files_skill ON skill_files(skill_id, created_at)",
-    "CREATE INDEX IF NOT EXISTS idx_skill_ref_chunks_version ON skill_reference_chunks(skill_version_id, relative_path, chunk_index)",
+    "CREATE INDEX IF NOT EXISTS idx_skill_ref_chunks_snapshot ON skill_reference_chunks(skill_snapshot_id, relative_path, chunk_index)",
     "CREATE INDEX IF NOT EXISTS idx_skill_ref_index_skill ON skill_reference_index(skill_id, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_skill_ref_index_owner ON skill_reference_index(owner_agent_id, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_skill_ref_index_namespace ON skill_reference_index(namespace_key, updated_at)",

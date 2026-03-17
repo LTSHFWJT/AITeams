@@ -9,7 +9,7 @@ from aimemory.core.text import split_sentences
 
 MARKDOWN_HEADING_RE = re.compile(r"^\s*(#{1,6})\s+(.+?)\s*$")
 NUMBERED_HEADING_RE = re.compile(r"^\s*(\d+(?:\.\d+){0,5})[\.\)]?\s+(.+?)\s*$")
-LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|(?:\d+[\.\)]))\s+(.+?)\s*$")
+LIST_ITEM_RE = re.compile(r"^\s*((?:[-*+])|(?:\d+[\.\)]))\s+(.+?)\s*$")
 CODE_FENCE_RE = re.compile(r"^\s*```")
 TABLE_LINE_RE = re.compile(r"^\s*\|.*\|\s*$")
 
@@ -48,6 +48,7 @@ class TextBlock:
     depth: int | None = None
     title: str | None = None
     lines: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 def segment_text(text: str | None, *, source_id: str = "text") -> list[TextUnit]:
@@ -80,6 +81,7 @@ def segment_text(text: str | None, *, source_id: str = "text") -> list[TextUnit]
         base_metadata = {
             "block_type": block.block_type,
             "title_path": list(title_path),
+            **dict(block.metadata),
         }
 
         if block.block_type in {"code_block", "table_block"}:
@@ -484,9 +486,17 @@ def _plain_blocks_from_lines(lines: list[str]) -> list[TextBlock]:
                 if paragraph_text:
                     blocks.append(TextBlock(block_type="paragraph", text=paragraph_text, lines=list(paragraph_lines)))
                 paragraph_lines = []
-            item_text = str(list_match.group(1)).strip()
+            marker = str(list_match.group(1)).strip()
+            item_text = str(list_match.group(2)).strip()
             if item_text:
-                blocks.append(TextBlock(block_type="list_item", text=item_text, lines=[line]))
+                ordinal_text = marker[:-1] if marker[:-1].isdigit() else ""
+                metadata = {
+                    "list_marker": marker,
+                    "list_kind": "ordered" if ordinal_text else "unordered",
+                }
+                if ordinal_text:
+                    metadata["list_ordinal"] = int(ordinal_text)
+                blocks.append(TextBlock(block_type="list_item", text=item_text, lines=[line], metadata=metadata))
             continue
         paragraph_lines.append(line)
     if paragraph_lines:

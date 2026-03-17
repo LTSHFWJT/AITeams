@@ -100,7 +100,7 @@ class ProjectionService:
         self.index_backend.upsert_knowledge_chunk(payload)
         self._project_document_graph(payload, keywords)
 
-    def _handle_skill_version(self, action: str, payload: dict[str, Any]) -> None:
+    def _handle_skill_snapshot(self, action: str, payload: dict[str, Any]) -> None:
         record_id = payload["record_id"]
         if action == "delete":
             self.index_backend.delete_skill(record_id)

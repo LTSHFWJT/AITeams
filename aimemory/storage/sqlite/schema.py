@@ -339,9 +339,19 @@ SCHEMA_STATEMENTS = [
     """
     CREATE TABLE IF NOT EXISTS skills (
         id TEXT PRIMARY KEY,
-        name TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
         description TEXT NOT NULL,
         owner_id TEXT,
+        owner_agent_id TEXT,
+        source_subject_type TEXT,
+        source_subject_id TEXT,
+        usage_count INTEGER NOT NULL DEFAULT 0,
+        last_used_at TEXT,
+        success_score REAL NOT NULL DEFAULT 0.5,
+        capability_tags TEXT,
+        tool_affinity TEXT,
+        namespace_key TEXT,
+        current_snapshot_id TEXT,
         status TEXT NOT NULL,
         metadata TEXT,
         created_at TEXT NOT NULL,
@@ -349,23 +359,22 @@ SCHEMA_STATEMENTS = [
     )
     """,
     """
-    CREATE TABLE IF NOT EXISTS skill_versions (
+    CREATE TABLE IF NOT EXISTS skill_snapshots (
         id TEXT PRIMARY KEY,
         skill_id TEXT NOT NULL,
-        version TEXT NOT NULL,
         prompt_template TEXT,
         workflow TEXT,
         schema_json TEXT,
         object_id TEXT,
-        changelog TEXT,
         metadata TEXT,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
     )
     """,
     """
     CREATE TABLE IF NOT EXISTS skill_bindings (
         id TEXT PRIMARY KEY,
-        skill_version_id TEXT NOT NULL,
+        skill_snapshot_id TEXT NOT NULL,
         tool_name TEXT NOT NULL,
         binding_type TEXT NOT NULL,
         config TEXT,
@@ -375,7 +384,7 @@ SCHEMA_STATEMENTS = [
     """
     CREATE TABLE IF NOT EXISTS skill_tests (
         id TEXT PRIMARY KEY,
-        skill_version_id TEXT NOT NULL,
+        skill_snapshot_id TEXT NOT NULL,
         input_payload TEXT,
         expected_output TEXT,
         metadata TEXT,
@@ -386,7 +395,7 @@ SCHEMA_STATEMENTS = [
     CREATE TABLE IF NOT EXISTS skill_files (
         id TEXT PRIMARY KEY,
         skill_id TEXT NOT NULL,
-        skill_version_id TEXT NOT NULL,
+        skill_snapshot_id TEXT NOT NULL,
         object_id TEXT NOT NULL,
         relative_path TEXT NOT NULL,
         role TEXT NOT NULL,
@@ -395,14 +404,14 @@ SCHEMA_STATEMENTS = [
         checksum TEXT NOT NULL,
         metadata TEXT,
         created_at TEXT NOT NULL,
-        UNIQUE(skill_version_id, relative_path)
+        UNIQUE(skill_snapshot_id, relative_path)
     )
     """,
     """
     CREATE TABLE IF NOT EXISTS skill_reference_chunks (
         id TEXT PRIMARY KEY,
         skill_id TEXT NOT NULL,
-        skill_version_id TEXT NOT NULL,
+        skill_snapshot_id TEXT NOT NULL,
         file_id TEXT NOT NULL,
         object_id TEXT NOT NULL,
         relative_path TEXT NOT NULL,
@@ -505,7 +514,7 @@ SCHEMA_STATEMENTS = [
     CREATE TABLE IF NOT EXISTS skill_index (
         record_id TEXT PRIMARY KEY,
         skill_id TEXT NOT NULL,
-        version TEXT NOT NULL,
+        skill_snapshot_id TEXT NOT NULL,
         name TEXT NOT NULL,
         description TEXT,
         text TEXT NOT NULL,
@@ -518,7 +527,7 @@ SCHEMA_STATEMENTS = [
     CREATE TABLE IF NOT EXISTS skill_reference_index (
         record_id TEXT PRIMARY KEY,
         skill_id TEXT NOT NULL,
-        skill_version_id TEXT NOT NULL,
+        skill_snapshot_id TEXT NOT NULL,
         file_id TEXT NOT NULL,
         object_id TEXT NOT NULL,
         owner_agent_id TEXT,
@@ -585,9 +594,11 @@ SCHEMA_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_documents_source ON documents(source_id, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_chunks_document ON document_chunks(document_id, chunk_index)",
     "CREATE INDEX IF NOT EXISTS idx_skills_status ON skills(status, updated_at)",
-    "CREATE INDEX IF NOT EXISTS idx_skill_files_version ON skill_files(skill_version_id, relative_path)",
+    "CREATE INDEX IF NOT EXISTS idx_skills_lookup ON skills(name, owner_agent_id, namespace_key, updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_skills_current_snapshot ON skills(current_snapshot_id, updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_skill_files_snapshot ON skill_files(skill_snapshot_id, relative_path)",
     "CREATE INDEX IF NOT EXISTS idx_skill_files_skill ON skill_files(skill_id, created_at)",
-    "CREATE INDEX IF NOT EXISTS idx_skill_ref_chunks_version ON skill_reference_chunks(skill_version_id, relative_path, chunk_index)",
+    "CREATE INDEX IF NOT EXISTS idx_skill_ref_chunks_snapshot ON skill_reference_chunks(skill_snapshot_id, relative_path, chunk_index)",
     "CREATE INDEX IF NOT EXISTS idx_skill_ref_index_skill ON skill_reference_index(skill_id, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_outbox_status ON outbox_events(status, available_at, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_memory_index_scope ON memory_index(user_id, session_id, scope, updated_at)",

@@ -20,7 +20,6 @@ class SkillService(ServiceBase):
         prompt_template: str | None = None,
         workflow: dict[str, Any] | str | None = None,
         schema: dict[str, Any] | None = None,
-        version: str = "0.1.0",
         tools: list[str] | None = None,
         tests: list[dict[str, Any]] | None = None,
         topics: list[str] | None = None,
@@ -45,7 +44,6 @@ class SkillService(ServiceBase):
             prompt_template=prompt_template,
             workflow=workflow,
             schema=schema,
-            version=version,
             tools=tools,
             tests=tests,
             topics=topics,
@@ -82,15 +80,3 @@ class SkillService(ServiceBase):
         else:
             rows = self.db.fetch_all("SELECT * FROM skills ORDER BY updated_at DESC")
         return {"results": self._deserialize_rows(rows)}
-
-    def activate_version(self, skill_id: str, version: str) -> dict[str, Any]:
-        skill = self.get_skill(skill_id)
-        if skill is None:
-            raise ValueError(f"Skill `{skill_id}` does not exist.")
-        match = next((item for item in skill["versions"] if item["version"] == version), None)
-        if match is None:
-            raise ValueError(f"Version `{version}` does not exist for skill `{skill_id}`.")
-        self.db.execute("UPDATE skills SET status = ?, updated_at = ? WHERE id = ?", (str(SkillStatus.ACTIVE), utcnow_iso(), skill_id))
-        refreshed = self.get_skill(skill_id)
-        assert refreshed is not None
-        return refreshed

@@ -97,6 +97,29 @@ def _chunk_title(base_title: str | None, metadata: dict[str, Any] | None = None)
     return f"{title} | {section_label}"
 
 
+def _format_skill_execution_context(context: dict[str, Any] | None) -> str:
+    payload = dict(context or {})
+    if not payload:
+        return ""
+    lines: list[str] = []
+    summary = str(payload.get("summary") or "").strip()
+    if summary:
+        lines.extend(["## Execution Context", summary])
+    sections = (
+        ("steps", "Recommended Steps"),
+        ("constraints", "Constraints"),
+        ("risks", "Risks"),
+        ("highlights", "Highlights"),
+    )
+    for key, title in sections:
+        values = [str(item).strip() for item in list(payload.get(key) or []) if str(item).strip()]
+        if not values:
+            continue
+        lines.extend(["", f"## {title}"])
+        lines.extend([f"- {item}" for item in values])
+    return "\n".join(lines).strip()
+
+
 MEMORY_TABLE_MAP = {
     str(MemoryScope.SESSION): "short_term_memories",
     str(MemoryScope.LONG_TERM): "long_term_memories",
@@ -1624,10 +1647,11 @@ class AIMemory:
         owner_agent_id = scope["owner_agent_id"]
         source_subject_type = scope["subject_type"]
         source_subject_id = scope["subject_id"]
-        if owner_agent_id:
-            skill = self.db.fetch_one("SELECT * FROM skills WHERE name = ? AND COALESCE(owner_agent_id, owner_id) = ?", (name, owner_agent_id))
-        else:
-            skill = self.db.fetch_one("SELECT * FROM skills WHERE name = ?", (name,))
+        skill = self._find_skill_by_name(
+            name=name,
+            owner_agent_id=owner_agent_id,
+            namespace_key=scope.get("namespace_key"),
+        )
         metadata = dict(kwargs.pop("metadata", {}) or {})
         raw_assets = kwargs.pop("assets", None)
         skill_markdown = kwargs.pop("skill_markdown", None)
@@ -1681,20 +1705,21 @@ class AIMemory:
                 ),
             )
 
-        version = kwargs.pop("version", f"v{len(self.db.fetch_all('SELECT id FROM skill_versions WHERE skill_id = ?', (skill_id,))) + 1}")
+        previous_snapshot = self._current_skill_snapshot_row(skill_id)
+        if previous_snapshot is not None:
+            self._delete_skill_snapshot(previous_snapshot["id"])
         prompt_template = kwargs.pop("prompt_template", None)
         workflow = kwargs.pop("workflow", None)
         schema = kwargs.pop("schema", None)
         tools = list(kwargs.pop("tools", []) or [])
         tests = list(kwargs.pop("tests", []) or [])
         topics = list(kwargs.pop("topics", []) or [])
-        self._write_skill_version_record(
+        self._write_skill_snapshot_record(
             skill_id=skill_id,
             name=name,
             description=description,
             scope=scope,
             metadata=metadata,
-            version=version,
             prompt_template=prompt_template,
             workflow=workflow,
             schema=schema,
@@ -1714,12 +1739,12 @@ class AIMemory:
     def register_skill(self, name: str, description: str, **kwargs) -> dict[str, Any]:
         return self.save_skill(name, description, **kwargs)
 
-    def _load_skill_version_asset(self, version_or_id: dict[str, Any] | str | None) -> dict[str, Any]:
-        if version_or_id is None:
+    def _load_skill_snapshot_asset(self, snapshot_or_id: dict[str, Any] | str | None) -> dict[str, Any]:
+        if snapshot_or_id is None:
             return {}
-        object_id = version_or_id.get("object_id") if isinstance(version_or_id, dict) else None
-        if object_id is None and not isinstance(version_or_id, dict):
-            row = self.db.fetch_one("SELECT object_id FROM skill_versions WHERE id = ?", (str(version_or_id),))
+        object_id = snapshot_or_id.get("object_id") if isinstance(snapshot_or_id, dict) else None
+        if object_id is None and not isinstance(snapshot_or_id, dict):
+            row = self.db.fetch_one("SELECT object_id FROM skill_snapshots WHERE id = ?", (str(snapshot_or_id),))
             object_id = row.get("object_id") if row else None
         if not object_id:
             return {}
@@ -1731,14 +1756,14 @@ class AIMemory:
         except (FileNotFoundError, UnicodeDecodeError):
             return {}
 
-    def _skill_version_file_rows(self, skill_version_id: str) -> list[dict[str, Any]]:
+    def _skill_snapshot_file_rows(self, skill_snapshot_id: str) -> list[dict[str, Any]]:
         return _deserialize_rows(
             self.db.fetch_all(
                 """
                 SELECT sf.*, o.object_key, o.object_type, o.metadata AS object_metadata
                 FROM skill_files sf
                 JOIN objects o ON o.id = sf.object_id
-                WHERE sf.skill_version_id = ?
+                WHERE sf.skill_snapshot_id = ?
                 ORDER BY
                     CASE sf.role
                         WHEN 'skill_md' THEN 0
@@ -1748,18 +1773,18 @@ class AIMemory:
                     END,
                     sf.relative_path ASC
                 """,
-                (skill_version_id,),
+                (skill_snapshot_id,),
             ),
             ("metadata", "object_metadata"),
         )
 
-    def _skill_version_files(self, skill_version_id: str, *, inline_contents: bool = True) -> list[dict[str, Any]]:
+    def _skill_snapshot_files(self, skill_snapshot_id: str, *, inline_contents: bool = True) -> list[dict[str, Any]]:
         files: list[dict[str, Any]] = []
-        for row in self._skill_version_file_rows(skill_version_id):
+        for row in self._skill_snapshot_file_rows(skill_snapshot_id):
             item = {
                 "id": row["id"],
                 "skill_id": row["skill_id"],
-                "skill_version_id": row["skill_version_id"],
+                "skill_snapshot_id": row["skill_snapshot_id"],
                 "object_id": row["object_id"],
                 "object_key": row.get("object_key"),
                 "relative_path": row["relative_path"],
@@ -1782,10 +1807,10 @@ class AIMemory:
             files.append(item)
         return files
 
-    def _clone_skill_version_file_inputs(
+    def _clone_skill_snapshot_file_inputs(
         self,
         *,
-        skill_version_id: str,
+        skill_snapshot_id: str,
         name: str,
         description: str,
         prompt_template: str | None,
@@ -1794,7 +1819,7 @@ class AIMemory:
         topics: list[str],
     ) -> list[dict[str, Any]]:
         cloned: list[dict[str, Any]] = []
-        for row in self._skill_version_file_rows(skill_version_id):
+        for row in self._skill_snapshot_file_rows(skill_snapshot_id):
             role = str(row.get("role") or "")
             metadata = dict(row.get("metadata", {}) or {})
             if role == "skill_md" and metadata.get("generated"):
@@ -1826,18 +1851,150 @@ class AIMemory:
             )
         return cloned
 
-    def _delete_skill_version_artifacts(self, skill_version_id: str) -> None:
-        rows = self.db.fetch_all("SELECT id FROM skill_reference_chunks WHERE skill_version_id = ?", (skill_version_id,))
+    def _find_skill_by_name(
+        self,
+        *,
+        name: str,
+        owner_agent_id: str | None,
+        namespace_key: str | None,
+    ) -> dict[str, Any] | None:
+        filters = ["name = ?"]
+        params: list[Any] = [name]
+        if owner_agent_id:
+            filters.append("COALESCE(owner_agent_id, owner_id) = ?")
+            params.append(owner_agent_id)
+        else:
+            filters.append("COALESCE(owner_agent_id, owner_id) IS NULL")
+        if namespace_key:
+            filters.append("namespace_key = ?")
+            params.append(namespace_key)
+        else:
+            filters.append("namespace_key IS NULL")
+        return self.db.fetch_one(
+            f"SELECT * FROM skills WHERE {' AND '.join(filters)} ORDER BY updated_at DESC LIMIT 1",
+            tuple(params),
+        )
+
+    def _current_skill_snapshot_row(self, skill_id: str) -> dict[str, Any] | None:
+        return _deserialize_row(
+            self.db.fetch_one(
+                """
+                SELECT ss.*
+                FROM skill_snapshots ss
+                JOIN skills s ON s.current_snapshot_id = ss.id
+                WHERE s.id = ?
+                LIMIT 1
+                """,
+                (skill_id,),
+            ),
+            ("metadata", "schema_json"),
+        )
+
+    def _build_skill_execution_context(
+        self,
+        reference_records: list[dict[str, Any]],
+        *,
+        query: str | None = None,
+        budget_chars: int | None = None,
+        max_sentences: int = 8,
+        max_highlights: int = 12,
+        generated_at: str | None = None,
+    ) -> dict[str, Any]:
+        if not reference_records:
+            return {}
+        compression = compress_records(
+            reference_records,
+            query=query,
+            domain_hint="skill_reference",
+            budget_chars=int(budget_chars or max(self.config.memory_policy.short_term_compression_budget_chars, 800)),
+            max_sentences=max_sentences,
+            diversity_lambda=self.config.memory_policy.diversity_lambda,
+            max_highlights=max_highlights,
+            policy=self.config.memory_policy,
+        ).as_dict()
+        reference_paths = list(
+            dict.fromkeys(
+                str(item.get("metadata", {}).get("relative_path") or item.get("id") or "").strip()
+                for item in reference_records
+                if str(item.get("metadata", {}).get("relative_path") or item.get("id") or "").strip()
+            )
+        )
+        context = {
+            **compression,
+            "reference_paths": reference_paths,
+            "generated_at": generated_at or utcnow_iso(),
+            "query": str(query or ""),
+        }
+        context["text"] = _format_skill_execution_context(context)
+        return context
+
+    def _persist_skill_execution_context(self, skill_snapshot_id: str, execution_context: dict[str, Any]) -> dict[str, Any]:
+        snapshot_row = self.db.fetch_one("SELECT * FROM skill_snapshots WHERE id = ?", (skill_snapshot_id,))
+        if snapshot_row is None:
+            raise ValueError(f"Skill snapshot `{skill_snapshot_id}` does not exist.")
+        skill_row = self.db.fetch_one("SELECT * FROM skills WHERE id = ?", (snapshot_row["skill_id"],))
+        if skill_row is None:
+            raise ValueError(f"Skill `{snapshot_row['skill_id']}` does not exist.")
+        payload = self._load_skill_snapshot_asset(snapshot_row)
+        payload["execution_context"] = dict(execution_context or {})
+        scope = {
+            "owner_agent_id": skill_row.get("owner_agent_id") or skill_row.get("owner_id"),
+            "subject_type": skill_row.get("source_subject_type"),
+            "subject_id": skill_row.get("source_subject_id"),
+            "namespace_key": skill_row.get("namespace_key"),
+        }
+        stored = self.object_store.put_text(
+            json_dumps(payload),
+            object_type="skills",
+            suffix=".json",
+            prefix=self._object_store_prefix(scope, "skill"),
+        )
+        object_row = self._persist_object(
+            stored,
+            mime_type="application/json",
+            metadata={
+                "skill_id": snapshot_row["skill_id"],
+                "skill_snapshot_id": skill_snapshot_id,
+                **self._scope_metadata(scope),
+                **dict(payload.get("metadata") or {}),
+            },
+        )
+        now = utcnow_iso()
+        self.db.execute(
+            "UPDATE skill_snapshots SET object_id = ?, metadata = ?, updated_at = ? WHERE id = ?",
+            (
+                object_row["id"],
+                snapshot_row.get("metadata"),
+                now,
+                skill_snapshot_id,
+            ),
+        )
+        self.db.execute("UPDATE skills SET updated_at = ? WHERE id = ?", (now, snapshot_row["skill_id"]))
+        return payload
+
+    def _delete_skill_snapshot_artifacts(self, skill_snapshot_id: str) -> None:
+        rows = self.db.fetch_all("SELECT id FROM skill_reference_chunks WHERE skill_snapshot_id = ?", (skill_snapshot_id,))
         for row in rows:
             record_id = row["id"]
             self.db.execute("DELETE FROM skill_reference_index WHERE record_id = ?", (record_id,))
             self.db.execute("DELETE FROM semantic_index_cache WHERE record_id = ?", (record_id,))
             self._delete_text_search_record(record_id)
             self.vector_index.delete("skill_reference_index", record_id)
-        self.db.execute("DELETE FROM skill_reference_chunks WHERE skill_version_id = ?", (skill_version_id,))
-        self.db.execute("DELETE FROM skill_files WHERE skill_version_id = ?", (skill_version_id,))
+        self.db.execute("DELETE FROM skill_reference_chunks WHERE skill_snapshot_id = ?", (skill_snapshot_id,))
+        self.db.execute("DELETE FROM skill_files WHERE skill_snapshot_id = ?", (skill_snapshot_id,))
 
-    def _write_skill_version_record(
+    def _delete_skill_snapshot(self, skill_snapshot_id: str) -> None:
+        self.db.execute("UPDATE skills SET current_snapshot_id = NULL WHERE current_snapshot_id = ?", (skill_snapshot_id,))
+        self.db.execute("DELETE FROM skill_index WHERE record_id = ?", (skill_snapshot_id,))
+        self.db.execute("DELETE FROM semantic_index_cache WHERE record_id = ?", (skill_snapshot_id,))
+        self._delete_text_search_record(skill_snapshot_id)
+        self.vector_index.delete("skill_index", skill_snapshot_id)
+        self._delete_skill_snapshot_artifacts(skill_snapshot_id)
+        self.db.execute("DELETE FROM skill_tests WHERE skill_snapshot_id = ?", (skill_snapshot_id,))
+        self.db.execute("DELETE FROM skill_bindings WHERE skill_snapshot_id = ?", (skill_snapshot_id,))
+        self.db.execute("DELETE FROM skill_snapshots WHERE id = ?", (skill_snapshot_id,))
+
+    def _write_skill_snapshot_record(
         self,
         *,
         skill_id: str,
@@ -1845,7 +2002,6 @@ class AIMemory:
         description: str,
         scope: dict[str, Any],
         metadata: dict[str, Any],
-        version: str | None,
         prompt_template: str | None,
         workflow: Any,
         schema: dict[str, Any] | None,
@@ -1860,75 +2016,8 @@ class AIMemory:
         assets: dict[str, Any] | list[dict[str, Any]] | None,
         now: str,
     ) -> dict[str, Any]:
-        asset_payload = {
-            "name": name,
-            "description": description,
-            "workflow": workflow,
-            "schema": schema,
-            "tools": tools,
-            "topics": topics,
-            "tests": tests,
-            "metadata": metadata,
-        }
-        stored = self.object_store.put_text(
-            json_dumps(asset_payload),
-            object_type="skills",
-            suffix=".json",
-            prefix=self._object_store_prefix(scope, "skill"),
-        )
-        object_row = self._persist_object(
-            stored,
-            mime_type="application/json",
-            metadata={"skill_id": skill_id, **self._scope_metadata(scope), **metadata},
-        )
-        version_id = make_id("skillver")
-        existing_count = int(
-            self.db.fetch_one("SELECT COUNT(*) AS count FROM skill_versions WHERE skill_id = ?", (skill_id,)).get("count", 0)
-        )
-        resolved_version = str(version or f"v{existing_count + 1}")
+        snapshot_id = make_id("skillsnap")
         workflow_text = workflow if isinstance(workflow, str) else json_dumps(workflow or {})
-        self.db.execute(
-            """
-            INSERT INTO skill_versions(id, skill_id, version, prompt_template, workflow, schema_json, object_id, changelog, metadata, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                version_id,
-                skill_id,
-                resolved_version,
-                prompt_template,
-                workflow_text,
-                json_dumps(schema or {}),
-                object_row["id"],
-                None,
-                json_dumps(metadata or {}),
-                now,
-            ),
-        )
-        for tool_name in tools:
-            self.db.execute(
-                """
-                INSERT INTO skill_bindings(id, skill_version_id, tool_name, binding_type, config, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (make_id("bind"), version_id, tool_name, "tool", json_dumps({}), now),
-            )
-        for test_case in tests:
-            self.db.execute(
-                """
-                INSERT INTO skill_tests(id, skill_version_id, input_payload, expected_output, metadata, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    make_id("stest"),
-                    version_id,
-                    json_dumps(test_case.get("input", {})),
-                    json_dumps(test_case.get("expected")),
-                    json_dumps(test_case.get("metadata", {})),
-                    now,
-                ),
-            )
-
         normalized_files = normalize_skill_package_inputs(
             name=name,
             description=description,
@@ -1943,6 +2032,83 @@ class AIMemory:
             scripts=scripts,
             assets=assets,
         )
+        reference_records = [
+            {
+                "id": entry["relative_path"],
+                "text": str(entry.get("text_content") or ""),
+                "score": 0.76,
+                "metadata": {
+                    "skill_id": skill_id,
+                    "skill_snapshot_id": snapshot_id,
+                    "relative_path": entry["relative_path"],
+                },
+            }
+            for entry in normalized_files
+            if entry["role"] == "reference" and entry.get("indexable") and entry.get("text_content")
+        ]
+        execution_context = self._build_skill_execution_context(reference_records, generated_at=now)
+        asset_payload = {
+            "name": name,
+            "description": description,
+            "workflow": workflow,
+            "schema": schema,
+            "tools": tools,
+            "topics": topics,
+            "tests": tests,
+            "metadata": metadata,
+            "execution_context": execution_context,
+        }
+        stored = self.object_store.put_text(
+            json_dumps(asset_payload),
+            object_type="skills",
+            suffix=".json",
+            prefix=self._object_store_prefix(scope, "skill"),
+        )
+        object_row = self._persist_object(
+            stored,
+            mime_type="application/json",
+            metadata={"skill_id": skill_id, "skill_snapshot_id": snapshot_id, **self._scope_metadata(scope), **metadata},
+        )
+        self.db.execute(
+            """
+            INSERT INTO skill_snapshots(id, skill_id, prompt_template, workflow, schema_json, object_id, metadata, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                snapshot_id,
+                skill_id,
+                prompt_template,
+                workflow_text,
+                json_dumps(schema or {}),
+                object_row["id"],
+                json_dumps(metadata or {}),
+                now,
+                now,
+            ),
+        )
+        for tool_name in tools:
+            self.db.execute(
+                """
+                INSERT INTO skill_bindings(id, skill_snapshot_id, tool_name, binding_type, config, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (make_id("bind"), snapshot_id, tool_name, "tool", json_dumps({}), now),
+            )
+        for test_case in tests:
+            self.db.execute(
+                """
+                INSERT INTO skill_tests(id, skill_snapshot_id, input_payload, expected_output, metadata, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    make_id("stest"),
+                    snapshot_id,
+                    json_dumps(test_case.get("input", {})),
+                    json_dumps(test_case.get("expected")),
+                    json_dumps(test_case.get("metadata", {})),
+                    now,
+                ),
+            )
         file_rows: list[dict[str, Any]] = []
         for entry in normalized_files:
             relative_path = entry["relative_path"]
@@ -1963,7 +2129,7 @@ class AIMemory:
                 )
             object_metadata = {
                 "skill_id": skill_id,
-                "skill_version_id": version_id,
+                "skill_snapshot_id": snapshot_id,
                 "relative_path": relative_path,
                 "role": entry["role"],
                 **self._scope_metadata(scope),
@@ -1979,13 +2145,13 @@ class AIMemory:
             file_metadata = {**dict(entry.get("metadata") or {}), "indexable": bool(entry.get("indexable"))}
             self.db.execute(
                 """
-                INSERT INTO skill_files(id, skill_id, skill_version_id, object_id, relative_path, role, mime_type, size_bytes, checksum, metadata, created_at)
+                INSERT INTO skill_files(id, skill_id, skill_snapshot_id, object_id, relative_path, role, mime_type, size_bytes, checksum, metadata, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     file_id,
                     skill_id,
-                    version_id,
+                    snapshot_id,
                     file_object["id"],
                     relative_path,
                     entry["role"],
@@ -2033,13 +2199,13 @@ class AIMemory:
                 }
                 self.db.execute(
                     """
-                    INSERT INTO skill_reference_chunks(id, skill_id, skill_version_id, file_id, object_id, relative_path, chunk_index, title, content, metadata, created_at)
+                    INSERT INTO skill_reference_chunks(id, skill_id, skill_snapshot_id, file_id, object_id, relative_path, chunk_index, title, content, metadata, created_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         chunk_id,
                         skill_id,
-                        version_id,
+                        snapshot_id,
                         file_row["id"],
                         file_row["object_id"],
                         file_row["relative_path"],
@@ -2054,7 +2220,7 @@ class AIMemory:
                     {
                         "record_id": chunk_id,
                         "skill_id": skill_id,
-                        "skill_version_id": version_id,
+                        "skill_snapshot_id": snapshot_id,
                         "file_id": file_row["id"],
                         "object_id": file_row["object_id"],
                         "owner_agent_id": scope.get("owner_agent_id"),
@@ -2075,9 +2241,9 @@ class AIMemory:
         )
         self._index_skill(
             {
-                "record_id": version_id,
+                "record_id": snapshot_id,
                 "skill_id": skill_id,
-                "version": resolved_version,
+                "skill_snapshot_id": snapshot_id,
                 "name": name,
                 "description": description,
                 "text": "\n".join(
@@ -2088,6 +2254,7 @@ class AIMemory:
                         skill_markdown_text,
                         prompt_template or "",
                         workflow_text,
+                        execution_context.get("text", ""),
                         " ".join(topics),
                         " ".join(tools),
                     ]
@@ -2103,58 +2270,68 @@ class AIMemory:
                 "updated_at": now,
             }
         )
-        return {"id": version_id, "version": resolved_version}
+        self.db.execute("UPDATE skills SET current_snapshot_id = ?, updated_at = ? WHERE id = ?", (snapshot_id, now, skill_id))
+        return {"id": snapshot_id}
 
     def get_skill(self, skill_id: str) -> dict[str, Any] | None:
         skill = _deserialize_row(self.db.fetch_one("SELECT * FROM skills WHERE id = ?", (skill_id,)))
         if skill is None:
             return None
-        skill["versions"] = _deserialize_rows(self.db.fetch_all("SELECT * FROM skill_versions WHERE skill_id = ? ORDER BY created_at DESC", (skill_id,)), ("metadata", "schema_json"))
-        for version in skill["versions"]:
-            payload = self._load_skill_version_asset(version)
-            version["files"] = self._skill_version_files(version["id"])
-            version["payload"] = payload
-            version["tools"] = payload.get("tools", [])
-            version["topics"] = payload.get("topics", [])
-            version["tests_payload"] = payload.get("tests", [])
-            version["skill_markdown"] = next(
-                (item.get("content") for item in version["files"] if item.get("role") == "skill_md"),
+        snapshot_id = skill.get("current_snapshot_id")
+        current_snapshot = None
+        if snapshot_id:
+            current_snapshot = _deserialize_row(
+                self.db.fetch_one("SELECT * FROM skill_snapshots WHERE id = ?", (snapshot_id,)),
+                ("metadata", "schema_json"),
+            )
+        skill["current_snapshot"] = None
+        skill["bindings"] = []
+        skill["tests"] = []
+        skill["files"] = []
+        skill["references"] = []
+        skill["scripts"] = []
+        skill["assets"] = []
+        skill["execution_context"] = {}
+        skill["execution_context_text"] = ""
+        skill["skill_markdown"] = None
+        if current_snapshot is not None:
+            payload = self._load_skill_snapshot_asset(current_snapshot)
+            current_snapshot["files"] = self._skill_snapshot_files(current_snapshot["id"])
+            current_snapshot["payload"] = payload
+            current_snapshot["tools"] = payload.get("tools", [])
+            current_snapshot["topics"] = payload.get("topics", [])
+            current_snapshot["tests_payload"] = payload.get("tests", [])
+            current_snapshot["execution_context"] = dict(payload.get("execution_context") or {})
+            current_snapshot["execution_context_text"] = str(current_snapshot["execution_context"].get("text") or "")
+            current_snapshot["skill_markdown"] = next(
+                (item.get("content") for item in current_snapshot["files"] if item.get("role") == "skill_md"),
                 None,
             )
-            version["references"] = [item for item in version["files"] if item.get("role") == "reference"]
-            version["scripts"] = [item for item in version["files"] if item.get("role") == "script"]
-            version["assets"] = [item for item in version["files"] if item.get("role") == "asset"]
-        skill["bindings"] = _deserialize_rows(
-            self.db.fetch_all(
-                """
-                SELECT sb.* FROM skill_bindings sb
-                JOIN skill_versions sv ON sv.id = sb.skill_version_id
-                WHERE sv.skill_id = ?
-                ORDER BY sb.created_at ASC
-                """,
-                (skill_id,),
-            ),
-            ("config",),
-        )
-        skill["tests"] = _deserialize_rows(
-            self.db.fetch_all(
-                """
-                SELECT st.* FROM skill_tests st
-                JOIN skill_versions sv ON sv.id = st.skill_version_id
-                WHERE sv.skill_id = ?
-                ORDER BY st.created_at ASC
-                """,
-                (skill_id,),
-            ),
-            ("input_payload", "expected_output", "metadata"),
-        )
-        if skill["versions"]:
-            latest = skill["versions"][0]
-            skill["files"] = latest.get("files", [])
-            skill["skill_markdown"] = latest.get("skill_markdown")
-            skill["references"] = latest.get("references", [])
-            skill["scripts"] = latest.get("scripts", [])
-            skill["assets"] = latest.get("assets", [])
+            current_snapshot["references"] = [item for item in current_snapshot["files"] if item.get("role") == "reference"]
+            current_snapshot["scripts"] = [item for item in current_snapshot["files"] if item.get("role") == "script"]
+            current_snapshot["assets"] = [item for item in current_snapshot["files"] if item.get("role") == "asset"]
+            skill["bindings"] = _deserialize_rows(
+                self.db.fetch_all(
+                    "SELECT * FROM skill_bindings WHERE skill_snapshot_id = ? ORDER BY created_at ASC",
+                    (current_snapshot["id"],),
+                ),
+                ("config",),
+            )
+            skill["tests"] = _deserialize_rows(
+                self.db.fetch_all(
+                    "SELECT * FROM skill_tests WHERE skill_snapshot_id = ? ORDER BY created_at ASC",
+                    (current_snapshot["id"],),
+                ),
+                ("input_payload", "expected_output", "metadata"),
+            )
+            skill["current_snapshot"] = current_snapshot
+            skill["files"] = current_snapshot.get("files", [])
+            skill["skill_markdown"] = current_snapshot.get("skill_markdown")
+            skill["references"] = current_snapshot.get("references", [])
+            skill["scripts"] = current_snapshot.get("scripts", [])
+            skill["assets"] = current_snapshot.get("assets", [])
+            skill["execution_context"] = current_snapshot.get("execution_context", {})
+            skill["execution_context_text"] = current_snapshot.get("execution_context_text", "")
         return skill
 
     def list_skills(self, status: str | None = None) -> dict[str, Any]:
@@ -2217,8 +2394,8 @@ class AIMemory:
         )
         vector_hits = self._vector_hit_map("skill_index", query, limit=max(limit * 4, 24))
         fts_hits = self._fts_hit_map(["skill_index"], query, limit=max(limit * 6, 36))
-        for version_id, score in self._skill_reference_version_hit_map(query, limit=max(limit * 4, 24)).items():
-            vector_hits[version_id] = max(vector_hits.get(version_id, 0.0), score)
+        for snapshot_id, score in self._skill_reference_snapshot_hit_map(query, limit=max(limit * 4, 24)).items():
+            vector_hits[snapshot_id] = max(vector_hits.get(snapshot_id, 0.0), score)
         ranked = self._rank_rows(
             query,
             rows,
@@ -2241,7 +2418,6 @@ class AIMemory:
         query: str,
         *,
         skill_id: str | None = None,
-        skill_version_id: str | None = None,
         path_prefix: str | None = None,
         owner_agent_id: str | None = None,
         subject_type: str | None = None,
@@ -2260,9 +2436,6 @@ class AIMemory:
         if skill_id:
             sql_filters.append("sri.skill_id = ?")
             params.append(skill_id)
-        if skill_version_id:
-            sql_filters.append("sri.skill_version_id = ?")
-            params.append(skill_version_id)
         if owner_agent_id:
             sql_filters.append("(sri.owner_agent_id = ? OR sri.owner_agent_id IS NULL)")
             params.append(owner_agent_id)
@@ -2297,11 +2470,9 @@ class AIMemory:
                 src.chunk_index,
                 s.name AS skill_name,
                 s.description AS skill_description,
-                sv.version,
                 sic.embedding
             FROM skill_reference_index sri
             JOIN skills s ON s.id = sri.skill_id
-            JOIN skill_versions sv ON sv.id = sri.skill_version_id
             LEFT JOIN skill_reference_chunks src ON src.id = sri.record_id
             LEFT JOIN semantic_index_cache sic ON sic.record_id = sri.record_id
             WHERE {' AND '.join(sql_filters)}
@@ -3207,9 +3378,8 @@ class AIMemory:
         skill_rows = _deserialize_rows(
             self.db.fetch_all(
                 """
-                SELECT sv.id AS record_id, sv.skill_id, sv.version, s.owner_agent_id, s.source_subject_type, s.source_subject_id, s.namespace_key, s.name, s.description, sv.workflow, sv.prompt_template, s.metadata, s.updated_at
-                FROM skill_versions sv
-                JOIN skills s ON s.id = sv.skill_id
+                SELECT s.id
+                FROM skills s
                 WHERE s.status = 'active'
                 ORDER BY s.updated_at DESC
                 LIMIT ?
@@ -3218,18 +3388,52 @@ class AIMemory:
             )
         )
         for row in skill_rows:
-            combined = "\n".join(part for part in [row["name"], row["description"], row.get("prompt_template"), row.get("workflow")] if part)
-            self._index_skill({**row, "text": combined, "tools": [], "topics": []})
+            skill = self.get_skill(str(row["id"]))
+            if skill is None or not skill.get("current_snapshot"):
+                continue
+            snapshot = skill["current_snapshot"]
+            combined = "\n".join(
+                part
+                for part in [
+                    skill["name"],
+                    skill["description"],
+                    skill.get("skill_markdown") or "",
+                    snapshot.get("prompt_template") or "",
+                    snapshot.get("workflow") or "",
+                    skill.get("execution_context_text") or "",
+                    " ".join(snapshot.get("topics", [])),
+                    " ".join(snapshot.get("tools", [])),
+                ]
+                if part
+            )
+            self._index_skill(
+                {
+                    "record_id": snapshot["id"],
+                    "skill_id": skill["id"],
+                    "skill_snapshot_id": snapshot["id"],
+                    "owner_agent_id": skill.get("owner_agent_id"),
+                    "source_subject_type": skill.get("source_subject_type"),
+                    "source_subject_id": skill.get("source_subject_id"),
+                    "namespace_key": skill.get("namespace_key"),
+                    "name": skill["name"],
+                    "description": skill["description"],
+                    "metadata": skill.get("metadata", {}),
+                    "updated_at": skill["updated_at"],
+                    "text": combined,
+                    "tools": list(snapshot.get("tools", [])),
+                    "topics": list(snapshot.get("topics", [])),
+                }
+            )
             projected["skill"] += 1
         reference_rows = _deserialize_rows(
             self.db.fetch_all(
                 """
-                SELECT src.id AS record_id, src.skill_id, src.skill_version_id, src.file_id, src.object_id, sri.owner_agent_id, sri.source_subject_type,
-                       sri.source_subject_id, sri.namespace_key, src.relative_path, src.title, src.content AS text, src.metadata, sv.created_at AS updated_at
+                SELECT src.id AS record_id, src.skill_id, src.skill_snapshot_id, src.file_id, src.object_id, sri.owner_agent_id, sri.source_subject_type,
+                       sri.source_subject_id, sri.namespace_key, src.relative_path, src.title, src.content AS text, src.metadata, ss.updated_at AS updated_at
                 FROM skill_reference_chunks src
-                JOIN skill_versions sv ON sv.id = src.skill_version_id
+                JOIN skill_snapshots ss ON ss.id = src.skill_snapshot_id
                 LEFT JOIN skill_reference_index sri ON sri.record_id = src.id
-                ORDER BY sv.created_at DESC
+                ORDER BY ss.updated_at DESC
                 LIMIT ?
                 """,
                 (limit or self.config.memory_policy.search_scan_limit,),
@@ -3407,11 +3611,97 @@ class AIMemory:
             **compression,
         }
 
+    def refresh_skill_execution_context(
+        self,
+        skill_id: str,
+        *,
+        path_prefix: str | None = None,
+        budget_chars: int | None = None,
+        max_sentences: int = 8,
+        max_highlights: int = 12,
+    ) -> dict[str, Any]:
+        skill = self.get_skill(skill_id)
+        if skill is None:
+            raise ValueError(f"Skill `{skill_id}` does not exist.")
+        current_snapshot = skill.get("current_snapshot")
+        if current_snapshot is None:
+            raise ValueError(f"Skill `{skill_id}` does not have a stored snapshot.")
+
+        reference_records: list[dict[str, Any]] = []
+        for reference in current_snapshot.get("references", []):
+            relative_path = str(reference.get("relative_path") or "")
+            if path_prefix and not relative_path.startswith(path_prefix):
+                continue
+            text = str(reference.get("content") or "")
+            if not text.strip():
+                continue
+            reference_records.append(
+                {
+                    "id": relative_path,
+                    "text": text,
+                    "score": 0.76,
+                    "metadata": {
+                        "skill_id": skill_id,
+                        "skill_snapshot_id": current_snapshot.get("id"),
+                        "relative_path": relative_path,
+                    },
+                }
+            )
+        if not reference_records:
+            raise ValueError(f"Skill `{skill_id}` does not have matching reference files.")
+        execution_context = self._build_skill_execution_context(
+            reference_records,
+            budget_chars=budget_chars,
+            max_sentences=max_sentences,
+            max_highlights=max_highlights,
+        )
+        self._persist_skill_execution_context(current_snapshot["id"], execution_context)
+        refreshed = self.get_skill(skill_id)
+        assert refreshed is not None
+        refreshed_snapshot = refreshed.get("current_snapshot") or {}
+        self._index_skill(
+            {
+                "record_id": refreshed_snapshot.get("id"),
+                "skill_id": skill_id,
+                "skill_snapshot_id": refreshed_snapshot.get("id"),
+                "name": refreshed["name"],
+                "description": refreshed["description"],
+                "text": "\n".join(
+                    part
+                    for part in [
+                        refreshed["name"],
+                        refreshed["description"],
+                        refreshed.get("skill_markdown") or "",
+                        refreshed_snapshot.get("prompt_template") or "",
+                        refreshed_snapshot.get("workflow") or "",
+                        refreshed.get("execution_context_text") or "",
+                        " ".join(refreshed_snapshot.get("topics", [])),
+                        " ".join(refreshed_snapshot.get("tools", [])),
+                    ]
+                    if part
+                ),
+                "tools": list(refreshed_snapshot.get("tools", [])),
+                "topics": list(refreshed_snapshot.get("topics", [])),
+                "owner_agent_id": refreshed.get("owner_agent_id") or refreshed.get("owner_id"),
+                "source_subject_type": refreshed.get("source_subject_type"),
+                "source_subject_id": refreshed.get("source_subject_id"),
+                "namespace_key": refreshed.get("namespace_key"),
+                "metadata": refreshed.get("metadata", {}),
+                "updated_at": utcnow_iso(),
+            }
+        )
+        return {
+            "skill_id": skill_id,
+            "skill_snapshot_id": refreshed_snapshot.get("id"),
+            "name": refreshed.get("name"),
+            "execution_context": refreshed.get("execution_context", {}),
+            "persisted": True,
+        }
+
     def compress_skill_references(
         self,
         skill_id: str,
         *,
-        skill_version_id: str | None = None,
         path_prefix: str | None = None,
         query: str | None = None,
         budget_chars: int | None = None,
@@ -3421,35 +3711,30 @@ class AIMemory:
         skill = self.get_skill(skill_id)
         if skill is None:
             raise ValueError(f"Skill `{skill_id}` does not exist.")
-        versions = list(skill.get("versions", []))
-        if skill_version_id:
-            versions = [version for version in versions if version.get("id") == skill_version_id]
-            if not versions:
-                raise ValueError(f"Skill version `{skill_version_id}` does not exist for skill `{skill_id}`.")
-        elif versions:
-            versions = [versions[0]]
+        current_snapshot = skill.get("current_snapshot")
+        if not current_snapshot:
+            raise ValueError(f"Skill `{skill_id}` does not have a stored snapshot.")
 
         reference_records: list[dict[str, Any]] = []
-        for version in versions:
-            for reference in version.get("references", []):
-                relative_path = str(reference.get("relative_path") or "")
-                if path_prefix and not relative_path.startswith(path_prefix):
-                    continue
-                text = str(reference.get("content") or "")
-                if not text.strip():
-                    continue
-                reference_records.append(
-                    {
-                        "id": reference.get("id") or relative_path,
-                        "text": text,
-                        "score": 0.76,
-                        "metadata": {
-                            "skill_id": skill_id,
-                            "skill_version_id": version.get("id"),
-                            "relative_path": relative_path,
-                        },
-                    }
-                )
+        for reference in current_snapshot.get("references", []):
+            relative_path = str(reference.get("relative_path") or "")
+            if path_prefix and not relative_path.startswith(path_prefix):
+                continue
+            text = str(reference.get("content") or "")
+            if not text.strip():
+                continue
+            reference_records.append(
+                {
+                    "id": reference.get("id") or relative_path,
+                    "text": text,
+                    "score": 0.76,
+                    "metadata": {
+                        "skill_id": skill_id,
+                        "skill_snapshot_id": current_snapshot.get("id"),
+                        "relative_path": relative_path,
+                    },
+                }
+            )
         if not reference_records:
             raise ValueError(f"Skill `{skill_id}` does not have matching reference files.")
         compression = compress_records(
@@ -3462,9 +3747,10 @@ class AIMemory:
             max_highlights=max_highlights,
             policy=self.config.memory_policy,
         ).as_dict()
+        compression["text"] = _format_skill_execution_context(compression)
         return {
             "skill_id": skill_id,
-            "skill_version_id": versions[0].get("id") if versions else skill_version_id,
+            "skill_snapshot_id": current_snapshot.get("id"),
             "name": skill.get("name"),
             **compression,
         }
@@ -3812,10 +4098,10 @@ class AIMemory:
                     "strategy": "chunk + semantic index + lightweight rerank",
                 },
                 "skill": {
-                    "tables": ["skills", "skill_versions", "skill_files", "skill_reference_chunks", "skill_index", "skill_reference_index"],
+                    "tables": ["skills", "skill_snapshots", "skill_files", "skill_reference_chunks", "skill_index", "skill_reference_index"],
                     "object_prefix": self._object_store_prefix(scope, "skill"),
                     "vector_path": competency_vector_path,
-                    "strategy": "versioned procedural memory + semantic search",
+                    "strategy": "snapshot-based procedural memory + semantic search",
                 },
                 "archive": {
                     "tables": ["archive_memories", "archive_summaries", "archive_summary_index"],
@@ -4647,11 +4933,11 @@ class AIMemory:
         keywords = extract_keywords(payload["text"])
         self.db.execute(
             """
-            INSERT INTO skill_index(record_id, skill_id, version, owner_agent_id, source_subject_type, source_subject_id, namespace_key, name, description, text, keywords, updated_at, metadata)
+            INSERT INTO skill_index(record_id, skill_id, skill_snapshot_id, owner_agent_id, source_subject_type, source_subject_id, namespace_key, name, description, text, keywords, updated_at, metadata)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(record_id) DO UPDATE SET
                 skill_id = excluded.skill_id,
-                version = excluded.version,
+                skill_snapshot_id = excluded.skill_snapshot_id,
                 owner_agent_id = excluded.owner_agent_id,
                 source_subject_type = excluded.source_subject_type,
                 source_subject_id = excluded.source_subject_id,
@@ -4666,7 +4952,7 @@ class AIMemory:
             (
                 payload["record_id"],
                 payload["skill_id"],
-                payload["version"],
+                payload["skill_snapshot_id"],
                 payload.get("owner_agent_id"),
                 payload.get("source_subject_type"),
                 payload.get("source_subject_id"),
@@ -4699,7 +4985,7 @@ class AIMemory:
             text=payload["text"],
             updated_at=payload["updated_at"],
             quality=0.8,
-            metadata={"skill_id": payload["skill_id"], "version": payload["version"], **dict(payload.get("metadata", {}))},
+            metadata={"skill_id": payload["skill_id"], "skill_snapshot_id": payload["skill_snapshot_id"], **dict(payload.get("metadata", {}))},
             keywords=keywords,
         )
         self.graph_store.upsert_node("skill", payload["skill_id"], payload["name"], payload.get("metadata"))
@@ -4709,13 +4995,13 @@ class AIMemory:
         self.db.execute(
             """
             INSERT INTO skill_reference_index(
-                record_id, skill_id, skill_version_id, file_id, object_id, owner_agent_id, source_subject_type, source_subject_id,
+                record_id, skill_id, skill_snapshot_id, file_id, object_id, owner_agent_id, source_subject_type, source_subject_id,
                 namespace_key, relative_path, title, text, keywords, updated_at, metadata
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(record_id) DO UPDATE SET
                 skill_id = excluded.skill_id,
-                skill_version_id = excluded.skill_version_id,
+                skill_snapshot_id = excluded.skill_snapshot_id,
                 file_id = excluded.file_id,
                 object_id = excluded.object_id,
                 owner_agent_id = excluded.owner_agent_id,
@@ -4732,7 +5018,7 @@ class AIMemory:
             (
                 payload["record_id"],
                 payload["skill_id"],
-                payload["skill_version_id"],
+                payload["skill_snapshot_id"],
                 payload["file_id"],
                 payload["object_id"],
                 payload.get("owner_agent_id"),
@@ -4770,7 +5056,7 @@ class AIMemory:
             quality=0.76,
             metadata={
                 "skill_id": payload["skill_id"],
-                "skill_version_id": payload["skill_version_id"],
+                "skill_snapshot_id": payload["skill_snapshot_id"],
                 "file_id": payload["file_id"],
                 "relative_path": payload["relative_path"],
                 **dict(payload.get("metadata", {})),
@@ -5356,20 +5642,20 @@ class AIMemory:
             hits[record_id] = max(hits.get(record_id, 0.0), max(0.0, 1.0 - distance))
         return hits
 
-    def _skill_reference_version_hit_map(self, query: str, *, limit: int) -> dict[str, float]:
+    def _skill_reference_snapshot_hit_map(self, query: str, *, limit: int) -> dict[str, float]:
         hits: dict[str, float] = {}
         for row in self.vector_index.search("skill_reference_index", query, limit=limit):
             metadata = _loads(row.get("metadata"), {})
-            version_id = str(
-                row.get("skill_version_id")
-                or metadata.get("skill_version_id")
+            snapshot_id = str(
+                row.get("skill_snapshot_id")
+                or metadata.get("skill_snapshot_id")
                 or ""
             )
-            if not version_id:
+            if not snapshot_id:
                 continue
             distance = float(row.get("_distance", 1.0) or 1.0)
             score = max(0.0, 1.0 - distance)
-            hits[version_id] = max(hits.get(version_id, 0.0), round(score * 0.92, 6))
+            hits[snapshot_id] = max(hits.get(snapshot_id, 0.0), round(score * 0.92, 6))
         return hits
 
     def _rank_memory_rows(

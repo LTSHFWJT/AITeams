@@ -109,10 +109,13 @@ class SkillNamespace(_NamespaceBase):
         return self._root._call("list_skill_metadata", **kwargs)
 
     def search(self, query: str, **kwargs: Any):
-        return self._root._call("search_skill_keywords", query, **kwargs)
+        return self._root._call("search_skills", query, **kwargs)
 
     def search_references(self, query: str, **kwargs: Any):
         return self._root._call("search_skill_references", query, **kwargs)
+
+    def refresh_execution_context(self, skill_id: str, **kwargs: Any):
+        return self._root._call("refresh_skill_execution_context", skill_id, **kwargs)
 
     def compress_references(self, skill_id: str, **kwargs: Any):
         return self._root._call("compress_skill_reference_bundle", skill_id, **kwargs)

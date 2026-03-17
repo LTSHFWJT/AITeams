@@ -17,6 +17,20 @@ from aimemory.memory_intelligence.policies import MemoryPolicy
 PATHLIKE_RE = re.compile(r"(?:/[\w./-]+)|(?:\b[\w.-]+\.[A-Za-z0-9]{1,8}\b)")
 CODELIKE_RE = re.compile(r"(?:->|=>|==|!=|<=|>=|::|\(\)|\[\]|{})")
 VERSIONLIKE_RE = re.compile(r"\bv?\d+(?:\.\d+){1,4}\b", re.IGNORECASE)
+IMPERATIVE_RE = re.compile(
+    r"(?:\b(?:must|should|required|run|execute|verify|record|check|rollback|restore|validate)\b|必须|需要|应当|应该|先|再|执行|检查|确认|记录|回滚|恢复|验证)",
+    re.IGNORECASE,
+)
+CONSTRAINT_RE = re.compile(
+    r"(?:\b(?:limit|limited|within|under|over|not exceed|at most|at least|forbid|forbidden|cannot|must not|threshold)\b|不得|不能|禁止|限制|约束|上限|下限|阈值|不得超过|不能超过)",
+    re.IGNORECASE,
+)
+RISK_RE = re.compile(
+    r"(?:\b(?:risk|warning|warn|rollback|failure|fail|error|incident|fallback|caution)\b|风险|警告|注意|失败|异常|错误|故障|回滚|恢复)",
+    re.IGNORECASE,
+)
+CONDITIONAL_RE = re.compile(r"(?:\b(?:if|when|unless|otherwise)\b|如果|当|否则|失败后|异常时)", re.IGNORECASE)
+NEGATION_RE = re.compile(r"(?:\b(?:do not|don't|never|avoid)\b|不要|禁止|不得|不能)", re.IGNORECASE)
 
 
 @dataclass(slots=True)
@@ -44,8 +58,10 @@ class DistilledUnitCandidate:
     information_score: float
     density_score: float
     query_score: float
+    title_affinity_score: float
     actionability_score: float
     constraint_score: float
+    risk_score: float
     fingerprint: str
     embedding: list[float]
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -186,6 +202,7 @@ class AdaptiveDistiller:
         max_idf = math.log(1.0 + corpus_size)
         query_text = str(query or "").strip()
         query_present = bool(query_text)
+        query_tokens = set(tokenize(query_text))
         profile = self._unit_score_profile(domain_hint)
 
         prepared: list[DistilledUnitCandidate] = []
@@ -199,8 +216,10 @@ class AdaptiveDistiller:
             structure_score = self._unit_structure_score(unit)
             density_score = self._unit_density_score(text, token_set)
             information_score = self._unit_information_score(token_set, document_frequency, corpus_size, max_idf)
+            title_affinity_score = self._title_affinity_score(unit, query_tokens=query_tokens, query_present=query_present)
             actionability_score = self._unit_actionability_score(unit, text)
             constraint_score = self._unit_constraint_score(unit, text)
+            risk_score = self._unit_risk_score(unit, text)
             query_score = 0.0
             if query_present:
                 query_score, _breakdown = score_record(
@@ -216,8 +235,10 @@ class AdaptiveDistiller:
                 + (profile["information"] * information_score)
                 + (profile["density"] * density_score)
                 + (profile["query"] * query_score)
+                + (profile["title_affinity"] * title_affinity_score)
                 + (profile["actionability"] * actionability_score)
                 + (profile["constraint"] * constraint_score)
+                + (profile["risk"] * risk_score)
             )
             prepared.append(
                 DistilledUnitCandidate(
@@ -230,8 +251,10 @@ class AdaptiveDistiller:
                     information_score=round(information_score, 6),
                     density_score=round(density_score, 6),
                     query_score=round(query_score, 6),
+                    title_affinity_score=round(title_affinity_score, 6),
                     actionability_score=round(actionability_score, 6),
                     constraint_score=round(constraint_score, 6),
+                    risk_score=round(risk_score, 6),
                     fingerprint=fingerprint(text),
                     embedding=hash_embedding(text),
                     metadata={
@@ -263,32 +286,51 @@ class AdaptiveDistiller:
     def _unit_score_profile(self, domain_hint: str | None) -> dict[str, float]:
         domain = str(domain_hint or "").strip().lower()
         base = {
-            "structure": 0.19,
-            "information": 0.26,
-            "density": 0.14,
-            "query": 0.19,
+            "structure": 0.17,
+            "information": 0.22,
+            "density": 0.12,
+            "query": 0.16,
+            "title_affinity": 0.09,
             "actionability": 0.11,
-            "constraint": 0.11,
+            "constraint": 0.08,
+            "risk": 0.05,
         }
         if domain in {"skill", "skill_reference", "execution"}:
             return {
-                "structure": 0.16,
-                "information": 0.18,
-                "density": 0.12,
-                "query": 0.2,
-                "actionability": 0.19,
-                "constraint": 0.15,
+                "structure": 0.14,
+                "information": 0.15,
+                "density": 0.1,
+                "query": 0.17,
+                "title_affinity": 0.1,
+                "actionability": 0.16,
+                "constraint": 0.1,
+                "risk": 0.08,
             }
         if domain in {"knowledge", "archive"}:
             return {
-                "structure": 0.18,
-                "information": 0.28,
-                "density": 0.15,
-                "query": 0.2,
-                "actionability": 0.08,
-                "constraint": 0.11,
+                "structure": 0.16,
+                "information": 0.24,
+                "density": 0.13,
+                "query": 0.18,
+                "title_affinity": 0.1,
+                "actionability": 0.06,
+                "constraint": 0.08,
+                "risk": 0.05,
             }
         return base
+
+    def _title_affinity_score(self, unit: TextUnit, *, query_tokens: set[str], query_present: bool) -> float:
+        title_text = " ".join(str(item).strip() for item in unit.title_path if str(item).strip())
+        if not title_text:
+            return 0.0
+        base = min(0.18, 0.05 + (0.03 * len(unit.title_path)))
+        if not query_present or not query_tokens:
+            return base
+        title_tokens = set(tokenize(title_text))
+        if not title_tokens:
+            return base
+        overlap = len(title_tokens & query_tokens) / max(1, len(query_tokens))
+        return min(1.0, base + (0.72 * overlap))
 
     def _unit_structure_score(self, unit: TextUnit) -> float:
         title_bonus = min(0.12, len(unit.title_path) * 0.03)
@@ -323,28 +365,58 @@ class AdaptiveDistiller:
         return min(1.0, unique_ratio + symbol_bonus)
 
     def _unit_actionability_score(self, unit: TextUnit, text: str) -> float:
+        ordered_list = isinstance(unit.metadata.get("list_ordinal"), int)
         code_like = bool(CODELIKE_RE.search(text) or PATHLIKE_RE.search(text))
         punctuation_density = sum(text.count(symbol) for symbol in (":", "-", ">", "/", "=", "(", ")"))
-        score = 0.18 if unit.level == "sentence" else 0.28
+        score = 0.08 if unit.level == "sentence" else 0.14
         if unit.level == "list_item":
-            score += 0.26
+            score += 0.06
+        if ordered_list:
+            score += 0.18
         if unit.level == "code_block":
             score += 0.34
         if code_like:
+            score += 0.14
+        if IMPERATIVE_RE.search(text):
             score += 0.18
+        if CONDITIONAL_RE.search(text):
+            score += 0.04
         if punctuation_density >= 3:
-            score += 0.08
+            score += 0.06
+        if text.endswith(":"):
+            score += 0.04
         return min(1.0, score)
 
     def _unit_constraint_score(self, unit: TextUnit, text: str) -> float:
         digit_count = sum(char.isdigit() for char in text)
-        score = min(0.42, digit_count * 0.03)
+        score = min(0.28, digit_count * 0.02)
+        if CONSTRAINT_RE.search(text):
+            score += 0.26
         if "%" in text:
-            score += 0.1
-        if VERSIONLIKE_RE.search(text):
-            score += 0.12
-        if any(symbol in text for symbol in ("<", ">", "=", "!")):
             score += 0.08
+        if VERSIONLIKE_RE.search(text):
+            score += 0.1
+        if any(symbol in text for symbol in ("<", ">", "=", "!")):
+            score += 0.06
         if unit.level in {"table_block", "code_block"}:
             score += 0.08
+        if unit.title_path and CONSTRAINT_RE.search(" ".join(unit.title_path)):
+            score += 0.12
+        return min(1.0, score)
+
+    def _unit_risk_score(self, unit: TextUnit, text: str) -> float:
+        title_text = " ".join(str(item).strip() for item in unit.title_path if str(item).strip())
+        score = 0.0
+        if RISK_RE.search(text):
+            score += 0.34
+        if CONDITIONAL_RE.search(text):
+            score += 0.16
+        if NEGATION_RE.search(text):
+            score += 0.1
+        if title_text and RISK_RE.search(title_text):
+            score += 0.18
+        if any(token in normalize_text(text) for token in ("rollback", "回滚", "恢复", "失败")):
+            score += 0.18
+        if unit.level == "paragraph":
+            score += 0.04
         return min(1.0, score)

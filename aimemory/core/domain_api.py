@@ -780,10 +780,12 @@ class AgentStoreAPI:
         )
         results = []
         for row in rows:
-            latest = self.memory.db.fetch_one(
-                "SELECT id, version, created_at FROM skill_versions WHERE skill_id = ? ORDER BY created_at DESC LIMIT 1",
-                (row["id"],),
-            )
+            current_snapshot = None
+            if row.get("current_snapshot_id"):
+                current_snapshot = self.memory.db.fetch_one(
+                    "SELECT id, created_at, updated_at FROM skill_snapshots WHERE id = ?",
+                    (row["current_snapshot_id"],),
+                )
             results.append(
                 {
                     "id": row["id"],
@@ -795,13 +797,14 @@ class AgentStoreAPI:
                     "source_subject_id": row.get("source_subject_id"),
                     "namespace_key": row.get("namespace_key"),
                     "metadata": row.get("metadata", {}),
-                    "latest_version": _deserialize_row(latest) if latest else None,
+                    "current_snapshot_id": row.get("current_snapshot_id"),
+                    "current_snapshot": _deserialize_row(current_snapshot) if current_snapshot else None,
                     "updated_at": row.get("updated_at"),
                 }
             )
         return {"results": results, "count": len(results), "limit": limit, "offset": offset}
 
-    def search_skill_keywords(
+    def search_skills(
         self,
         query: str,
         *,
@@ -811,12 +814,21 @@ class AgentStoreAPI:
     ) -> dict[str, Any]:
         return self.memory.search_skills(query, limit=limit, threshold=threshold, **scope_kwargs)
 
+    def search_skill_keywords(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        threshold: float = 0.0,
+        **scope_kwargs: Any,
+    ) -> dict[str, Any]:
+        return self.search_skills(query, limit=limit, threshold=threshold, **scope_kwargs)
+
     def search_skill_references(
         self,
         query: str,
         *,
         skill_id: str | None = None,
-        skill_version_id: str | None = None,
         path_prefix: str | None = None,
         limit: int = 10,
         threshold: float = 0.0,
@@ -825,7 +837,6 @@ class AgentStoreAPI:
         return self.memory.search_skill_references(
             query,
             skill_id=skill_id,
-            skill_version_id=skill_version_id,
             path_prefix=path_prefix,
             limit=limit,
             threshold=threshold,
@@ -836,7 +847,6 @@ class AgentStoreAPI:
         self,
         skill_id: str,
         *,
-        skill_version_id: str | None = None,
         path_prefix: str | None = None,
         query: str | None = None,
         budget_chars: int | None = None,
@@ -845,9 +855,25 @@ class AgentStoreAPI:
     ) -> dict[str, Any]:
         return self.memory.compress_skill_references(
             skill_id,
-            skill_version_id=skill_version_id,
             path_prefix=path_prefix,
             query=query,
+            budget_chars=budget_chars,
+            max_sentences=max_sentences,
+            max_highlights=max_highlights,
+        )
+
+    def refresh_skill_execution_context(
+        self,
+        skill_id: str,
+        *,
+        path_prefix: str | None = None,
+        budget_chars: int | None = None,
+        max_sentences: int = 8,
+        max_highlights: int = 12,
+    ) -> dict[str, Any]:
+        return self.memory.refresh_skill_execution_context(
+            skill_id,
+            path_prefix=path_prefix,
             budget_chars=budget_chars,
             max_sentences=max_sentences,
             max_highlights=max_highlights,
@@ -896,10 +922,9 @@ class AgentStoreAPI:
                 skill_id,
             ),
         )
-        latest_version = skill["versions"][0] if skill.get("versions") else {}
-        latest_payload = self.memory._load_skill_version_asset(latest_version)
+        current_snapshot = skill.get("current_snapshot") or {}
+        current_payload = self.memory._load_skill_snapshot_asset(current_snapshot)
         sentinel = object()
-        raw_version = kwargs.pop("version", sentinel)
         raw_prompt_template = kwargs.pop("prompt_template", sentinel)
         raw_workflow = kwargs.pop("workflow", sentinel)
         raw_schema = kwargs.pop("schema", sentinel)
@@ -907,17 +932,16 @@ class AgentStoreAPI:
         raw_tests = kwargs.pop("tests", sentinel)
         raw_topics = kwargs.pop("topics", sentinel)
 
-        resolved_prompt_template = latest_version.get("prompt_template") if raw_prompt_template is sentinel else raw_prompt_template
-        resolved_workflow = latest_payload.get("workflow", latest_version.get("workflow")) if raw_workflow is sentinel else raw_workflow
-        resolved_schema = latest_payload.get("schema", latest_version.get("schema_json") or {}) if raw_schema is sentinel else raw_schema
-        resolved_tools = list(latest_payload.get("tools", []) if raw_tools is sentinel else raw_tools or [])
-        resolved_tests = list(latest_payload.get("tests", []) if raw_tests is sentinel else raw_tests or [])
-        resolved_topics = list(latest_payload.get("topics", []) if raw_topics is sentinel else raw_topics or [])
+        resolved_prompt_template = current_snapshot.get("prompt_template") if raw_prompt_template is sentinel else raw_prompt_template
+        resolved_workflow = current_payload.get("workflow", current_snapshot.get("workflow")) if raw_workflow is sentinel else raw_workflow
+        resolved_schema = current_payload.get("schema", current_snapshot.get("schema_json") or {}) if raw_schema is sentinel else raw_schema
+        resolved_tools = list(current_payload.get("tools", []) if raw_tools is sentinel else raw_tools or [])
+        resolved_tests = list(current_payload.get("tests", []) if raw_tests is sentinel else raw_tests or [])
+        resolved_topics = list(current_payload.get("topics", []) if raw_topics is sentinel else raw_topics or [])
 
         package_changed = bool(files) or any(item is not None for item in (skill_markdown, references, scripts, asset_files))
         content_changed = (
-            raw_version is not sentinel
-            or raw_prompt_template is not sentinel
+            raw_prompt_template is not sentinel
             or raw_workflow is not sentinel
             or raw_schema is not sentinel
             or raw_tools is not sentinel
@@ -929,8 +953,8 @@ class AgentStoreAPI:
         )
         if content_changed:
             base_files = (
-                self.memory._clone_skill_version_file_inputs(
-                    skill_version_id=latest_version["id"],
+                self.memory._clone_skill_snapshot_file_inputs(
+                    skill_snapshot_id=current_snapshot["id"],
                     name=name,
                     description=description,
                     prompt_template=resolved_prompt_template,
@@ -938,16 +962,17 @@ class AgentStoreAPI:
                     tools=resolved_tools,
                     topics=resolved_topics,
                 )
-                if latest_version.get("id")
+                if current_snapshot.get("id")
                 else None
             )
-            self._write_skill_version(
+            if current_snapshot.get("id"):
+                self.memory._delete_skill_snapshot(current_snapshot["id"])
+            self._write_skill_snapshot(
                 skill_id=skill_id,
                 name=name,
                 description=description,
                 scope=scope,
                 metadata=metadata or {},
-                version=None if raw_version is sentinel else raw_version,
                 prompt_template=resolved_prompt_template,
                 workflow=resolved_workflow,
                 schema=resolved_schema,
@@ -966,28 +991,10 @@ class AgentStoreAPI:
 
     def delete_skill(self, skill_id: str) -> dict[str, Any]:
         skill = self.get_skill_content(skill_id)
-        for version in skill.get("versions", []):
-            self.memory.db.execute("DELETE FROM skill_index WHERE record_id = ?", (version["id"],))
-            self.memory.db.execute("DELETE FROM semantic_index_cache WHERE record_id = ?", (version["id"],))
-            self.memory._delete_text_search_record(version["id"])
-            self.memory.vector_index.delete("skill_index", version["id"])
-            self.memory._delete_skill_version_artifacts(version["id"])
+        current_snapshot = skill.get("current_snapshot")
+        if current_snapshot and current_snapshot.get("id"):
+            self.memory._delete_skill_snapshot(current_snapshot["id"])
         self.memory.graph_store.delete_reference(skill_id)
-        self.memory.db.execute(
-            """
-            DELETE FROM skill_tests
-            WHERE skill_version_id IN (SELECT id FROM skill_versions WHERE skill_id = ?)
-            """,
-            (skill_id,),
-        )
-        self.memory.db.execute(
-            """
-            DELETE FROM skill_bindings
-            WHERE skill_version_id IN (SELECT id FROM skill_versions WHERE skill_id = ?)
-            """,
-            (skill_id,),
-        )
-        self.memory.db.execute("DELETE FROM skill_versions WHERE skill_id = ?", (skill_id,))
         self.memory.db.execute("DELETE FROM skills WHERE id = ?", (skill_id,))
         return {"id": skill_id, "deleted": True, "skill": skill}
 
@@ -1368,7 +1375,7 @@ class AgentStoreAPI:
                 }
             )
 
-    def _write_skill_version(
+    def _write_skill_snapshot(
         self,
         *,
         skill_id: str,
@@ -1376,7 +1383,6 @@ class AgentStoreAPI:
         description: str,
         scope: dict[str, Any],
         metadata: dict[str, Any],
-        version: str | None,
         prompt_template: str | None,
         workflow: Any,
         schema: dict[str, Any] | None,
@@ -1391,13 +1397,12 @@ class AgentStoreAPI:
         assets: dict[str, Any] | list[dict[str, Any]] | None,
         now: str,
     ) -> None:
-        self.memory._write_skill_version_record(
+        self.memory._write_skill_snapshot_record(
             skill_id=skill_id,
             name=name,
             description=description,
             scope=scope,
             metadata=metadata,
-            version=version,
             prompt_template=prompt_template,
             workflow=workflow,
             schema=schema,
