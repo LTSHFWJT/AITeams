@@ -27,8 +27,8 @@ class LongTermMemoryNamespace(_NamespaceBase):
     def add(self, text: str, **kwargs: Any):
         return self._root._call("store_long_term_memory", text, **kwargs)
 
-    def get(self, memory_id: str):
-        return self._root._call("get_long_term_memory", memory_id)
+    def get(self, memory_id: str, **kwargs: Any):
+        return self._root._call("get_long_term_memory", memory_id, **kwargs)
 
     def list(self, **kwargs: Any):
         return self._root._call("list_long_term_memories", **kwargs)
@@ -39,8 +39,17 @@ class LongTermMemoryNamespace(_NamespaceBase):
     def update(self, memory_id: str, **kwargs: Any):
         return self._root._call("update_long_term_memory", memory_id, **kwargs)
 
-    def delete(self, memory_id: str):
-        return self._root._call("delete_long_term_memory", memory_id)
+    def supersede(self, memory_id: str, **kwargs: Any):
+        return self._root._call("supersede_long_term_memory", memory_id, **kwargs)
+
+    def history(self, memory_id: str, **kwargs: Any):
+        return self._root._call("history_long_term_memory", memory_id, **kwargs)
+
+    def link(self, memory_id: str, target_memory_ids: str | list[str], **kwargs: Any):
+        return self._root._call("link_long_term_memory", memory_id, target_memory_ids, **kwargs)
+
+    def delete(self, memory_id: str, **kwargs: Any):
+        return self._root._call("delete_long_term_memory", memory_id, **kwargs)
 
     def compress(self, **kwargs: Any):
         return self._root._call("compress_long_term_memories", **kwargs)
@@ -52,8 +61,8 @@ class ShortTermMemoryNamespace(_NamespaceBase):
     def add(self, text: str, **kwargs: Any):
         return self._root._call("store_short_term_memory", text, **kwargs)
 
-    def get(self, memory_id: str):
-        return self._root._call("get_short_term_memory", memory_id)
+    def get(self, memory_id: str, **kwargs: Any):
+        return self._root._call("get_short_term_memory", memory_id, **kwargs)
 
     def list(self, **kwargs: Any):
         return self._root._call("list_short_term_memories", **kwargs)
@@ -64,8 +73,17 @@ class ShortTermMemoryNamespace(_NamespaceBase):
     def update(self, memory_id: str, **kwargs: Any):
         return self._root._call("update_short_term_memory", memory_id, **kwargs)
 
-    def delete(self, memory_id: str):
-        return self._root._call("delete_short_term_memory", memory_id)
+    def supersede(self, memory_id: str, **kwargs: Any):
+        return self._root._call("supersede_short_term_memory", memory_id, **kwargs)
+
+    def history(self, memory_id: str, **kwargs: Any):
+        return self._root._call("history_short_term_memory", memory_id, **kwargs)
+
+    def link(self, memory_id: str, target_memory_ids: str | list[str], **kwargs: Any):
+        return self._root._call("link_short_term_memory", memory_id, target_memory_ids, **kwargs)
+
+    def delete(self, memory_id: str, **kwargs: Any):
+        return self._root._call("delete_short_term_memory", memory_id, **kwargs)
 
     def compress(self, **kwargs: Any):
         return self._root._call("compress_short_term_memories", **kwargs)
@@ -182,6 +200,9 @@ class SessionNamespace(_NamespaceBase):
     def govern(self, session_id: str, **kwargs: Any):
         return self._root._call("govern_session", session_id, **kwargs)
 
+    def reflect(self, session_id: str, **kwargs: Any):
+        return self._root._call("reflect_session", session_id, **kwargs)
+
 
 class RecallNamespace(_NamespaceBase):
     namespace_name = "recall"
@@ -189,11 +210,17 @@ class RecallNamespace(_NamespaceBase):
     def query(self, query: str, **kwargs: Any):
         return self._root._call("query", query, **kwargs)
 
+    def plan(self, query: str, **kwargs: Any):
+        return self._root._call("plan_recall", query, **kwargs)
+
     def explain(self, query: str, **kwargs: Any):
         return self._root._call("explain_recall", query, **kwargs)
 
     def compress_text(self, text: str, **kwargs: Any):
         return self._root._call("compress_text_payload", text, **kwargs)
+
+    def context(self, query: str, **kwargs: Any):
+        return self._root._call("build_context", query, **kwargs)
 
 
 class ExecutionNamespace(_NamespaceBase):
@@ -204,6 +231,75 @@ class ExecutionNamespace(_NamespaceBase):
 
     def search(self, query: str, **kwargs: Any):
         return self._root._call("search_execution", query, **kwargs)
+
+
+class ContextNamespace(_NamespaceBase):
+    namespace_name = "context"
+
+    def build(self, query: str, **kwargs: Any):
+        return self._root._call("build_context", query, **kwargs)
+
+    def search(self, query: str, **kwargs: Any):
+        return self._root._call("search_context_artifacts", query, **kwargs)
+
+    def get(self, artifact_id: str, **kwargs: Any):
+        return self._root._call("get_context_artifact", artifact_id, **kwargs)
+
+    def list(self, **kwargs: Any):
+        return self._root._call("list_context_artifacts", **kwargs)
+
+
+class HandoffNamespace(_NamespaceBase):
+    namespace_name = "handoff"
+
+    def build(self, target_agent_id: str, **kwargs: Any):
+        return self._root._call("build_handoff_pack", target_agent_id, **kwargs)
+
+    def search(self, query: str, **kwargs: Any):
+        return self._root._call("search_handoff_packs", query, **kwargs)
+
+    def get(self, handoff_id: str, **kwargs: Any):
+        return self._root._call("get_handoff_pack", handoff_id, **kwargs)
+
+    def list(self, **kwargs: Any):
+        return self._root._call("list_handoff_packs", **kwargs)
+
+
+class ReflectionNamespace(_NamespaceBase):
+    namespace_name = "reflection"
+
+    def session(self, session_id: str, **kwargs: Any):
+        return self._root._call("reflect_session", session_id, **kwargs)
+
+    def run(self, run_id: str, **kwargs: Any):
+        return self._root._call("reflect_run", run_id, **kwargs)
+
+    def search(self, query: str, **kwargs: Any):
+        return self._root._call("search_reflection_memories", query, **kwargs)
+
+    def get(self, reflection_id: str, **kwargs: Any):
+        return self._root._call("get_reflection_memory", reflection_id, **kwargs)
+
+    def list(self, **kwargs: Any):
+        return self._root._call("list_reflection_memories", **kwargs)
+
+
+class ACLNamespace(_NamespaceBase):
+    namespace_name = "acl"
+
+    def get(self, rule_id: str, **kwargs: Any):
+        return self._root._call("get_scope_acl_rule", rule_id, **kwargs)
+
+    def list(self, **kwargs: Any):
+        return self._root._call("list_scope_acl_rules", **kwargs)
+
+    def grant(self, **kwargs: Any):
+        return self._root._call("grant_scope_acl_rule", **kwargs)
+
+    def revoke(self, rule_id: str | None = None, **kwargs: Any):
+        if rule_id is None:
+            return self._root._call("revoke_scope_acl_rule", **kwargs)
+        return self._root._call("revoke_scope_acl_rule", rule_id, **kwargs)
 
 
 class _StructuredAPIBase:
@@ -248,6 +344,22 @@ class _StructuredAPIBase:
     @cached_property
     def execution(self) -> ExecutionNamespace:
         return ExecutionNamespace(self)
+
+    @cached_property
+    def context(self) -> ContextNamespace:
+        return ContextNamespace(self)
+
+    @cached_property
+    def handoff(self) -> HandoffNamespace:
+        return HandoffNamespace(self)
+
+    @cached_property
+    def reflection(self) -> ReflectionNamespace:
+        return ReflectionNamespace(self)
+
+    @cached_property
+    def acl(self) -> ACLNamespace:
+        return ACLNamespace(self)
 
 
 class StructuredAIMemoryAPI(_StructuredAPIBase):

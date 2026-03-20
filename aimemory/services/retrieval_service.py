@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from aimemory.core.router import DEFAULT_RETRIEVAL_DOMAINS
+from aimemory.core.router import DEFAULT_RETRIEVAL_DOMAINS, RetrievalRouter
 from aimemory.memory_intelligence.models import MemoryScopeContext
+from aimemory.providers.defaults import AdaptiveRecallPlanner
 from aimemory.querying.filters import filter_records
 
 
@@ -75,7 +76,8 @@ class RetrievalService:
         limit: int = 10,
         threshold: float = 0.0,
     ) -> dict[str, Any]:
-        selected_domains = list(dict.fromkeys(domains or DEFAULT_RETRIEVAL_DOMAINS))
+        router = self.router or RetrievalRouter()
+        selected_domains = list(dict.fromkeys(domains or router.route(query, session_id=session_id)))
         result = self._kernel().query(
             query,
             user_id=user_id,
@@ -280,16 +282,27 @@ class RetrievalService:
         limit: int = 10,
         auxiliary_limit: int | None = None,
     ) -> dict[str, Any]:
-        scope = preferred_scope or ("session" if context and context.session_id else "all")
-        domains = ["memory", "interaction"]
-        if scope == "all":
-            domains.extend(["knowledge", "skill", "archive"])
+        planner = self.recall_planner or AdaptiveRecallPlanner()
+        if context is None:
+            context = self._build_context()
+        plan = planner.plan(
+            query,
+            context=context,
+            policy=self.config.memory_policy,
+            preferred_scope=preferred_scope,
+            limit=limit,
+            auxiliary_limit=auxiliary_limit,
+            graph_enabled=self.graph_backend is not None,
+        )
+        router = self.router or RetrievalRouter()
+        selected_domains = list(dict.fromkeys(plan.get("handoff_domains") or router.route(query, session_id=context.session_id)))
         return {
+            **plan,
             "query": query,
-            "scope": scope,
+            "scope": preferred_scope or str(plan.get("query_profile", {}).get("preferred_scope") or ("session" if context.session_id else "long-term")),
             "limit": limit,
             "auxiliary_limit": auxiliary_limit or self.config.memory_policy.auxiliary_search_limit,
-            "handoff_domains": domains,
+            "selected_domains": selected_domains,
         }
 
     def explain_memory_recall(

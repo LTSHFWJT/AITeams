@@ -9,6 +9,7 @@ from aimemory.core.text import extract_keywords
 from aimemory.core.utils import json_dumps, make_id, utcnow_iso
 from aimemory.domains.knowledge.models import KnowledgeSourceType
 from aimemory.services.base import ServiceBase
+from aimemory.storage.policy import build_inline_excerpt, normalize_raw_store_policy, payload_size_bytes, should_externalize_text
 
 
 class KnowledgeService(ServiceBase):
@@ -62,6 +63,7 @@ class KnowledgeService(ServiceBase):
         overlap: int = 80,
         document_id: str | None = None,
         kb_namespace: str | None = None,
+        raw_store_policy: str | None = None,
     ) -> dict[str, Any]:
         source = self._resolve_source(source_id=source_id, source_name=source_name)
         document_id = document_id or make_id("doc")
@@ -73,6 +75,15 @@ class KnowledgeService(ServiceBase):
             "source_subject_type": source_subject_type,
             "source_subject_id": source_subject_id,
         }
+        storage_policy = normalize_raw_store_policy(raw_store_policy, default=self.config.knowledge_raw_store_policy)
+        externalize = should_externalize_text(
+            text,
+            policy=storage_policy,
+            inline_char_limit=int(self.config.knowledge_inline_char_limit),
+        )
+        inline_text = None if externalize else text
+        inline_excerpt = build_inline_excerpt(text)
+        raw_payload_bytes = payload_size_bytes(text)
 
         self.db.execute(
             """
@@ -83,8 +94,12 @@ class KnowledgeService(ServiceBase):
         )
         self.db.execute(
             """
-            INSERT INTO documents(id, source_id, title, user_id, owner_agent_id, kb_namespace, source_subject_type, source_subject_id, external_id, status, metadata, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+            INSERT INTO documents(
+                id, source_id, title, user_id, owner_agent_id, kb_namespace, source_subject_type, source_subject_id,
+                inline_text, inline_excerpt, storage_policy, storage_ref, payload_bytes, external_id, status, metadata,
+                created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 source_id = excluded.source_id,
                 title = excluded.title,
@@ -93,6 +108,11 @@ class KnowledgeService(ServiceBase):
                 kb_namespace = excluded.kb_namespace,
                 source_subject_type = excluded.source_subject_type,
                 source_subject_id = excluded.source_subject_id,
+                inline_text = excluded.inline_text,
+                inline_excerpt = excluded.inline_excerpt,
+                storage_policy = excluded.storage_policy,
+                storage_ref = excluded.storage_ref,
+                payload_bytes = excluded.payload_bytes,
                 metadata = excluded.metadata,
                 updated_at = excluded.updated_at
             """,
@@ -105,6 +125,11 @@ class KnowledgeService(ServiceBase):
                 kb_namespace or owner_agent_id,
                 source_subject_type,
                 source_subject_id,
+                inline_text,
+                inline_excerpt,
+                storage_policy,
+                None,
+                raw_payload_bytes,
                 document_id,
                 json_dumps(merged_metadata),
                 now,
@@ -112,8 +137,11 @@ class KnowledgeService(ServiceBase):
             ),
         )
 
-        stored = self.object_store.put_text(text, object_type="knowledge", suffix=".txt")
-        object_row = self._persist_object(stored, mime_type="text/plain", metadata={"document_id": document_id, **merged_metadata})
+        object_row = None
+        if externalize:
+            stored = self.object_store.put_text(text, object_type="knowledge", suffix=".txt")
+            object_row = self._persist_object(stored, mime_type="text/plain", metadata={"document_id": document_id, **merged_metadata})
+            self.db.execute("UPDATE documents SET storage_ref = ? WHERE id = ?", (object_row["object_key"], document_id))
         version_id = make_id("docver")
         checksum = hashlib.sha256(text.encode("utf-8")).hexdigest()
         self.db.execute(
@@ -121,7 +149,16 @@ class KnowledgeService(ServiceBase):
             INSERT INTO document_versions(id, document_id, version_label, object_id, checksum, size_bytes, metadata, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (version_id, document_id, version_label, object_row["id"], checksum, len(text.encode("utf-8")), json_dumps(merged_metadata), now),
+            (
+                version_id,
+                document_id,
+                version_label,
+                object_row["id"] if object_row is not None else None,
+                checksum,
+                raw_payload_bytes,
+                json_dumps(merged_metadata),
+                now,
+            ),
         )
 
         for index, chunk in enumerate(chunk_text_units(text, source_id=document_id, chunk_size=chunk_size, overlap=overlap)):
@@ -182,6 +219,7 @@ class KnowledgeService(ServiceBase):
         document["chunks"] = self._deserialize_rows(
             self.db.fetch_all("SELECT * FROM document_chunks WHERE document_id = ? ORDER BY chunk_index ASC", (document_id,))
         )
+        document["text"] = self._document_text(document)
         return document
 
     def list_documents(
@@ -211,6 +249,15 @@ class KnowledgeService(ServiceBase):
         document = self.get_document(document_id)
         if document is None:
             raise ValueError(f"Document `{document_id}` does not exist.")
+        return self._document_text(document)
+
+    def _document_text(self, document: dict[str, Any]) -> str:
+        inline_text = str(document.get("inline_text") or "")
+        if inline_text:
+            return inline_text
+        storage_ref = str(document.get("storage_ref") or "")
+        if storage_ref:
+            return self.object_store.get_text(storage_ref)
         latest_version = document["versions"][0] if document.get("versions") else None
         if latest_version is None or not latest_version.get("object_id"):
             return "\n".join(chunk.get("content", "") for chunk in document.get("chunks", []))

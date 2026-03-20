@@ -5,14 +5,16 @@ from dataclasses import asdict
 from typing import Any, Callable
 
 from aimemory.algorithms.compression import CompressionResult, compress_records, compress_text as compress_text_content
+from aimemory.adapters.platform.registry import create_platform_llm_plugin, list_platform_llm_plugins
 from aimemory.algorithms.dedupe import fingerprint, hamming_similarity, merge_text_fragments, semantic_similarity
 from aimemory.algorithms.distill import AdaptiveDistiller, DistilledCandidate
 from aimemory.algorithms.retrieval import estimate_tokens, mmr_rerank, score_record
 from aimemory.algorithms.segmentation import chunk_text_units
 from aimemory.backends.registry import LanceDBVectorIndex, NullGraphStore
 from aimemory.core.capabilities import capability_dict
+from aimemory.core.router import RetrievalRouter
 from aimemory.core.scope import CollaborationScope
-from aimemory.core.settings import AIMemoryConfig
+from aimemory.core.settings import AIMemoryConfig, PlatformLLMPluginConfig
 from aimemory.core.text import build_summary, extract_keywords, normalize_text, split_sentences, tokenize
 from aimemory.core.utils import json_dumps, json_loads, make_id, make_uuid7, merge_metadata, utcnow_iso
 from aimemory.domains.memory.models import MemoryScope, MemoryType
@@ -23,11 +25,12 @@ from aimemory.domains.skill.package import (
     normalize_skill_package_inputs,
 )
 from aimemory.memory_intelligence.models import MemoryScopeContext, NormalizedMessage
-from aimemory.providers.defaults import TextOnlyVisionProcessor
+from aimemory.providers.defaults import AdaptiveRecallPlanner, TextOnlyVisionProcessor
 from aimemory.providers.embeddings import configure_embedding_runtime, describe_embedding_runtime, embed_text
 from aimemory.querying.filters import filter_records
 from aimemory.storage.lmdb.store import LMDBMemoryStore
 from aimemory.storage.object_store.local import LocalObjectStore
+from aimemory.storage.policy import build_inline_excerpt, normalize_raw_store_policy, payload_size_bytes, should_externalize_text
 from aimemory.storage.sqlite.database import SQLiteDatabase
 from aimemory.storage.sqlite.runtime_schema import ADDITIONAL_COLUMNS, EXTRA_SCHEMA_STATEMENTS, POST_MIGRATION_SCHEMA_STATEMENTS
 
@@ -48,6 +51,9 @@ def _deserialize_row(
         "salience_vector",
         "capability_tags",
         "tool_affinity",
+        "participants",
+        "hot_refs",
+        "source_memory_ids",
     ),
 ) -> dict[str, Any] | None:
     if row is None:
@@ -71,6 +77,9 @@ def _deserialize_rows(
         "salience_vector",
         "capability_tags",
         "tool_affinity",
+        "participants",
+        "hot_refs",
+        "source_memory_ids",
     ),
 ) -> list[dict[str, Any]]:
     return [item for item in (_deserialize_row(row, json_fields) for row in rows) if item is not None]
@@ -84,6 +93,9 @@ def _domain_priority(domain: str) -> float:
         "skill": 0.05,
         "archive": -0.02,
         "execution": 0.01,
+        "context": 0.045,
+        "handoff": 0.05,
+        "reflection": 0.035,
     }.get(domain, 0.0)
 
 
@@ -137,6 +149,11 @@ MEMORY_TABLE_SELECT = """
         id,
         bundle_id,
         content_id,
+        text,
+        text_hash,
+        storage_policy,
+        storage_ref,
+        payload_bytes,
         user_id,
         agent_id,
         owner_agent_id,
@@ -150,7 +167,21 @@ MEMORY_TABLE_SELECT = """
         namespace_key,
         memory_type,
         summary,
+        summary_l0,
+        summary_l1,
         importance,
+        confidence,
+        visibility,
+        tier,
+        version,
+        supersedes_memory_id,
+        superseded_by_memory_id,
+        access_count,
+        last_accessed_at,
+        expires_at,
+        actor_id,
+        participants,
+        compression_state,
         status,
         source,
         metadata,
@@ -163,9 +194,25 @@ MEMORY_TABLE_SELECT = """
 
 
 class AIMemory:
-    def __init__(self, config: AIMemoryConfig | dict[str, Any] | None = None):
+    def __init__(
+        self,
+        config: AIMemoryConfig | dict[str, Any] | None = None,
+        *,
+        platform_llm: Any | None = None,
+        platform_events: Any | None = None,
+    ):
         self.config = AIMemoryConfig.from_value(config)
         configure_embedding_runtime(self.config.embeddings)
+        self.platform_llm = self._resolve_platform_llm_adapter(platform_llm)
+        if platform_events is None:
+            try:
+                from aimemory.adapters.platform.events import AIMemoryPlatformEventAdapter
+
+                self.platform_events = AIMemoryPlatformEventAdapter(self)
+            except Exception:
+                self.platform_events = None
+        else:
+            self.platform_events = platform_events
         self.memory_content_store = LMDBMemoryStore(self.config.lmdb_path)
         self.object_store = LocalObjectStore(self.config.object_store_path)
         self.db = SQLiteDatabase(self.config.sqlite_path)
@@ -173,11 +220,46 @@ class AIMemory:
         self.vector_index = LanceDBVectorIndex(self.config)
         self.graph_store = NullGraphStore()
         self.normalizer = TextOnlyVisionProcessor()
+        self.recall_router = RetrievalRouter()
+        self.recall_planner = AdaptiveRecallPlanner()
         self.distiller = AdaptiveDistiller(self.config.memory_policy)
         self._domain_compressors: dict[str, Callable[..., Any]] = {}
         self._agent_store_api = None
         self._structured_api = None
         self._closed = False
+
+    def _resolve_platform_llm_adapter(self, adapter: Any | None) -> Any | None:
+        if adapter is not None:
+            return adapter
+        plugin = PlatformLLMPluginConfig.from_value(self.config.platform_llm_plugin)
+        if plugin is None or not plugin.enabled:
+            return None
+        plugin_name = str(plugin.name or "").strip()
+        if not plugin_name:
+            return None
+        return create_platform_llm_plugin(plugin_name, plugin.settings)
+
+    def bind_platform_llm(
+        self,
+        adapter: Any | None = None,
+        *,
+        plugin_name: str | None = None,
+        settings: dict[str, Any] | None = None,
+    ) -> Any | None:
+        if adapter is not None and plugin_name is not None:
+            raise ValueError("pass either `adapter` or `plugin_name`, not both")
+        if plugin_name is not None:
+            plugin_settings = dict(settings or {})
+            adapter = create_platform_llm_plugin(plugin_name, plugin_settings)
+            self.config.platform_llm_plugin = PlatformLLMPluginConfig(
+                name=plugin_name,
+                settings=plugin_settings,
+                enabled=True,
+            )
+        else:
+            self.config.platform_llm_plugin = None
+        self.platform_llm = adapter
+        return self.platform_llm
 
     def _ensure_runtime_schema(self) -> None:
         self.db.ensure_schema(EXTRA_SCHEMA_STATEMENTS)
@@ -217,7 +299,11 @@ class AIMemory:
         self._normalize_memory_management_tables()
         self.db.execute("UPDATE skills SET owner_agent_id = COALESCE(owner_agent_id, owner_id) WHERE owner_agent_id IS NULL")
         self._normalize_archive_management_table()
+        self._backfill_memory_inline_texts()
+        self._backfill_document_storage_fields()
         self._backfill_memory_bundles()
+        self._sync_text_search_index()
+        self._sync_contextual_semantic_indexes()
 
     def _normalize_memory_management_tables(self) -> None:
         for table_name in MEMORY_TABLE_MAP.values():
@@ -279,6 +365,72 @@ class AIMemory:
         self._sync_text_search_index()
         self._sync_contextual_semantic_indexes()
 
+    def _backfill_memory_inline_texts(self) -> None:
+        for scope, table_name in MEMORY_TABLE_MAP.items():
+            rows = self.db.fetch_all(f"{self._memory_row_sql(table_name)} WHERE COALESCE(text, '') = ''")
+            for row in rows:
+                legacy_text = ""
+                bundle_id = str(row.get("bundle_id") or "").strip()
+                if bundle_id:
+                    bundle = self.memory_content_store.get_json(self._memory_bucket_for_scope(scope), bundle_id, None)
+                    if isinstance(bundle, dict):
+                        bundle_item = self._find_bundle_item(bundle, record_id=row["id"], content_id=row.get("content_id"))
+                        if bundle_item is not None:
+                            legacy_text = str(bundle_item.get("text") or "")
+                if not legacy_text and row.get("content_id"):
+                    legacy_text = self.memory_content_store.get_text(self._memory_bucket_for_scope(scope), row["content_id"]) or ""
+                if not legacy_text:
+                    continue
+                payload = self._memory_text_payload(legacy_text)
+                self.db.execute(
+                    f"""
+                    UPDATE {table_name}
+                    SET text = ?, text_hash = ?, storage_policy = ?, storage_ref = ?, payload_bytes = ?, summary_l0 = ?, summary_l1 = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        payload["text"],
+                        payload["text_hash"],
+                        payload["storage_policy"],
+                        payload["storage_ref"],
+                        payload["payload_bytes"],
+                        payload["summary_l0"],
+                        payload["summary_l1"],
+                        row.get("updated_at") or utcnow_iso(),
+                        row["id"],
+                    ),
+                )
+
+    def _backfill_document_storage_fields(self) -> None:
+        rows = self.db.fetch_all("SELECT id, inline_text, inline_excerpt, storage_policy, storage_ref, payload_bytes, updated_at FROM documents")
+        for row in rows:
+            if row.get("storage_policy") and (row.get("inline_text") or row.get("storage_ref") or row.get("payload_bytes")):
+                continue
+            document = self.get_document(row["id"])
+            if document is None:
+                continue
+            text = self._document_text(document)
+            if not text:
+                continue
+            payload_bytes = payload_size_bytes(text)
+            self.db.execute(
+                """
+                UPDATE documents
+                SET inline_excerpt = COALESCE(inline_excerpt, ?),
+                    payload_bytes = COALESCE(payload_bytes, ?),
+                    storage_policy = COALESCE(storage_policy, ?),
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    build_inline_excerpt(text),
+                    payload_bytes,
+                    normalize_raw_store_policy(row.get("storage_policy"), default=self.config.knowledge_raw_store_policy),
+                    row.get("updated_at") or utcnow_iso(),
+                    row["id"],
+                ),
+            )
+
     def _memory_table_for_scope(self, scope: str) -> str:
         return MEMORY_TABLE_MAP.get(scope, MEMORY_TABLE_MAP[str(MemoryScope.LONG_TERM)])
 
@@ -314,7 +466,94 @@ class AIMemory:
             ]
         )
 
+    def _memory_text_payload(self, text: str, *, summary_l0: str | None = None, summary_l1: str | None = None) -> dict[str, Any]:
+        cleaned = str(text or "")
+        generated_l0 = build_summary(split_sentences(cleaned), max_sentences=1, max_chars=120)
+        generated_l1 = build_summary(split_sentences(cleaned), max_sentences=3, max_chars=220)
+        resolved_l0 = str(summary_l0 or "").strip() or generated_l0
+        resolved_l1 = str(summary_l1 or "").strip() or generated_l1 or resolved_l0
+        return {
+            "text": cleaned,
+            "text_hash": fingerprint(cleaned),
+            "storage_policy": "inline",
+            "storage_ref": None,
+            "payload_bytes": payload_size_bytes(cleaned),
+            "summary_l0": resolved_l0,
+            "summary_l1": resolved_l1,
+        }
+
+    def _memory_structured_fields(
+        self,
+        metadata: dict[str, Any] | None,
+        *,
+        confidence: float | None = None,
+        tier: str | None = None,
+        summary_l0: str | None = None,
+        summary_l1: str | None = None,
+    ) -> dict[str, Any]:
+        payload = dict(metadata or {})
+        resolved_summary_l0 = (
+            str(summary_l0 or payload.get("summary_l0") or payload.get("l0_abstract") or "").strip() or None
+        )
+        resolved_summary_l1 = (
+            str(summary_l1 or payload.get("summary_l1") or payload.get("l1_overview") or "").strip() or None
+        )
+        resolved_confidence = confidence
+        if resolved_confidence is None:
+            try:
+                resolved_confidence = float(payload.get("confidence", 0.5) or 0.5)
+            except (TypeError, ValueError):
+                resolved_confidence = 0.5
+        resolved_confidence = max(0.0, min(1.0, float(resolved_confidence)))
+        resolved_tier = str(tier or payload.get("tier") or "working").strip() or "working"
+        return {
+            "summary_l0": resolved_summary_l0,
+            "summary_l1": resolved_summary_l1,
+            "confidence": resolved_confidence,
+            "tier": resolved_tier,
+        }
+
+    def _bundle_summary_from_items(self, items: list[dict[str, Any]]) -> str:
+        parts = [
+            str(item.get("summary_l0") or item.get("summary_l1") or item.get("summary") or "").strip()
+            for item in items
+            if str(item.get("summary_l0") or item.get("summary_l1") or item.get("summary") or "").strip()
+        ]
+        if not parts:
+            return ""
+        return build_summary(parts[:12], max_sentences=4, max_chars=240)
+
+    def _normalize_bundle_items(self, items: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for item in list(items or []):
+            payload = {
+                "record_id": item.get("record_id"),
+                "content_id": item.get("content_id"),
+                "memory_type": item.get("memory_type"),
+                "summary": item.get("summary"),
+                "summary_l0": item.get("summary_l0") or build_inline_excerpt(item.get("text"), max_chars=120),
+                "summary_l1": item.get("summary_l1") or item.get("summary") or build_inline_excerpt(item.get("text"), max_chars=220),
+                "importance": float(item.get("importance", 0.5) or 0.0),
+                "status": item.get("status", "active"),
+                "source": item.get("source"),
+                "storage_policy": item.get("storage_policy"),
+                "storage_ref": item.get("storage_ref"),
+                "payload_bytes": item.get("payload_bytes"),
+                "session_id": item.get("session_id"),
+                "run_id": item.get("run_id"),
+                "source_session_id": item.get("source_session_id"),
+                "source_run_id": item.get("source_run_id"),
+                "metadata": _loads(item.get("metadata"), {}),
+                "created_at": item.get("created_at"),
+                "updated_at": item.get("updated_at"),
+                "archived_at": item.get("archived_at"),
+            }
+            if payload["record_id"] or payload["content_id"]:
+                normalized.append(payload)
+        return normalized
+
     def _bundle_payload(self, bundle_row: dict[str, Any]) -> dict[str, Any]:
+        items = self._normalize_bundle_items(_loads(bundle_row.get("hot_refs"), []))
         return {
             "bundle_id": bundle_row["id"],
             "scope": bundle_row["scope"],
@@ -325,7 +564,10 @@ class AIMemory:
             "subject_id": bundle_row.get("subject_id"),
             "interaction_type": bundle_row.get("interaction_type"),
             "namespace_key": bundle_row.get("namespace_key"),
-            "items": [],
+            "bundle_summary": bundle_row.get("bundle_summary") or self._bundle_summary_from_items(items),
+            "item_count": int(bundle_row.get("item_count", len(items)) or len(items)),
+            "compression_state": bundle_row.get("compression_state"),
+            "items": items,
             "metadata": _loads(bundle_row.get("metadata"), {}),
             "updated_at": bundle_row.get("updated_at"),
         }
@@ -379,8 +621,11 @@ class AIMemory:
         bundle_id = make_uuid7()
         self.db.execute(
             """
-            INSERT INTO memory_bundles(id, scope, scope_key, user_id, owner_agent_id, subject_type, subject_id, interaction_type, namespace_key, metadata, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO memory_bundles(
+                id, scope, scope_key, user_id, owner_agent_id, subject_type, subject_id, interaction_type,
+                namespace_key, bundle_summary, item_count, compression_state, hot_refs, metadata, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 bundle_id,
@@ -392,6 +637,10 @@ class AIMemory:
                 subject_id,
                 interaction_type,
                 namespace_key,
+                None,
+                0,
+                None,
+                json_dumps([]),
                 json_dumps(metadata or {}),
                 now,
                 now,
@@ -399,21 +648,21 @@ class AIMemory:
         )
         bundle = self.db.fetch_one("SELECT * FROM memory_bundles WHERE id = ?", (bundle_id,))
         assert bundle is not None
-        self.memory_content_store.put_json(self._memory_bucket_for_scope(scope), self._bundle_payload(bundle), key=bundle_id)
         return bundle
 
     def _get_memory_bundle(self, scope: str, bundle_id: str, *, bundle_row: dict[str, Any] | None = None) -> dict[str, Any]:
-        bundle = self.memory_content_store.get_json(self._memory_bucket_for_scope(scope), bundle_id, None)
-        if isinstance(bundle, dict):
-            bundle.setdefault("items", [])
-            bundle.setdefault("scope", scope)
-            bundle.setdefault("bundle_id", bundle_id)
-            return bundle
         row = bundle_row or self.db.fetch_one("SELECT * FROM memory_bundles WHERE id = ?", (bundle_id,))
         if row is None:
             return {"bundle_id": bundle_id, "scope": scope, "items": [], "metadata": {}, "updated_at": utcnow_iso()}
         payload = self._bundle_payload(row)
-        self.memory_content_store.put_json(self._memory_bucket_for_scope(scope), payload, key=bundle_id)
+        if payload.get("items"):
+            return payload
+        legacy = self.memory_content_store.get_json(self._memory_bucket_for_scope(scope), bundle_id, None)
+        if isinstance(legacy, dict):
+            migrated = dict(legacy)
+            migrated["items"] = self._normalize_bundle_items(legacy.get("items"))
+            self._put_memory_bundle(scope, bundle_id, migrated)
+            return self._bundle_payload(self.db.fetch_one("SELECT * FROM memory_bundles WHERE id = ?", (bundle_id,)) or row)
         return payload
 
     def _put_memory_bundle(self, scope: str, bundle_id: str, payload: dict[str, Any]) -> None:
@@ -421,10 +670,25 @@ class AIMemory:
         normalized = dict(payload)
         normalized["bundle_id"] = bundle_id
         normalized["scope"] = scope
-        normalized["items"] = list(normalized.get("items") or [])
+        normalized["items"] = self._normalize_bundle_items(normalized.get("items"))
         normalized["updated_at"] = now
-        self.memory_content_store.put_json(self._memory_bucket_for_scope(scope), normalized, key=bundle_id)
-        self.db.execute("UPDATE memory_bundles SET updated_at = ? WHERE id = ?", (now, bundle_id))
+        bundle_summary = str(normalized.get("bundle_summary") or self._bundle_summary_from_items(normalized["items"]) or "").strip()
+        compression_state = normalized.get("compression_state")
+        self.db.execute(
+            """
+            UPDATE memory_bundles
+            SET bundle_summary = ?, item_count = ?, compression_state = ?, hot_refs = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                bundle_summary or None,
+                len(normalized["items"]),
+                compression_state,
+                json_dumps(normalized["items"]),
+                now,
+                bundle_id,
+            ),
+        )
 
     def _find_bundle_item(
         self,
@@ -457,16 +721,24 @@ class AIMemory:
         self._put_memory_bundle(scope, bundle_id, bundle)
         return dict(item_payload)
 
-    def _bundle_memory_item_payload(self, row: dict[str, Any], *, text: str) -> dict[str, Any]:
+    def _bundle_memory_item_payload(self, row: dict[str, Any], *, text: str | None = None) -> dict[str, Any]:
+        payload = self._memory_text_payload(str(text if text is not None else row.get("text") or ""))
         return {
             "record_id": row["id"],
-            "content_id": row["content_id"],
-            "text": text,
+            "content_id": row.get("content_id"),
             "summary": row.get("summary"),
+            "summary_l0": row.get("summary_l0") or payload["summary_l0"],
+            "summary_l1": row.get("summary_l1") or row.get("summary") or payload["summary_l1"],
             "importance": float(row.get("importance", 0.5) or 0.0),
+            "version": int(row.get("version", 1) or 1),
+            "supersedes_memory_id": row.get("supersedes_memory_id"),
+            "superseded_by_memory_id": row.get("superseded_by_memory_id"),
             "status": row.get("status", "active"),
             "source": row.get("source"),
             "memory_type": row.get("memory_type"),
+            "storage_policy": row.get("storage_policy") or payload["storage_policy"],
+            "storage_ref": row.get("storage_ref"),
+            "payload_bytes": row.get("payload_bytes") or payload["payload_bytes"],
             "session_id": row.get("session_id"),
             "run_id": row.get("run_id"),
             "source_session_id": row.get("source_session_id"),
@@ -482,11 +754,15 @@ class AIMemory:
             "record_id": row["id"],
             "content_id": row["content_id"],
             "summary": summary,
-            "content": content,
+            "summary_l0": row.get("summary_l0") or build_inline_excerpt(summary, max_chars=120),
+            "summary_l1": row.get("summary_l1") or build_inline_excerpt(content or summary, max_chars=220),
             "status": "active",
             "domain": row.get("domain"),
             "source_id": row.get("source_id"),
             "source_type": row.get("source_type"),
+            "storage_policy": row.get("storage_policy"),
+            "storage_ref": row.get("storage_ref"),
+            "payload_bytes": row.get("payload_bytes"),
             "session_id": row.get("session_id"),
             "metadata": metadata or _loads(row.get("metadata"), {}),
             "created_at": row.get("created_at"),
@@ -508,7 +784,7 @@ class AIMemory:
                     namespace_key=row.get("namespace_key"),
                     metadata={},
                 )
-                text = self.memory_content_store.get_text(self._memory_bucket_for_scope(scope), row["content_id"]) or ""
+                text = str(row.get("text") or "")
                 self._upsert_bundle_item(scope, bundle["id"], self._bundle_memory_item_payload({**row, "bundle_id": bundle["id"]}, text=text))
                 self.db.execute(f"UPDATE {table_name} SET bundle_id = ? WHERE id = ?", (bundle["id"], row["id"]))
 
@@ -563,11 +839,11 @@ class AIMemory:
         item = _deserialize_row(self._memory_row_with_scope(table_name, row))
         if item is None:
             return None
+        text = str(item.get("text") or "")
         bucket = self._memory_bucket_for_scope(item["scope"])
         bundle_id = str(item.get("bundle_id") or "").strip()
         content_id = item.get("content_id")
-        text = ""
-        if bundle_id:
+        if not text and bundle_id:
             cache_key = (bucket, bundle_id)
             bundle = (bundle_cache or {}).get(cache_key)
             if bundle is None:
@@ -576,9 +852,9 @@ class AIMemory:
                     bundle_cache[cache_key] = bundle
             bundle_item = self._find_bundle_item(bundle, record_id=item["id"], content_id=content_id)
             if bundle_item is not None:
-                text = str(bundle_item.get("text") or "")
+                text = str(bundle_item.get("summary_l1") or bundle_item.get("summary") or bundle_item.get("summary_l0") or "")
         if not text and content_id:
-            text = self.memory_content_store.get_text(bucket, content_id) or ""
+            text = self.memory_content_store.get_text(self._memory_bucket_for_scope(item["scope"]), content_id) or ""
         item["text"] = text
         return item
 
@@ -720,16 +996,50 @@ class AIMemory:
             )
         return {"results": results, "facts": [item["memory"] for item in results]}
 
-    def get(self, memory_id: str) -> dict[str, Any] | None:
+    def get(
+        self,
+        memory_id: str,
+        *,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        owner_agent_id: str | None = None,
+        subject_type: str | None = None,
+        subject_id: str | None = None,
+        interaction_type: str | None = None,
+        platform_id: str | None = None,
+        workspace_id: str | None = None,
+        team_id: str | None = None,
+        project_id: str | None = None,
+        namespace_key: str | None = None,
+    ) -> dict[str, Any] | None:
         table_name = self._memory_table_for_id(memory_id)
         if table_name is None:
             return None
         row = self.db.fetch_one(f"{self._memory_row_sql(table_name)} WHERE id = ?", (memory_id,))
-        return self._hydrate_memory_row(table_name, row)
+        item = self._hydrate_memory_row(table_name, row)
+        if item is None:
+            return None
+        requester_scope = self._request_access_scope(
+            user_id=user_id,
+            agent_id=agent_id,
+            owner_agent_id=owner_agent_id,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            interaction_type=interaction_type,
+            platform_id=platform_id,
+            workspace_id=workspace_id,
+            team_id=team_id,
+            project_id=project_id,
+            namespace_key=namespace_key,
+        )
+        if any(value is not None for value in requester_scope.values()):
+            return item if self._is_resource_visible(item, resource_type="memory", requester_scope=requester_scope) else None
+        return item
 
     def get_all(
         self,
         user_id: str | None = None,
+        agent_id: str | None = None,
         owner_agent_id: str | None = None,
         subject_type: str | None = None,
         subject_id: str | None = None,
@@ -750,9 +1060,6 @@ class AIMemory:
         if user_id:
             sql_filters.append("user_id = ?")
             params.append(user_id)
-        if owner_agent_id:
-            sql_filters.append("(owner_agent_id = ? OR (owner_agent_id IS NULL AND agent_id = ?))")
-            params.extend([owner_agent_id, owner_agent_id])
         if session_id:
             sql_filters.append("(session_id = ? OR session_id IS NULL)")
             params.append(session_id)
@@ -798,6 +1105,23 @@ class AIMemory:
             )
         else:
             rows = self._list_memory_rows(filters=sql_filters, params=params, limit=limit, offset=offset)
+        rows = self._filter_accessible_rows(
+            rows,
+            resource_type="memory",
+            requester_scope=self._request_access_scope(
+                user_id=user_id,
+                agent_id=agent_id,
+                owner_agent_id=owner_agent_id,
+                subject_type=subject_type,
+                subject_id=subject_id,
+                interaction_type=interaction_type,
+                platform_id=platform_id,
+                workspace_id=workspace_id,
+                team_id=team_id,
+                project_id=project_id,
+                namespace_key=namespace_filter,
+            ),
+        )
         if filters:
             rows = filter_records(rows, filters)
         return {"results": rows, "count": len(rows), "limit": limit, "offset": offset}
@@ -807,24 +1131,81 @@ class AIMemory:
         return self.memory_search(query, **kwargs)
 
     def update(self, memory_id: str, **kwargs) -> dict[str, Any]:
+        requester_scope = self._pop_request_access_scope(kwargs)
+        requester_kwargs = {key: value for key, value in requester_scope.items() if value is not None}
         row = self.get(memory_id)
         if row is None:
             raise ValueError(f"Memory `{memory_id}` does not exist.")
+        self._assert_resource_permission(
+            row,
+            resource_type="memory",
+            requester_scope=requester_scope,
+            permission="write",
+            action_label="update memory",
+        )
+        mode = str(kwargs.pop("mode", "update") or "update").strip().lower()
+        if mode == "supersede":
+            return self.supersede_memory(
+                memory_id,
+                text=str(kwargs.pop("text", row["text"])),
+                metadata=kwargs.pop("metadata", None),
+                importance=kwargs.pop("importance", None),
+                confidence=kwargs.pop("confidence", None),
+                tier=kwargs.pop("tier", None),
+                summary_l0=kwargs.pop("summary_l0", None),
+                summary_l1=kwargs.pop("summary_l1", None),
+                source=kwargs.pop("source", None),
+                reason_code=kwargs.pop("reason_code", None),
+                audit_payload=kwargs.pop("audit_payload", None),
+                **requester_kwargs,
+            )
+        if mode not in {"update", "merge"}:
+            raise ValueError(f"Unsupported update mode `{mode}`.")
         table_name = self._memory_table_for_id(memory_id)
         assert table_name is not None
+        event_type = str(kwargs.pop("event_type", "MERGE" if mode == "merge" else "UPDATE") or ("MERGE" if mode == "merge" else "UPDATE")).upper()
+        reason_code = str(kwargs.pop("reason_code", mode)).strip() or mode
+        audit_payload = dict(kwargs.pop("audit_payload", {}) or {})
         metadata = merge_metadata(row.get("metadata"), kwargs.pop("metadata", None))
         text = str(kwargs.pop("text", row["text"]))
-        summary = str(kwargs.pop("summary", build_summary(split_sentences(text), max_sentences=3, max_chars=200)))
+        structured = self._memory_structured_fields(
+            metadata,
+            confidence=kwargs.pop("confidence", None),
+            tier=kwargs.pop("tier", None),
+            summary_l0=kwargs.pop("summary_l0", None),
+            summary_l1=kwargs.pop("summary_l1", None),
+        )
+        text_payload = self._memory_text_payload(text, summary_l0=structured["summary_l0"], summary_l1=structured["summary_l1"])
+        summary = str(kwargs.pop("summary", text_payload["summary_l1"]))
         importance = float(kwargs.pop("importance", row.get("importance", 0.5)))
+        confidence = float(structured["confidence"])
+        tier = str(structured["tier"])
         status = str(kwargs.pop("status", row.get("status", "active")))
         now = utcnow_iso()
         self.db.execute(
             f"""
             UPDATE {table_name}
-            SET summary = ?, importance = ?, status = ?, metadata = ?, updated_at = ?
+            SET text = ?, text_hash = ?, storage_policy = ?, storage_ref = ?, payload_bytes = ?, summary = ?, summary_l0 = ?, summary_l1 = ?,
+                importance = ?, confidence = ?, tier = ?, status = ?, metadata = ?, updated_at = ?
             WHERE id = ?
             """,
-            (summary, importance, status, json_dumps(metadata), now, memory_id),
+            (
+                text_payload["text"],
+                text_payload["text_hash"],
+                text_payload["storage_policy"],
+                text_payload["storage_ref"],
+                text_payload["payload_bytes"],
+                summary,
+                text_payload["summary_l0"],
+                text_payload["summary_l1"],
+                importance,
+                confidence,
+                tier,
+                status,
+                json_dumps(metadata),
+                now,
+                memory_id,
+            ),
         )
         bundle_id = str(row.get("bundle_id") or "").strip()
         if bundle_id:
@@ -834,23 +1215,54 @@ class AIMemory:
                 self._bundle_memory_item_payload(
                     {
                         **row,
+                        "text": text_payload["text"],
+                        "text_hash": text_payload["text_hash"],
+                        "storage_policy": text_payload["storage_policy"],
+                        "storage_ref": text_payload["storage_ref"],
+                        "payload_bytes": text_payload["payload_bytes"],
                         "summary": summary,
+                        "summary_l0": text_payload["summary_l0"],
+                        "summary_l1": text_payload["summary_l1"],
                         "importance": importance,
+                        "confidence": confidence,
+                        "tier": tier,
                         "status": status,
                         "metadata": metadata,
                         "updated_at": now,
-                    },
-                    text=text,
+                    }
                 ),
             )
-        self._record_memory_event(memory_id, "UPDATE", {"text": text, "metadata": metadata, "status": status})
+        self._record_memory_event(
+            memory_id,
+            event_type,
+            {
+                "text": text,
+                "previous_text": row.get("text"),
+                "metadata": metadata,
+                "status": status,
+                **audit_payload,
+            },
+            reason_code=reason_code,
+            source_row={
+                **row,
+                "text": text_payload["text"],
+                "metadata": metadata,
+                "status": status,
+                "importance": importance,
+                "confidence": confidence,
+                "tier": tier,
+                "updated_at": now,
+            },
+            source_table=table_name,
+            version=int(row.get("version", 1) or 1),
+        )
         updated = self.get(memory_id)
         assert updated is not None
         if status == "active":
             self._index_memory(updated)
         else:
             self._delete_memory_index(memory_id)
-        updated["_event"] = "UPDATE"
+        updated["_event"] = event_type
         warning = self._maybe_compact_memory_scope(
             scope=row["scope"],
             bundle_id=bundle_id,
@@ -867,10 +1279,18 @@ class AIMemory:
             updated["memory_overflow_warning"] = warning
         return updated
 
-    def delete(self, memory_id: str) -> dict[str, Any]:
+    def delete(self, memory_id: str, **kwargs) -> dict[str, Any]:
+        requester_scope = self._pop_request_access_scope(kwargs)
         row = self.get(memory_id)
         if row is None:
             raise ValueError(f"Memory `{memory_id}` does not exist.")
+        self._assert_resource_permission(
+            row,
+            resource_type="memory",
+            requester_scope=requester_scope,
+            permission="write",
+            action_label="delete memory",
+        )
         table_name = self._memory_table_for_id(memory_id)
         assert table_name is not None
         now = utcnow_iso()
@@ -890,8 +1310,244 @@ class AIMemory:
         return result
 
     def history(self, memory_id: str) -> list[dict[str, Any]]:
-        rows = self.db.fetch_all("SELECT * FROM memory_events WHERE memory_id = ? ORDER BY created_at ASC", (memory_id,))
+        rows = self.db.fetch_all("SELECT * FROM memory_events WHERE memory_id = ? ORDER BY created_at ASC, id ASC", (memory_id,))
         return _deserialize_rows(rows, ("payload",))
+
+    def supersede_memory(
+        self,
+        memory_id: str,
+        *,
+        text: str,
+        metadata: dict[str, Any] | None = None,
+        importance: float | None = None,
+        confidence: float | None = None,
+        tier: str | None = None,
+        summary_l0: str | None = None,
+        summary_l1: str | None = None,
+        source: str | None = None,
+        reason_code: str | None = None,
+        audit_payload: dict[str, Any] | None = None,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        owner_agent_id: str | None = None,
+        subject_type: str | None = None,
+        subject_id: str | None = None,
+        interaction_type: str | None = None,
+        platform_id: str | None = None,
+        workspace_id: str | None = None,
+        team_id: str | None = None,
+        project_id: str | None = None,
+        namespace_key: str | None = None,
+    ) -> dict[str, Any]:
+        requester_scope = self._request_access_scope(
+            user_id=user_id,
+            agent_id=agent_id,
+            owner_agent_id=owner_agent_id,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            interaction_type=interaction_type,
+            platform_id=platform_id,
+            workspace_id=workspace_id,
+            team_id=team_id,
+            project_id=project_id,
+            namespace_key=namespace_key,
+        )
+        row = self.get(memory_id)
+        if row is None:
+            raise ValueError(f"Memory `{memory_id}` does not exist.")
+        self._assert_resource_permission(
+            row,
+            resource_type="memory",
+            requester_scope=requester_scope,
+            permission="write",
+            action_label="supersede memory",
+        )
+        table_name = self._memory_table_for_id(memory_id)
+        assert table_name is not None
+        now = utcnow_iso()
+        merged_metadata = merge_metadata(row.get("metadata"), metadata)
+        created = self._remember(
+            text,
+            user_id=row.get("user_id"),
+            agent_id=row.get("agent_id"),
+            owner_agent_id=row.get("owner_agent_id") or row.get("agent_id"),
+            subject_type=row.get("subject_type"),
+            subject_id=row.get("subject_id"),
+            interaction_type=row.get("interaction_type"),
+            namespace_key=row.get("namespace_key"),
+            session_id=row.get("session_id"),
+            run_id=row.get("run_id"),
+            metadata=merged_metadata,
+            memory_type=str(row.get("memory_type") or MemoryType.SEMANTIC),
+            importance=float(importance if importance is not None else row.get("importance", 0.5) or 0.5),
+            confidence=float(confidence if confidence is not None else row.get("confidence", 0.5) or 0.5),
+            tier=str(tier or row.get("tier") or merged_metadata.get("tier") or "working"),
+            summary_l0=summary_l0,
+            summary_l1=summary_l1,
+            long_term=row.get("scope") == str(MemoryScope.LONG_TERM),
+            source=str(source or row.get("source") or "manual"),
+            version=int(row.get("version", 1) or 1) + 1,
+            supersedes_memory_id=memory_id,
+            skip_existing_lookup=True,
+            event_type="SUPERSEDE",
+            event_payload={
+                "supersedes_memory_id": memory_id,
+                "previous_text": row.get("text"),
+                "previous_version": int(row.get("version", 1) or 1),
+                **dict(audit_payload or {}),
+            },
+            reason_code=reason_code or "supersede",
+            **{key: value for key, value in requester_scope.items() if value is not None},
+        )
+        self.db.execute(
+            f"""
+            UPDATE {table_name}
+            SET status = ?, superseded_by_memory_id = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            ("superseded", created["id"], now, memory_id),
+        )
+        bundle_id = str(row.get("bundle_id") or "").strip()
+        if bundle_id:
+            self._upsert_bundle_item(
+                row["scope"],
+                bundle_id,
+                self._bundle_memory_item_payload(
+                    {
+                        **row,
+                        "status": "superseded",
+                        "superseded_by_memory_id": created["id"],
+                        "updated_at": now,
+                    }
+                ),
+            )
+        self._delete_memory_index(memory_id)
+        self.link_memory(
+            created["id"],
+            memory_id,
+            link_type="supersedes",
+            weight=1.0,
+            confidence=1.0,
+            metadata={"version_chain": True, "supersedes_memory_id": memory_id},
+            reason_code=reason_code or "supersede",
+            emit_event=False,
+        )
+        self._record_memory_event(
+            memory_id,
+            "SUPERSEDED",
+            {
+                "superseded_by_memory_id": created["id"],
+                "replacement_text": created.get("text"),
+                "replacement_version": int(created.get("version", 1) or 1),
+                **dict(audit_payload or {}),
+            },
+            reason_code=reason_code or "supersede",
+            source_row={
+                **row,
+                "status": "superseded",
+                "superseded_by_memory_id": created["id"],
+                "updated_at": now,
+            },
+            source_table=table_name,
+            version=int(row.get("version", 1) or 1),
+        )
+        created["_event"] = "SUPERSEDE"
+        return created
+
+    def link_memory(
+        self,
+        source_memory_id: str,
+        target_memory_ids: str | list[str],
+        *,
+        link_type: str = "related",
+        weight: float = 1.0,
+        confidence: float = 0.5,
+        metadata: dict[str, Any] | None = None,
+        reason_code: str | None = None,
+        emit_event: bool = True,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        owner_agent_id: str | None = None,
+        subject_type: str | None = None,
+        subject_id: str | None = None,
+        interaction_type: str | None = None,
+        platform_id: str | None = None,
+        workspace_id: str | None = None,
+        team_id: str | None = None,
+        project_id: str | None = None,
+        namespace_key: str | None = None,
+    ) -> dict[str, Any]:
+        requester_scope = self._request_access_scope(
+            user_id=user_id,
+            agent_id=agent_id,
+            owner_agent_id=owner_agent_id,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            interaction_type=interaction_type,
+            platform_id=platform_id,
+            workspace_id=workspace_id,
+            team_id=team_id,
+            project_id=project_id,
+            namespace_key=namespace_key,
+        )
+        source = self.get(source_memory_id)
+        if source is None:
+            raise ValueError(f"Memory `{source_memory_id}` does not exist.")
+        self._assert_resource_permission(
+            source,
+            resource_type="memory",
+            requester_scope=requester_scope,
+            permission="write",
+            action_label="link memory",
+        )
+        target_ids = [target_memory_ids] if isinstance(target_memory_ids, str) else [item for item in target_memory_ids if item]
+        links: list[dict[str, Any]] = []
+        for target_memory_id in target_ids:
+            target = self.get(target_memory_id)
+            if target is None:
+                raise ValueError(f"Memory `{target_memory_id}` does not exist.")
+            self._assert_resource_permission(
+                target,
+                resource_type="memory",
+                requester_scope=requester_scope,
+                permission="write",
+                action_label="link target memory",
+            )
+            links.append(
+                self._upsert_memory_link(
+                    source_memory_id,
+                    target_memory_id,
+                    link_type=link_type,
+                    weight=weight,
+                    confidence=confidence,
+                    metadata=metadata,
+                    bundle_id=source.get("bundle_id"),
+                    source_domain="memory",
+                    target_domain="memory",
+                )
+            )
+        if emit_event and links:
+            self._record_memory_event(
+                source_memory_id,
+                "LINK",
+                {
+                    "link_type": link_type,
+                    "linked_memory_ids": [item["target_memory_id"] for item in links],
+                    "weight": float(weight),
+                    "confidence": float(confidence),
+                    "metadata": dict(metadata or {}),
+                },
+                reason_code=reason_code or "link",
+                source_row=source,
+                source_table=self._memory_table_for_id(source_memory_id),
+                version=int(source.get("version", 1) or 1),
+            )
+        return {
+            "source_memory_id": source_memory_id,
+            "target_memory_ids": [item["target_memory_id"] for item in links],
+            "link_type": link_type,
+            "links": links,
+        }
 
     def memory_store(
         self,
@@ -915,6 +1571,7 @@ class AIMemory:
         self,
         query: str,
         user_id: str | None = None,
+        agent_id: str | None = None,
         owner_agent_id: str | None = None,
         subject_type: str | None = None,
         subject_id: str | None = None,
@@ -928,26 +1585,28 @@ class AIMemory:
         limit = int(kwargs.pop("limit", kwargs.pop("topK", top_k)))
         threshold = float(kwargs.pop("threshold", kwargs.pop("searchThreshold", search_threshold)))
         filters = kwargs.pop("filters", None)
+        platform_id = kwargs.pop("platform_id", None)
+        workspace_id = kwargs.pop("workspace_id", None)
+        team_id = kwargs.pop("team_id", None)
+        project_id = kwargs.pop("project_id", None)
+        namespace_key = kwargs.pop("namespace_key", None)
         namespace_filter = self._namespace_filter_value(
             user_id=user_id,
             owner_agent_id=owner_agent_id,
             subject_type=subject_type,
             subject_id=subject_id,
             interaction_type=interaction_type,
-            platform_id=kwargs.pop("platform_id", None),
-            workspace_id=kwargs.pop("workspace_id", None),
-            team_id=kwargs.pop("team_id", None),
-            project_id=kwargs.pop("project_id", None),
-            namespace_key=kwargs.pop("namespace_key", None),
+            platform_id=platform_id,
+            workspace_id=workspace_id,
+            team_id=team_id,
+            project_id=project_id,
+            namespace_key=namespace_key,
         )
         sql_filters = ["status = 'active'"]
         params: list[Any] = []
         if user_id:
             sql_filters.append("user_id = ?")
             params.append(user_id)
-        if owner_agent_id:
-            sql_filters.append("(owner_agent_id = ? OR (owner_agent_id IS NULL AND agent_id = ?))")
-            params.extend([owner_agent_id, owner_agent_id])
         if subject_type:
             sql_filters.append("(subject_type = ? OR subject_type IS NULL)")
             params.append(subject_type)
@@ -976,6 +1635,23 @@ class AIMemory:
                     for row in rows
                     if row.get("scope") == str(MemoryScope.LONG_TERM) or row.get("session_id") == session_id
                 ]
+        rows = self._filter_accessible_rows(
+            rows,
+            resource_type="memory",
+            requester_scope=self._request_access_scope(
+                user_id=user_id,
+                agent_id=agent_id,
+                owner_agent_id=owner_agent_id,
+                subject_type=subject_type,
+                subject_id=subject_id,
+                interaction_type=interaction_type,
+                platform_id=platform_id,
+                workspace_id=workspace_id,
+                team_id=team_id,
+                project_id=project_id,
+                namespace_key=namespace_filter,
+            ),
+        )
         index_rows, semantic_rows = self._memory_index_payloads([row["id"] for row in rows])
         enriched_rows: list[dict[str, Any]] = []
         for row in rows:
@@ -1095,6 +1771,26 @@ class AIMemory:
         limit: int = 10,
         threshold: float = 0.0,
     ) -> dict[str, Any]:
+        recall_plan = self.plan_recall(
+            query,
+            user_id=user_id,
+            session_id=session_id,
+            agent_id=agent_id,
+            owner_agent_id=owner_agent_id,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            interaction_type=interaction_type,
+            platform_id=platform_id,
+            workspace_id=workspace_id,
+            team_id=team_id,
+            project_id=project_id,
+            namespace_key=namespace_key,
+            run_id=run_id,
+            actor_id=actor_id,
+            role=role,
+            limit=limit,
+            domains=domains,
+        )
         searchers: dict[str, Callable[[], dict[str, Any]]] = {
             "memory": lambda: self.memory_search(
                 query,
@@ -1185,8 +1881,43 @@ class AIMemory:
                 limit=max(limit, self.config.memory_policy.auxiliary_search_limit),
                 threshold=threshold,
             ),
+            "context": lambda: self.search_context_artifacts(
+                query,
+                owner_agent_id=owner_agent_id or agent_id,
+                session_id=session_id,
+                run_id=run_id,
+                platform_id=platform_id,
+                workspace_id=workspace_id,
+                team_id=team_id,
+                project_id=project_id,
+                namespace_key=namespace_key,
+                limit=max(limit, self.config.memory_policy.auxiliary_search_limit),
+                threshold=threshold,
+            ),
+            "handoff": lambda: self.search_handoff_packs(
+                query,
+                owner_agent_id=owner_agent_id or agent_id,
+                source_agent_id=owner_agent_id or agent_id,
+                source_session_id=session_id,
+                source_run_id=run_id,
+                platform_id=platform_id,
+                workspace_id=workspace_id,
+                team_id=team_id,
+                project_id=project_id,
+                namespace_key=namespace_key,
+                limit=max(limit, self.config.memory_policy.auxiliary_search_limit),
+                threshold=threshold,
+            ),
+            "reflection": lambda: self.search_reflection_memories(
+                query,
+                owner_agent_id=owner_agent_id or agent_id,
+                session_id=session_id,
+                run_id=run_id,
+                limit=max(limit, self.config.memory_policy.auxiliary_search_limit),
+                threshold=threshold,
+            ),
         }
-        selected_domains = domains or ["memory", "interaction", "knowledge", "skill", "archive"]
+        selected_domains = list(dict.fromkeys(domains or recall_plan.get("selected_domains") or ["memory", "interaction", "knowledge", "skill", "archive"]))
         merged: list[dict[str, Any]] = []
         for domain in selected_domains:
             if domain not in searchers:
@@ -1201,7 +1932,7 @@ class AIMemory:
             merged = filter_records(merged, filters)
         merged.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
         merged = mmr_rerank(merged, lambda_value=self.config.memory_policy.diversity_lambda, limit=limit)
-        return {"results": merged[:limit]}
+        return {"results": merged[:limit], "plan": recall_plan}
 
     def explain_recall(self, query: str, **kwargs) -> dict[str, Any]:
         result = self.query(query, **kwargs)
@@ -1213,17 +1944,2294 @@ class AIMemory:
                 "diversity_lambda": self.config.memory_policy.diversity_lambda,
                 "scan_limit": self.config.memory_policy.search_scan_limit,
             },
+            "plan": result.get("plan"),
             "results": result["results"],
+        }
+
+    def _deserialize_handoff_pack(self, row: dict[str, Any] | None) -> dict[str, Any] | None:
+        item = _deserialize_row(row, ("metadata", "highlights", "open_tasks", "constraints", "source_refs"))
+        if item is None:
+            return None
+        item["text"] = "\n".join(
+            part
+            for part in [
+                str(item.get("summary") or "").strip(),
+                "; ".join(str(value).strip() for value in list(item.get("highlights") or []) if str(value).strip()),
+                "; ".join(str(value).strip() for value in list(item.get("open_tasks") or []) if str(value).strip()),
+                "; ".join(str(value).strip() for value in list(item.get("constraints") or []) if str(value).strip()),
+            ]
+            if part
+        ).strip()
+        return item
+
+    def _deserialize_context_artifact(self, row: dict[str, Any] | None) -> dict[str, Any] | None:
+        return _deserialize_row(row, ("metadata", "source_refs"))
+
+    def _deserialize_reflection_memory(self, row: dict[str, Any] | None) -> dict[str, Any] | None:
+        item = _deserialize_row(row, ("metadata", "source_refs"))
+        if item is None:
+            return None
+        item["text"] = "\n".join(part for part in [str(item.get("summary") or "").strip(), str(item.get("details") or "").strip()] if part).strip()
+        return item
+
+    def _deserialize_compression_job(self, row: dict[str, Any] | None) -> dict[str, Any] | None:
+        return _deserialize_row(row, ("request_payload",))
+
+    def _compression_records_from_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        for item in rows:
+            text = str(item.get("text") or item.get("content") or item.get("summary") or item.get("details") or "").strip()
+            if not text:
+                continue
+            record_id = str(item.get("id") or item.get("record_id") or fingerprint(text)).strip()
+            metadata = {
+                key: item.get(key)
+                for key in (
+                    "domain",
+                    "title",
+                    "name",
+                    "session_id",
+                    "run_id",
+                    "owner_agent_id",
+                    "subject_type",
+                    "subject_id",
+                    "interaction_type",
+                    "namespace_key",
+                    "relative_path",
+                )
+                if item.get(key) is not None
+            }
+            if item.get("metadata"):
+                metadata["source_metadata"] = item.get("metadata")
+            records.append(
+                {
+                    "id": record_id,
+                    "text": text,
+                    "score": float(item.get("score", 0.55) or 0.0),
+                    "metadata": metadata,
+                }
+            )
+        return records
+
+    def _source_refs_from_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        refs: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in rows:
+            ref_id = str(item.get("id") or item.get("record_id") or "").strip()
+            if not ref_id or ref_id in seen:
+                continue
+            seen.add(ref_id)
+            refs.append(
+                {
+                    "id": ref_id,
+                    "domain": item.get("domain"),
+                    "title": item.get("title") or item.get("name"),
+                    "score": round(float(item.get("score", 0.0) or 0.0), 6),
+                    "session_id": item.get("session_id"),
+                    "run_id": item.get("run_id"),
+                }
+            )
+        return refs
+
+    def _dedupe_compression_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        deduped: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in rows:
+            key = str(item.get("id") or item.get("record_id") or "").strip()
+            if not key:
+                text = str(item.get("text") or item.get("content") or item.get("summary") or "").strip()
+                if not text:
+                    continue
+                key = fingerprint(text)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+        return deduped
+
+    def _snapshot_text(self, snapshot: dict[str, Any] | None) -> str:
+        if snapshot is None:
+            return ""
+        lines: list[str] = []
+        summary = str(snapshot.get("summary") or "").strip()
+        if summary:
+            lines.append(summary)
+        for label, values in (
+            ("Constraints", list(snapshot.get("constraints") or [])),
+            ("Resolved", list(snapshot.get("resolved_items") or [])),
+            ("Unresolved", list(snapshot.get("unresolved_items") or [])),
+            ("Next Actions", list(snapshot.get("next_actions") or [])),
+        ):
+            cleaned = [str(item).strip() for item in values if str(item).strip()]
+            if cleaned:
+                lines.append(f"{label}: " + "; ".join(cleaned))
+        return "\n".join(lines).strip()
+
+    def _format_compression_content(self, title: str, payload: dict[str, Any]) -> str:
+        lines: list[str] = []
+        summary = str(payload.get("summary") or "").strip()
+        if summary:
+            lines.extend([f"## {title}", summary])
+        sections = (
+            ("facts", "Facts"),
+            ("constraints", "Constraints"),
+            ("steps", "Recommended Steps"),
+            ("risks", "Risks"),
+            ("highlights", "Highlights"),
+            ("supporting_passages", "Supporting Passages"),
+        )
+        for key, heading in sections:
+            values = [str(item).strip() for item in list(payload.get(key) or []) if str(item).strip()]
+            if not values:
+                continue
+            if lines:
+                lines.append("")
+            lines.append(f"## {heading}")
+            lines.extend([f"- {item}" for item in values])
+        return "\n".join(lines).strip() or summary
+
+    def _normalize_external_compression(
+        self,
+        value: CompressionResult | dict[str, Any] | str,
+        *,
+        records: list[dict[str, Any]],
+        budget_chars: int,
+        domain_hint: str,
+    ) -> dict[str, Any]:
+        if isinstance(value, CompressionResult):
+            return value.as_dict()
+        if isinstance(value, str):
+            return compress_records(
+                [{"id": "external", "text": value, "score": 1.0}],
+                domain_hint=domain_hint,
+                budget_chars=budget_chars,
+                diversity_lambda=self.config.memory_policy.diversity_lambda,
+                policy=self.config.memory_policy,
+            ).as_dict()
+        if not isinstance(value, dict):
+            raise TypeError("platform compression result must be CompressionResult, dict, or str")
+        return {
+            "summary": str(value.get("summary") or ""),
+            "highlights": [str(item).strip() for item in list(value.get("highlights") or []) if str(item).strip()],
+            "kept_ids": [str(item).strip() for item in list(value.get("kept_ids") or []) if str(item).strip()],
+            "estimated_tokens": int(value.get("estimated_tokens") or estimate_tokens(str(value.get("summary") or ""))),
+            "source_count": int(value.get("source_count") or len(records)),
+            "facts": [str(item).strip() for item in list(value.get("facts") or []) if str(item).strip()],
+            "constraints": [str(item).strip() for item in list(value.get("constraints") or []) if str(item).strip()],
+            "steps": [str(item).strip() for item in list(value.get("steps") or []) if str(item).strip()],
+            "risks": [str(item).strip() for item in list(value.get("risks") or []) if str(item).strip()],
+            "selected_unit_ids": [str(item).strip() for item in list(value.get("selected_unit_ids") or []) if str(item).strip()],
+            "coverage_score": float(value.get("coverage_score") or 0.0),
+            "redundancy_score": float(value.get("redundancy_score") or 0.0),
+            "metadata": dict(value.get("metadata") or {}),
+            "evidence_spans": [dict(item) for item in list(value.get("evidence_spans") or []) if isinstance(item, dict)],
+            "supporting_passages": [str(item).strip() for item in list(value.get("supporting_passages") or []) if str(item).strip()],
+        }
+
+    def _start_compression_job(
+        self,
+        *,
+        job_type: str,
+        session_id: str | None,
+        run_id: str | None,
+        owner_agent_id: str | None,
+        budget_chars: int,
+        scope: dict[str, Any],
+        records: list[dict[str, Any]],
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        job_id = make_id("cmpjob")
+        now = utcnow_iso()
+        request_payload = {
+            "job_type": job_type,
+            "budget_chars": int(budget_chars),
+            "scope": dict(scope),
+            "source_count": len(records),
+            "metadata": dict(metadata or {}),
+        }
+        self.db.execute(
+            """
+            INSERT INTO compression_jobs(
+                id, job_type, session_id, run_id, owner_agent_id, status, provider, model, request_payload,
+                result_artifact_id, error, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                job_id,
+                job_type,
+                session_id,
+                run_id,
+                owner_agent_id,
+                "running",
+                None,
+                None,
+                json_dumps(request_payload),
+                None,
+                None,
+                now,
+                now,
+            ),
+        )
+        job = self.get_compression_job(job_id)
+        assert job is not None
+        return job
+
+    def _finish_compression_job(
+        self,
+        job_id: str,
+        *,
+        status: str,
+        provider: str | None,
+        model: str | None,
+        result_artifact_id: str | None,
+        error: str | None,
+    ) -> dict[str, Any]:
+        now = utcnow_iso()
+        self.db.execute(
+            """
+            UPDATE compression_jobs
+            SET status = ?, provider = ?, model = ?, result_artifact_id = ?, error = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (status, provider, model, result_artifact_id, error, now, job_id),
+        )
+        job = self.get_compression_job(job_id)
+        assert job is not None
+        return job
+
+    def _run_contextual_compression(
+        self,
+        *,
+        job_type: str,
+        records: list[dict[str, Any]],
+        scope: dict[str, Any],
+        budget_chars: int,
+        use_platform_llm: bool,
+        metadata: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], str, str | None, str | None, str | None]:
+        if use_platform_llm and self.platform_llm is not None:
+            provider = getattr(self.platform_llm, "provider", None)
+            model = getattr(self.platform_llm, "model", None)
+            try:
+                external = self.platform_llm.compress(
+                    task_type=job_type,
+                    records=list(records),
+                    budget_chars=int(budget_chars),
+                    scope=dict(scope),
+                    metadata=dict(metadata or {}),
+                )
+                normalized = self._normalize_external_compression(
+                    external,
+                    records=records,
+                    budget_chars=budget_chars,
+                    domain_hint=job_type,
+                )
+                if isinstance(external, dict):
+                    provider = str(external.get("provider") or provider or "platform").strip() or "platform"
+                    model = str(external.get("model") or model or "").strip() or model
+                return (
+                    {
+                        "triggered": True,
+                        "domain": job_type,
+                        "threshold_chars": 0,
+                        "budget_chars": int(budget_chars),
+                        "total_chars": sum(len(str(item.get("text") or "")) for item in records),
+                        **normalized,
+                        "provider": provider or "platform",
+                    },
+                    "completed",
+                    provider or "platform",
+                    model,
+                    None,
+                )
+            except Exception as exc:
+                local = self.compress_domain_records(
+                    job_type,
+                    records,
+                    scope=scope,
+                    threshold_chars=0,
+                    budget_chars=budget_chars,
+                    force=True,
+                )
+                return local, "degraded", provider or "platform", model, str(exc)
+        local = self.compress_domain_records(
+            job_type,
+            records,
+            scope=scope,
+            threshold_chars=0,
+            budget_chars=budget_chars,
+            force=True,
+        )
+        status = "completed" if not use_platform_llm else "degraded"
+        error = None if not use_platform_llm else "platform_llm_unavailable"
+        return local, status, local.get("provider"), None, error
+
+    def _create_context_artifact(
+        self,
+        *,
+        artifact_type: str,
+        session_id: str | None,
+        run_id: str | None,
+        owner_agent_id: str | None,
+        target_agent_id: str | None,
+        namespace_key: str | None,
+        provider: str | None,
+        model: str | None,
+        budget_chars: int | None,
+        source_refs: list[dict[str, Any]] | None,
+        content: str,
+        scope_metadata: dict[str, Any] | None = None,
+        visibility: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        expires_at: str | None = None,
+    ) -> dict[str, Any]:
+        artifact_id = make_id("ctxart")
+        now = utcnow_iso()
+        merged_metadata = merge_metadata(scope_metadata, metadata)
+        if visibility:
+            merged_metadata["visibility"] = visibility
+        self.db.execute(
+            """
+            INSERT INTO context_artifacts(
+                id, artifact_type, session_id, run_id, owner_agent_id, target_agent_id, namespace_key,
+                provider, model, budget_chars, source_refs, content, metadata, created_at, expires_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                artifact_id,
+                artifact_type,
+                session_id,
+                run_id,
+                owner_agent_id,
+                target_agent_id,
+                namespace_key,
+                provider,
+                model,
+                budget_chars,
+                json_dumps(source_refs or []),
+                content,
+                json_dumps(merged_metadata),
+                now,
+                expires_at,
+            ),
+        )
+        artifact = self.get_context_artifact(artifact_id)
+        assert artifact is not None
+        self._index_context_artifact(artifact)
+        return artifact
+
+    def _create_handoff_pack_row(
+        self,
+        *,
+        source_run_id: str | None,
+        source_session_id: str | None,
+        source_agent_id: str | None,
+        target_agent_id: str,
+        namespace_key: str | None,
+        visibility: str,
+        summary: str,
+        highlights: list[str],
+        open_tasks: list[str],
+        constraints: list[str],
+        source_refs: list[dict[str, Any]],
+        scope_metadata: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+        expires_at: str | None = None,
+    ) -> dict[str, Any]:
+        handoff_id = make_id("handoff")
+        now = utcnow_iso()
+        merged_metadata = merge_metadata(scope_metadata, metadata)
+        merged_metadata["visibility"] = visibility
+        self.db.execute(
+            """
+            INSERT INTO handoff_packs(
+                id, source_run_id, source_session_id, source_agent_id, target_agent_id, namespace_key, visibility,
+                summary, highlights, open_tasks, constraints, source_refs, metadata, created_at, expires_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                handoff_id,
+                source_run_id,
+                source_session_id,
+                source_agent_id,
+                target_agent_id,
+                namespace_key,
+                visibility,
+                summary,
+                json_dumps(highlights),
+                json_dumps(open_tasks),
+                json_dumps(constraints),
+                json_dumps(source_refs),
+                json_dumps(merged_metadata),
+                now,
+                expires_at,
+            ),
+        )
+        handoff = self.get_handoff_pack(handoff_id)
+        assert handoff is not None
+        self._index_handoff_pack(handoff)
+        return handoff
+
+    def _create_reflection_memory_row(
+        self,
+        *,
+        owner_agent_id: str | None,
+        session_id: str | None,
+        run_id: str | None,
+        reflection_type: str,
+        summary: str,
+        details: str,
+        confidence: float,
+        decay_half_life_days: float | None,
+        source_refs: list[dict[str, Any]],
+        scope_metadata: dict[str, Any] | None = None,
+        visibility: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        reflection_id = make_id("refl")
+        now = utcnow_iso()
+        merged_metadata = merge_metadata(scope_metadata, metadata)
+        if visibility:
+            merged_metadata["visibility"] = visibility
+        self.db.execute(
+            """
+            INSERT INTO reflection_memories(
+                id, owner_agent_id, session_id, run_id, reflection_type, summary, details, confidence,
+                decay_half_life_days, source_refs, metadata, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                reflection_id,
+                owner_agent_id,
+                session_id,
+                run_id,
+                reflection_type,
+                summary,
+                details,
+                confidence,
+                decay_half_life_days,
+                json_dumps(source_refs),
+                json_dumps(merged_metadata),
+                now,
+                now,
+            ),
+        )
+        reflection = self.get_reflection_memory(reflection_id)
+        assert reflection is not None
+        self._index_reflection_memory(reflection)
+        return reflection
+
+    def _reflection_types(self, mode: str | None) -> list[str]:
+        raw = str(mode or "derived+invariant").replace(",", "+").replace("|", "+")
+        items = [part.strip() for part in raw.split("+") if part.strip()]
+        if not items:
+            items = ["derived", "invariant"]
+        if "all" in items:
+            items = ["derived", "invariant", "failure_pattern", "tool_lesson"]
+        allowed = {"derived", "invariant", "failure_pattern", "tool_lesson"}
+        return [item for item in dict.fromkeys(items) if item in allowed]
+
+    def _reflection_payload_for_type(
+        self,
+        reflection_type: str,
+        compression: dict[str, Any],
+    ) -> tuple[str, str, float]:
+        summary = str(compression.get("summary") or "").strip()
+        facts = [str(item).strip() for item in list(compression.get("facts") or []) if str(item).strip()]
+        constraints = [str(item).strip() for item in list(compression.get("constraints") or []) if str(item).strip()]
+        steps = [str(item).strip() for item in list(compression.get("steps") or []) if str(item).strip()]
+        risks = [str(item).strip() for item in list(compression.get("risks") or []) if str(item).strip()]
+        highlights = [str(item).strip() for item in list(compression.get("highlights") or []) if str(item).strip()]
+        if reflection_type == "invariant":
+            chosen_summary = facts[0] if facts else (constraints[0] if constraints else summary)
+            details = self._format_compression_content(
+                "Invariant Reflection",
+                {"summary": chosen_summary, "facts": facts, "constraints": constraints, "highlights": highlights},
+            )
+            return chosen_summary or summary, details, 0.78
+        if reflection_type == "failure_pattern":
+            chosen_summary = risks[0] if risks else (constraints[0] if constraints else summary)
+            details = self._format_compression_content(
+                "Failure Pattern",
+                {"summary": chosen_summary, "risks": risks, "constraints": constraints, "supporting_passages": compression.get("supporting_passages")},
+            )
+            return chosen_summary or summary, details, 0.66
+        if reflection_type == "tool_lesson":
+            chosen_summary = steps[0] if steps else (highlights[0] if highlights else summary)
+            details = self._format_compression_content(
+                "Tool Lesson",
+                {"summary": chosen_summary, "steps": steps, "highlights": highlights, "supporting_passages": compression.get("supporting_passages")},
+            )
+            return chosen_summary or summary, details, 0.69
+        details = self._format_compression_content(
+            "Derived Reflection",
+            {"summary": summary, "facts": facts, "steps": steps, "highlights": highlights, "risks": risks},
+        )
+        return summary, details, 0.72
+
+    def get_context_artifact(
+        self,
+        artifact_id: str,
+        *,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        owner_agent_id: str | None = None,
+        subject_type: str | None = None,
+        subject_id: str | None = None,
+        interaction_type: str | None = None,
+        platform_id: str | None = None,
+        workspace_id: str | None = None,
+        team_id: str | None = None,
+        project_id: str | None = None,
+        namespace_key: str | None = None,
+    ) -> dict[str, Any] | None:
+        item = self._deserialize_context_artifact(self.db.fetch_one("SELECT * FROM context_artifacts WHERE id = ?", (artifact_id,)))
+        if item is None:
+            return None
+        requester_scope = self._request_access_scope(
+            user_id=user_id,
+            agent_id=agent_id,
+            owner_agent_id=owner_agent_id,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            interaction_type=interaction_type,
+            platform_id=platform_id,
+            workspace_id=workspace_id,
+            team_id=team_id,
+            project_id=project_id,
+            namespace_key=namespace_key,
+        )
+        if any(value is not None for value in requester_scope.values()):
+            return item if self._is_resource_visible(item, resource_type="context", requester_scope=requester_scope) else None
+        return item
+
+    def list_context_artifacts(
+        self,
+        *,
+        artifact_type: str | None = None,
+        user_id: str | None = None,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        agent_id: str | None = None,
+        owner_agent_id: str | None = None,
+        target_agent_id: str | None = None,
+        subject_type: str | None = None,
+        subject_id: str | None = None,
+        interaction_type: str | None = None,
+        platform_id: str | None = None,
+        workspace_id: str | None = None,
+        team_id: str | None = None,
+        project_id: str | None = None,
+        namespace_key: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+        **_unused: Any,
+    ) -> dict[str, Any]:
+        filters = ["1 = 1"]
+        params: list[Any] = []
+        namespace_filter, _ = self._context_scope_filters(
+            user_id=user_id,
+            owner_agent_id=owner_agent_id,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            interaction_type=interaction_type,
+            session_id=session_id,
+            run_id=run_id,
+            platform_id=platform_id,
+            workspace_id=workspace_id,
+            team_id=team_id,
+            project_id=project_id,
+            namespace_key=namespace_key,
+        )
+        for field, value in (
+            ("artifact_type", artifact_type),
+            ("session_id", session_id),
+            ("run_id", run_id),
+            ("namespace_key", namespace_filter),
+        ):
+            if value:
+                filters.append(f"{field} = ?")
+                params.append(value)
+        if target_agent_id:
+            filters.append("(target_agent_id = ? OR target_agent_id IS NULL)")
+            params.append(target_agent_id)
+        rows = [
+            item
+            for item in (
+                self._deserialize_context_artifact(row)
+                for row in self.db.fetch_all(
+                    f"SELECT * FROM context_artifacts WHERE {' AND '.join(filters)} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                    tuple(params + [limit, offset]),
+                )
+            )
+            if item is not None
+        ]
+        rows = self._filter_accessible_rows(
+            rows,
+            resource_type="context",
+            requester_scope=self._request_access_scope(
+                user_id=user_id,
+                agent_id=agent_id,
+                owner_agent_id=owner_agent_id,
+                subject_type=subject_type,
+                subject_id=subject_id,
+                interaction_type=interaction_type,
+                platform_id=platform_id,
+                workspace_id=workspace_id,
+                team_id=team_id,
+                project_id=project_id,
+                namespace_key=namespace_key or namespace_filter,
+            ),
+        )
+        return {"results": rows, "count": len(rows), "limit": limit, "offset": offset}
+
+    def get_handoff_pack(
+        self,
+        handoff_id: str,
+        *,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        owner_agent_id: str | None = None,
+        subject_type: str | None = None,
+        subject_id: str | None = None,
+        interaction_type: str | None = None,
+        platform_id: str | None = None,
+        workspace_id: str | None = None,
+        team_id: str | None = None,
+        project_id: str | None = None,
+        namespace_key: str | None = None,
+    ) -> dict[str, Any] | None:
+        item = self._deserialize_handoff_pack(self.db.fetch_one("SELECT * FROM handoff_packs WHERE id = ?", (handoff_id,)))
+        if item is None:
+            return None
+        requester_scope = self._request_access_scope(
+            user_id=user_id,
+            agent_id=agent_id,
+            owner_agent_id=owner_agent_id,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            interaction_type=interaction_type,
+            platform_id=platform_id,
+            workspace_id=workspace_id,
+            team_id=team_id,
+            project_id=project_id,
+            namespace_key=namespace_key,
+        )
+        if any(value is not None for value in requester_scope.values()):
+            return item if self._is_resource_visible(item, resource_type="handoff", requester_scope=requester_scope) else None
+        return item
+
+    def list_handoff_packs(
+        self,
+        *,
+        user_id: str | None = None,
+        source_run_id: str | None = None,
+        source_session_id: str | None = None,
+        source_agent_id: str | None = None,
+        agent_id: str | None = None,
+        owner_agent_id: str | None = None,
+        target_agent_id: str | None = None,
+        subject_type: str | None = None,
+        subject_id: str | None = None,
+        interaction_type: str | None = None,
+        platform_id: str | None = None,
+        workspace_id: str | None = None,
+        team_id: str | None = None,
+        project_id: str | None = None,
+        namespace_key: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+        **_unused: Any,
+    ) -> dict[str, Any]:
+        filters = ["1 = 1"]
+        params: list[Any] = []
+        namespace_filter, _ = self._context_scope_filters(
+            user_id=user_id,
+            owner_agent_id=owner_agent_id or source_agent_id,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            interaction_type=interaction_type,
+            session_id=source_session_id,
+            run_id=source_run_id,
+            platform_id=platform_id,
+            workspace_id=workspace_id,
+            team_id=team_id,
+            project_id=project_id,
+            namespace_key=namespace_key,
+        )
+        for field, value in (
+            ("source_run_id", source_run_id),
+            ("source_session_id", source_session_id),
+            ("source_agent_id", source_agent_id),
+            ("namespace_key", namespace_filter),
+        ):
+            if value:
+                filters.append(f"{field} = ?")
+                params.append(value)
+        if target_agent_id:
+            filters.append("(target_agent_id = ? OR target_agent_id IS NULL)")
+            params.append(target_agent_id)
+        rows = [
+            item
+            for item in (
+                self._deserialize_handoff_pack(row)
+                for row in self.db.fetch_all(
+                    f"SELECT * FROM handoff_packs WHERE {' AND '.join(filters)} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                    tuple(params + [limit, offset]),
+                )
+            )
+            if item is not None
+        ]
+        rows = self._filter_accessible_rows(
+            rows,
+            resource_type="handoff",
+            requester_scope=self._request_access_scope(
+                user_id=user_id,
+                agent_id=agent_id,
+                owner_agent_id=owner_agent_id,
+                subject_type=subject_type,
+                subject_id=subject_id,
+                interaction_type=interaction_type,
+                platform_id=platform_id,
+                workspace_id=workspace_id,
+                team_id=team_id,
+                project_id=project_id,
+                namespace_key=namespace_key or namespace_filter,
+            ),
+        )
+        return {"results": rows, "count": len(rows), "limit": limit, "offset": offset}
+
+    def get_reflection_memory(
+        self,
+        reflection_id: str,
+        *,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        owner_agent_id: str | None = None,
+        subject_type: str | None = None,
+        subject_id: str | None = None,
+        interaction_type: str | None = None,
+        platform_id: str | None = None,
+        workspace_id: str | None = None,
+        team_id: str | None = None,
+        project_id: str | None = None,
+        namespace_key: str | None = None,
+    ) -> dict[str, Any] | None:
+        item = self._deserialize_reflection_memory(self.db.fetch_one("SELECT * FROM reflection_memories WHERE id = ?", (reflection_id,)))
+        if item is None:
+            return None
+        requester_scope = self._request_access_scope(
+            user_id=user_id,
+            agent_id=agent_id,
+            owner_agent_id=owner_agent_id,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            interaction_type=interaction_type,
+            platform_id=platform_id,
+            workspace_id=workspace_id,
+            team_id=team_id,
+            project_id=project_id,
+            namespace_key=namespace_key,
+        )
+        if any(value is not None for value in requester_scope.values()):
+            return item if self._is_resource_visible(item, resource_type="reflection", requester_scope=requester_scope) else None
+        return item
+
+    def list_reflection_memories(
+        self,
+        *,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        owner_agent_id: str | None = None,
+        subject_type: str | None = None,
+        subject_id: str | None = None,
+        interaction_type: str | None = None,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        reflection_type: str | None = None,
+        platform_id: str | None = None,
+        workspace_id: str | None = None,
+        team_id: str | None = None,
+        project_id: str | None = None,
+        namespace_key: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+        **_unused: Any,
+    ) -> dict[str, Any]:
+        filters = ["1 = 1"]
+        params: list[Any] = []
+        for field, value in (
+            ("session_id", session_id),
+            ("run_id", run_id),
+            ("reflection_type", reflection_type),
+        ):
+            if value:
+                filters.append(f"{field} = ?")
+                params.append(value)
+        rows = [
+            item
+            for item in (
+                self._deserialize_reflection_memory(row)
+                for row in self.db.fetch_all(
+                    f"SELECT * FROM reflection_memories WHERE {' AND '.join(filters)} ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                    tuple(params + [limit, offset]),
+                )
+            )
+            if item is not None
+        ]
+        rows = self._filter_accessible_rows(
+            rows,
+            resource_type="reflection",
+            requester_scope=self._request_access_scope(
+                user_id=user_id,
+                agent_id=agent_id,
+                owner_agent_id=owner_agent_id,
+                subject_type=subject_type,
+                subject_id=subject_id,
+                interaction_type=interaction_type,
+                platform_id=platform_id,
+                workspace_id=workspace_id,
+                team_id=team_id,
+                project_id=project_id,
+                namespace_key=namespace_key,
+            ),
+        )
+        return {"results": rows, "count": len(rows), "limit": limit, "offset": offset}
+
+    def get_compression_job(self, job_id: str) -> dict[str, Any] | None:
+        return self._deserialize_compression_job(self.db.fetch_one("SELECT * FROM compression_jobs WHERE id = ?", (job_id,)))
+
+    def get_scope_acl_rule(self, rule_id: str, **kwargs: Any) -> dict[str, Any] | None:
+        rule = _deserialize_row(self.db.fetch_one("SELECT * FROM scope_acl_rules WHERE id = ?", (rule_id,)), ("metadata",))
+        if rule is None:
+            return None
+        requester_scope = self._pop_request_access_scope(kwargs)
+        self._assert_namespace_permission(
+            namespace_key=rule.get("namespace_key"),
+            resource_type=str(rule.get("resource_type") or "all"),
+            resource_scope=str(rule.get("resource_scope") or "all"),
+            requester_scope=requester_scope,
+            permission="manage",
+            action_label="read ACL rule",
+        )
+        return rule
+
+    def list_scope_acl_rules(
+        self,
+        *,
+        namespace_key: str | None = None,
+        resource_type: str | None = None,
+        resource_scope: str | None = None,
+        principal_type: str | None = None,
+        principal_id: str | None = None,
+        permission: str | None = None,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        owner_agent_id: str | None = None,
+        subject_type: str | None = None,
+        subject_id: str | None = None,
+        interaction_type: str | None = None,
+        platform_id: str | None = None,
+        workspace_id: str | None = None,
+        team_id: str | None = None,
+        project_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+        **_unused: Any,
+    ) -> dict[str, Any]:
+        requester_scope = self._request_access_scope(
+            user_id=user_id,
+            agent_id=agent_id or owner_agent_id,
+            owner_agent_id=agent_id or owner_agent_id,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            interaction_type=interaction_type,
+            platform_id=platform_id,
+            workspace_id=workspace_id,
+            team_id=team_id,
+            project_id=project_id,
+            namespace_key=namespace_key,
+        )
+        resolved_namespace = namespace_key or self._namespace_filter_value(
+            user_id=user_id,
+            agent_id=agent_id,
+            owner_agent_id=owner_agent_id,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            interaction_type=interaction_type,
+            platform_id=platform_id,
+            workspace_id=workspace_id,
+            team_id=team_id,
+            project_id=project_id,
+        )
+        self._assert_namespace_permission(
+            namespace_key=resolved_namespace,
+            resource_type=resource_type or "all",
+            resource_scope=resource_scope or "all",
+            requester_scope=requester_scope,
+            permission="manage",
+            action_label="list ACL rules",
+        )
+        filters = ["1 = 1"]
+        params: list[Any] = []
+        for field, value in (
+            ("namespace_key", resolved_namespace),
+            ("resource_type", resource_type),
+            ("resource_scope", resource_scope),
+            ("principal_type", principal_type),
+            ("principal_id", principal_id),
+            ("permission", permission),
+        ):
+            if value:
+                filters.append(f"{field} = ?")
+                params.append(value)
+        rows = _deserialize_rows(
+            self.db.fetch_all(
+                f"SELECT * FROM scope_acl_rules WHERE {' AND '.join(filters)} ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                tuple(params + [limit, offset]),
+            ),
+            ("metadata",),
+        )
+        return {"results": rows, "count": len(rows), "limit": limit, "offset": offset}
+
+    def grant_scope_acl_rule(
+        self,
+        *,
+        namespace_key: str | None = None,
+        resource_type: str = "all",
+        resource_scope: str = "all",
+        principal_type: str,
+        principal_id: str,
+        permission: str = "read",
+        metadata: dict[str, Any] | None = None,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        owner_agent_id: str | None = None,
+        subject_type: str | None = None,
+        subject_id: str | None = None,
+        interaction_type: str | None = None,
+        platform_id: str | None = None,
+        workspace_id: str | None = None,
+        team_id: str | None = None,
+        project_id: str | None = None,
+    ) -> dict[str, Any]:
+        requester_scope = self._request_access_scope(
+            user_id=user_id,
+            agent_id=agent_id or owner_agent_id,
+            owner_agent_id=agent_id or owner_agent_id,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            interaction_type=interaction_type,
+            platform_id=platform_id,
+            workspace_id=workspace_id,
+            team_id=team_id,
+            project_id=project_id,
+            namespace_key=namespace_key,
+        )
+        resolved_namespace = namespace_key or self._namespace_filter_value(
+            user_id=user_id,
+            agent_id=agent_id,
+            owner_agent_id=owner_agent_id,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            interaction_type=interaction_type,
+            platform_id=platform_id,
+            workspace_id=workspace_id,
+            team_id=team_id,
+            project_id=project_id,
+        )
+        if not resolved_namespace:
+            raise ValueError("`namespace_key` is required when scope cannot be resolved.")
+        self._assert_namespace_permission(
+            namespace_key=resolved_namespace,
+            resource_type=resource_type,
+            resource_scope=resource_scope,
+            requester_scope=requester_scope,
+            permission="manage",
+            action_label="grant ACL rule",
+        )
+        existing = self.db.fetch_one(
+            """
+            SELECT * FROM scope_acl_rules
+            WHERE namespace_key = ? AND resource_type = ? AND resource_scope = ?
+              AND principal_type = ? AND principal_id = ? AND permission = ?
+            LIMIT 1
+            """,
+            (resolved_namespace, resource_type, resource_scope, principal_type, principal_id, permission),
+        )
+        now = utcnow_iso()
+        if existing is None:
+            rule_id = make_id("acl")
+            self.db.execute(
+                """
+                INSERT INTO scope_acl_rules(
+                    id, namespace_key, resource_type, resource_scope, principal_type, principal_id, permission, metadata, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    rule_id,
+                    resolved_namespace,
+                    resource_type,
+                    resource_scope,
+                    principal_type,
+                    principal_id,
+                    permission,
+                    json_dumps(metadata or {}),
+                    now,
+                    now,
+                ),
+            )
+            return self.get_scope_acl_rule(rule_id) or {}
+        merged_metadata = merge_metadata(_loads(existing.get("metadata"), {}), metadata)
+        self.db.execute(
+            "UPDATE scope_acl_rules SET metadata = ?, updated_at = ? WHERE id = ?",
+            (json_dumps(merged_metadata), now, existing["id"]),
+        )
+        return self.get_scope_acl_rule(existing["id"]) or {}
+
+    def revoke_scope_acl_rule(
+        self,
+        rule_id: str | None = None,
+        *,
+        namespace_key: str | None = None,
+        resource_type: str | None = None,
+        resource_scope: str | None = None,
+        principal_type: str | None = None,
+        principal_id: str | None = None,
+        permission: str | None = None,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        owner_agent_id: str | None = None,
+        subject_type: str | None = None,
+        subject_id: str | None = None,
+        interaction_type: str | None = None,
+        platform_id: str | None = None,
+        workspace_id: str | None = None,
+        team_id: str | None = None,
+        project_id: str | None = None,
+        **_unused: Any,
+    ) -> dict[str, Any]:
+        requester_scope = self._request_access_scope(
+            user_id=user_id,
+            agent_id=agent_id or owner_agent_id,
+            owner_agent_id=agent_id or owner_agent_id,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            interaction_type=interaction_type,
+            platform_id=platform_id,
+            workspace_id=workspace_id,
+            team_id=team_id,
+            project_id=project_id,
+            namespace_key=namespace_key,
+        )
+        if rule_id:
+            existing = _deserialize_row(self.db.fetch_one("SELECT * FROM scope_acl_rules WHERE id = ?", (rule_id,)), ("metadata",))
+            if existing is not None:
+                self._assert_namespace_permission(
+                    namespace_key=existing.get("namespace_key"),
+                    resource_type=str(existing.get("resource_type") or "all"),
+                    resource_scope=str(existing.get("resource_scope") or "all"),
+                    requester_scope=requester_scope,
+                    permission="manage",
+                    action_label="revoke ACL rule",
+                )
+            if existing is not None:
+                self.db.execute("DELETE FROM scope_acl_rules WHERE id = ?", (rule_id,))
+            return {"deleted": existing is not None, "rule_id": rule_id}
+        resolved_namespace = namespace_key or self._namespace_filter_value(
+            user_id=user_id,
+            agent_id=agent_id,
+            owner_agent_id=owner_agent_id,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            interaction_type=interaction_type,
+            platform_id=platform_id,
+            workspace_id=workspace_id,
+            team_id=team_id,
+            project_id=project_id,
+        )
+        self._assert_namespace_permission(
+            namespace_key=resolved_namespace,
+            resource_type=resource_type or "all",
+            resource_scope=resource_scope or "all",
+            requester_scope=requester_scope,
+            permission="manage",
+            action_label="revoke ACL rules",
+        )
+        filters = ["1 = 1"]
+        params: list[Any] = []
+        for field, value in (
+            ("namespace_key", resolved_namespace),
+            ("resource_type", resource_type),
+            ("resource_scope", resource_scope),
+            ("principal_type", principal_type),
+            ("principal_id", principal_id),
+            ("permission", permission),
+        ):
+            if value:
+                filters.append(f"{field} = ?")
+                params.append(value)
+        rows = self.db.fetch_all(f"SELECT id FROM scope_acl_rules WHERE {' AND '.join(filters)}", tuple(params))
+        for row in rows:
+            self.db.execute("DELETE FROM scope_acl_rules WHERE id = ?", (row["id"],))
+        return {"deleted": True, "count": len(rows)}
+
+    def _planned_retrieval_domains(
+        self,
+        query: str,
+        *,
+        session_id: str | None,
+        run_id: str | None,
+        owner_agent_id: str | None,
+        subject_type: str | None,
+        subject_id: str | None,
+        interaction_type: str | None,
+    ) -> list[str]:
+        selected = self.recall_router.route(query, session_id=session_id)
+        lowered = str(query or "").lower()
+        if run_id and "execution" not in selected:
+            selected.append("execution")
+        if owner_agent_id and any(token in lowered for token in ("handoff", "交接", "接手")):
+            for domain in ("handoff", "context", "reflection"):
+                if domain not in selected:
+                    selected.append(domain)
+        if session_id and any(token in lowered for token in ("context", "上下文", "summary", "摘要", "brief")):
+            if "context" not in selected:
+                selected.append("context")
+        if owner_agent_id and any(token in lowered for token in ("lesson", "经验", "反思", "reflect", "reflection")):
+            if "reflection" not in selected:
+                selected.append("reflection")
+        if subject_type == "agent" and subject_id and "handoff" not in selected and any(token in lowered for token in ("agent", "代理", "协同")):
+            selected.append("handoff")
+        return list(dict.fromkeys(selected))
+
+    def plan_recall(
+        self,
+        query: str,
+        *,
+        user_id: str | None = None,
+        session_id: str | None = None,
+        agent_id: str | None = None,
+        owner_agent_id: str | None = None,
+        subject_type: str | None = None,
+        subject_id: str | None = None,
+        interaction_type: str | None = None,
+        platform_id: str | None = None,
+        workspace_id: str | None = None,
+        team_id: str | None = None,
+        project_id: str | None = None,
+        namespace_key: str | None = None,
+        run_id: str | None = None,
+        actor_id: str | None = None,
+        role: str | None = None,
+        preferred_scope: str | None = None,
+        limit: int = 10,
+        auxiliary_limit: int | None = None,
+        domains: list[str] | None = None,
+    ) -> dict[str, Any]:
+        context = self._build_context(
+            user_id=user_id,
+            session_id=session_id,
+            agent_id=agent_id,
+            owner_agent_id=owner_agent_id,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            interaction_type=interaction_type,
+            platform_id=platform_id,
+            workspace_id=workspace_id,
+            team_id=team_id,
+            project_id=project_id,
+            namespace_key=namespace_key,
+            run_id=run_id,
+            actor_id=actor_id,
+            role=role,
+        )
+        plan = self.recall_planner.plan(
+            query,
+            context=context,
+            policy=self.config.memory_policy,
+            preferred_scope=preferred_scope,
+            limit=limit,
+            auxiliary_limit=auxiliary_limit,
+            graph_enabled=False,
+        )
+        selected_domains = list(
+            dict.fromkeys(
+                domains
+                or plan.get("handoff_domains")
+                or self._planned_retrieval_domains(
+                    query,
+                    session_id=session_id,
+                    run_id=run_id,
+                    owner_agent_id=context.owner_agent_id,
+                    subject_type=context.subject_type,
+                    subject_id=context.subject_id,
+                    interaction_type=context.interaction_type,
+                )
+            )
+        )
+        if not selected_domains:
+            selected_domains = self._planned_retrieval_domains(
+                query,
+                session_id=session_id,
+                run_id=run_id,
+                owner_agent_id=context.owner_agent_id,
+                subject_type=context.subject_type,
+                subject_id=context.subject_id,
+                interaction_type=context.interaction_type,
+            )
+        normalized_stages: list[dict[str, Any]] = []
+        for stage in list(plan.get("stages") or []):
+            stage_scope = str(stage.get("scope") or "")
+            normalized_scope = "long-term" if stage_scope in {"all", "", "long_term"} else stage_scope
+            normalized_stages.append({**dict(stage), "scope": normalized_scope})
+        return {
+            **plan,
+            "query": query,
+            "scope": preferred_scope or str(plan.get("query_profile", {}).get("preferred_scope") or ("session" if session_id else "long-term")),
+            "selected_domains": selected_domains,
+            "stages": normalized_stages,
+            "scope_context": context.as_metadata(),
+            "router_weights": self.recall_router.explain(query, session_id=session_id),
+            "limit": int(limit),
+            "auxiliary_limit": int(auxiliary_limit or self.config.memory_policy.auxiliary_search_limit),
+        }
+
+    def _context_scope_filters(
+        self,
+        *,
+        user_id: str | None = None,
+        owner_agent_id: str | None = None,
+        subject_type: str | None = None,
+        subject_id: str | None = None,
+        interaction_type: str | None = None,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        platform_id: str | None = None,
+        workspace_id: str | None = None,
+        team_id: str | None = None,
+        project_id: str | None = None,
+        namespace_key: str | None = None,
+    ) -> tuple[str | None, dict[str, Any]]:
+        namespace_filter = self._namespace_filter_value(
+            user_id=user_id,
+            owner_agent_id=owner_agent_id,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            interaction_type=interaction_type,
+            platform_id=platform_id,
+            workspace_id=workspace_id,
+            team_id=team_id,
+            project_id=project_id,
+            namespace_key=namespace_key,
+        )
+        affinity = {
+            "owner_agent_id": owner_agent_id,
+            "subject_type": subject_type,
+            "subject_id": subject_id,
+            "interaction_type": interaction_type,
+        }
+        return namespace_filter, affinity
+
+    def search_context_artifacts(
+        self,
+        query: str,
+        *,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        owner_agent_id: str | None = None,
+        subject_type: str | None = None,
+        subject_id: str | None = None,
+        interaction_type: str | None = None,
+        target_agent_id: str | None = None,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        artifact_type: str | None = None,
+        platform_id: str | None = None,
+        workspace_id: str | None = None,
+        team_id: str | None = None,
+        project_id: str | None = None,
+        namespace_key: str | None = None,
+        limit: int = 10,
+        threshold: float = 0.0,
+        filters: dict[str, Any] | None = None,
+        **_unused: Any,
+    ) -> dict[str, Any]:
+        sql_filters = ["1 = 1"]
+        params: list[Any] = []
+        if target_agent_id:
+            sql_filters.append("(target_agent_id = ? OR target_agent_id IS NULL)")
+            params.append(target_agent_id)
+        if session_id:
+            sql_filters.append("(session_id = ? OR session_id IS NULL)")
+            params.append(session_id)
+        if run_id:
+            sql_filters.append("(run_id = ? OR run_id IS NULL)")
+            params.append(run_id)
+        if artifact_type:
+            sql_filters.append("artifact_type = ?")
+            params.append(artifact_type)
+        namespace_filter, affinity = self._context_scope_filters(
+            user_id=user_id,
+            owner_agent_id=owner_agent_id,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            interaction_type=interaction_type,
+            session_id=session_id,
+            run_id=run_id,
+            platform_id=platform_id,
+            workspace_id=workspace_id,
+            team_id=team_id,
+            project_id=project_id,
+            namespace_key=namespace_key,
+        )
+        if namespace_filter:
+            sql_filters.append("(namespace_key = ? OR namespace_key IS NULL)")
+            params.append(namespace_filter)
+        rows = [
+            item
+            for item in (
+                self._deserialize_context_artifact(row)
+                for row in self.db.fetch_all(
+                    f"""
+                    SELECT ca.*, sic.embedding
+                    FROM context_artifacts ca
+                    LEFT JOIN semantic_index_cache sic ON sic.record_id = ca.id AND sic.collection = 'context_artifact_index'
+                    WHERE {' AND '.join(sql_filters)}
+                    ORDER BY ca.created_at DESC
+                    LIMIT ?
+                    """,
+                    tuple(params + [max(limit * 12, self.config.memory_policy.search_scan_limit // 2)]),
+                )
+            )
+            if item is not None
+        ]
+        requester_scope = self._request_access_scope(
+            user_id=user_id,
+            agent_id=agent_id,
+            owner_agent_id=owner_agent_id,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            interaction_type=interaction_type,
+            platform_id=platform_id,
+            workspace_id=workspace_id,
+            team_id=team_id,
+            project_id=project_id,
+            namespace_key=namespace_key or namespace_filter,
+        )
+        rows = self._filter_accessible_rows(rows, resource_type="context", requester_scope=requester_scope)
+        fts_hits = self._fts_hit_map(["context_artifact_index"], query, limit=max(limit * 6, 24))
+        vector_hits = self._vector_hit_map("context_artifact_index", query, limit=max(limit * 6, 24))
+        ranked = self._rank_rows(
+            query,
+            rows,
+            domain="context",
+            text_key="content",
+            keywords_getter=lambda row: extract_keywords(str(row.get("content") or "")),
+            updated_at_key="created_at",
+            importance_getter=lambda row: 0.74,
+            half_life_days=self.config.memory_policy.short_term_half_life_days,
+            threshold=threshold,
+            filters=filters,
+            vector_hits=vector_hits,
+            fts_hits=fts_hits,
+            affinity=affinity,
+        )
+        return {"results": ranked[:limit]}
+
+    def search_handoff_packs(
+        self,
+        query: str,
+        *,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        source_agent_id: str | None = None,
+        target_agent_id: str | None = None,
+        source_session_id: str | None = None,
+        source_run_id: str | None = None,
+        owner_agent_id: str | None = None,
+        subject_type: str | None = None,
+        subject_id: str | None = None,
+        interaction_type: str | None = None,
+        platform_id: str | None = None,
+        workspace_id: str | None = None,
+        team_id: str | None = None,
+        project_id: str | None = None,
+        namespace_key: str | None = None,
+        limit: int = 10,
+        threshold: float = 0.0,
+        filters: dict[str, Any] | None = None,
+        **_unused: Any,
+    ) -> dict[str, Any]:
+        sql_filters = ["1 = 1"]
+        params: list[Any] = []
+        if source_session_id:
+            sql_filters.append("(source_session_id = ? OR source_session_id IS NULL)")
+            params.append(source_session_id)
+        if source_run_id:
+            sql_filters.append("(source_run_id = ? OR source_run_id IS NULL)")
+            params.append(source_run_id)
+        if source_agent_id:
+            sql_filters.append("(source_agent_id = ? OR source_agent_id IS NULL)")
+            params.append(source_agent_id)
+        if target_agent_id:
+            sql_filters.append("(target_agent_id = ? OR target_agent_id IS NULL)")
+            params.append(target_agent_id)
+        namespace_filter, affinity = self._context_scope_filters(
+            user_id=user_id,
+            owner_agent_id=owner_agent_id or source_agent_id,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            interaction_type=interaction_type,
+            session_id=source_session_id,
+            run_id=source_run_id,
+            platform_id=platform_id,
+            workspace_id=workspace_id,
+            team_id=team_id,
+            project_id=project_id,
+            namespace_key=namespace_key,
+        )
+        if namespace_filter:
+            sql_filters.append("(namespace_key = ? OR namespace_key IS NULL)")
+            params.append(namespace_filter)
+        rows = [
+            item
+            for item in (
+                self._deserialize_handoff_pack(row)
+                for row in self.db.fetch_all(
+                    f"""
+                    SELECT hp.*, sic.embedding
+                    FROM handoff_packs hp
+                    LEFT JOIN semantic_index_cache sic ON sic.record_id = hp.id AND sic.collection = 'handoff_pack_index'
+                    WHERE {' AND '.join(sql_filters)}
+                    ORDER BY hp.created_at DESC
+                    LIMIT ?
+                    """,
+                    tuple(params + [max(limit * 12, self.config.memory_policy.search_scan_limit // 2)]),
+                )
+            )
+            if item is not None
+        ]
+        requester_scope = self._request_access_scope(
+            user_id=user_id,
+            agent_id=agent_id,
+            owner_agent_id=owner_agent_id,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            interaction_type=interaction_type,
+            platform_id=platform_id,
+            workspace_id=workspace_id,
+            team_id=team_id,
+            project_id=project_id,
+            namespace_key=namespace_key or namespace_filter,
+        )
+        rows = self._filter_accessible_rows(rows, resource_type="handoff", requester_scope=requester_scope)
+        fts_hits = self._fts_hit_map(["handoff_pack_index"], query, limit=max(limit * 6, 24))
+        vector_hits = self._vector_hit_map("handoff_pack_index", query, limit=max(limit * 6, 24))
+        ranked = self._rank_rows(
+            query,
+            rows,
+            domain="handoff",
+            text_key="text",
+            keywords_getter=lambda row: extract_keywords(str(row.get("text") or "")),
+            updated_at_key="created_at",
+            importance_getter=lambda row: 0.76,
+            half_life_days=self.config.memory_policy.short_term_half_life_days,
+            threshold=threshold,
+            filters=filters,
+            vector_hits=vector_hits,
+            fts_hits=fts_hits,
+            affinity=affinity,
+        )
+        return {"results": ranked[:limit]}
+
+    def search_reflection_memories(
+        self,
+        query: str,
+        *,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        owner_agent_id: str | None = None,
+        subject_type: str | None = None,
+        subject_id: str | None = None,
+        interaction_type: str | None = None,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        reflection_type: str | None = None,
+        platform_id: str | None = None,
+        workspace_id: str | None = None,
+        team_id: str | None = None,
+        project_id: str | None = None,
+        namespace_key: str | None = None,
+        limit: int = 10,
+        threshold: float = 0.0,
+        filters: dict[str, Any] | None = None,
+        **_unused: Any,
+    ) -> dict[str, Any]:
+        sql_filters = ["1 = 1"]
+        params: list[Any] = []
+        if session_id:
+            sql_filters.append("(session_id = ? OR session_id IS NULL)")
+            params.append(session_id)
+        if run_id:
+            sql_filters.append("(run_id = ? OR run_id IS NULL)")
+            params.append(run_id)
+        if reflection_type:
+            sql_filters.append("reflection_type = ?")
+            params.append(reflection_type)
+        rows = [
+            item
+            for item in (
+                self._deserialize_reflection_memory(row)
+                for row in self.db.fetch_all(
+                    f"""
+                    SELECT rm.*, sic.embedding
+                    FROM reflection_memories rm
+                    LEFT JOIN semantic_index_cache sic ON sic.record_id = rm.id AND sic.collection = 'reflection_memory_index'
+                    WHERE {' AND '.join(sql_filters)}
+                    ORDER BY rm.updated_at DESC
+                    LIMIT ?
+                    """,
+                    tuple(params + [max(limit * 12, self.config.memory_policy.search_scan_limit // 2)]),
+                )
+            )
+            if item is not None
+        ]
+        requester_scope = self._request_access_scope(
+            user_id=user_id,
+            agent_id=agent_id,
+            owner_agent_id=owner_agent_id,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            interaction_type=interaction_type,
+            platform_id=platform_id,
+            workspace_id=workspace_id,
+            team_id=team_id,
+            project_id=project_id,
+            namespace_key=namespace_key,
+        )
+        rows = self._filter_accessible_rows(rows, resource_type="reflection", requester_scope=requester_scope)
+        fts_hits = self._fts_hit_map(["reflection_memory_index"], query, limit=max(limit * 6, 24))
+        vector_hits = self._vector_hit_map("reflection_memory_index", query, limit=max(limit * 6, 24))
+        ranked = self._rank_rows(
+            query,
+            rows,
+            domain="reflection",
+            text_key="text",
+            keywords_getter=lambda row: extract_keywords(str(row.get("text") or "")),
+            updated_at_key="updated_at",
+            importance_getter=lambda row: float(row.get("confidence", 0.5) or 0.0),
+            half_life_days=self.config.memory_policy.long_term_half_life_days,
+            threshold=threshold,
+            filters=filters,
+            vector_hits=vector_hits,
+            fts_hits=fts_hits,
+            affinity={
+                "owner_agent_id": owner_agent_id,
+                "subject_type": subject_type,
+                "subject_id": subject_id,
+                "interaction_type": interaction_type,
+            },
+        )
+        return {"results": ranked[:limit]}
+
+    def build_context(
+        self,
+        query: str,
+        *,
+        include_domains: list[str] | None = None,
+        budget_chars: int | None = None,
+        target_agent_id: str | None = None,
+        use_platform_llm: bool = True,
+        metadata: dict[str, Any] | None = None,
+        limit: int = 12,
+        threshold: float = 0.0,
+        user_id: str | None = None,
+        owner_agent_id: str | None = None,
+        subject_type: str | None = None,
+        subject_id: str | None = None,
+        interaction_type: str | None = None,
+        session_id: str | None = None,
+        agent_id: str | None = None,
+        platform_id: str | None = None,
+        workspace_id: str | None = None,
+        team_id: str | None = None,
+        project_id: str | None = None,
+        namespace_key: str | None = None,
+        run_id: str | None = None,
+        actor_id: str | None = None,
+        role: str | None = None,
+        expires_at: str | None = None,
+    ) -> dict[str, Any]:
+        actor_agent_id = agent_id or owner_agent_id
+        planned = None if include_domains else self.plan_recall(
+            query,
+            user_id=user_id,
+            session_id=session_id,
+            agent_id=agent_id,
+            owner_agent_id=owner_agent_id,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            interaction_type=interaction_type,
+            platform_id=platform_id,
+            workspace_id=workspace_id,
+            team_id=team_id,
+            project_id=project_id,
+            namespace_key=namespace_key,
+            run_id=run_id,
+            actor_id=actor_id,
+            role=role,
+            limit=limit,
+        )
+        selected_domains = list(dict.fromkeys(include_domains or list((planned or {}).get("selected_domains") or ["memory", "interaction", "knowledge", "skill", "archive", "execution"])))
+        budget = int(budget_chars or self.config.memory_policy.compression_budget_chars)
+        run = _deserialize_row(self.db.fetch_one("SELECT * FROM runs WHERE id = ?", (run_id,))) if run_id else None
+        session = self.get_session(session_id) if session_id else None
+        scope = self._resolve_scope(
+            user_id=user_id or (run.get("user_id") if run else None),
+            agent_id=agent_id,
+            owner_agent_id=owner_agent_id or (run.get("owner_agent_id") if run else None),
+            subject_type=subject_type or (run.get("subject_type") if run else None),
+            subject_id=subject_id or (run.get("subject_id") if run else None),
+            interaction_type=interaction_type or (run.get("interaction_type") if run else None),
+            platform_id=platform_id,
+            workspace_id=workspace_id,
+            team_id=team_id,
+            project_id=project_id,
+            namespace_key=namespace_key,
+            session=session,
+        )
+        requester_scope = self._request_access_scope_for_scope(
+            scope,
+            actor_user_id=user_id,
+            actor_agent_id=actor_agent_id,
+        )
+        self._assert_namespace_permission(
+            namespace_key=scope.get("namespace_key"),
+            resource_type="context",
+            resource_scope="prompt_context",
+            requester_scope=requester_scope,
+            permission="write",
+            action_label="build context artifact",
+        )
+        recall = self.query(
+            query,
+            user_id=scope.get("user_id"),
+            owner_agent_id=scope.get("owner_agent_id"),
+            subject_type=scope.get("subject_type"),
+            subject_id=scope.get("subject_id"),
+            interaction_type=scope.get("interaction_type"),
+            session_id=session_id,
+            agent_id=agent_id or scope.get("owner_agent_id"),
+            platform_id=scope.get("platform_id"),
+            workspace_id=scope.get("workspace_id"),
+            team_id=scope.get("team_id"),
+            project_id=scope.get("project_id"),
+            namespace_key=scope.get("namespace_key"),
+            run_id=run_id,
+            actor_id=actor_id,
+            role=role,
+            domains=selected_domains,
+            limit=max(limit, 8),
+            threshold=threshold,
+        )
+        source_rows = self._dedupe_compression_rows(recall.get("results", []))
+        records = self._compression_records_from_rows(source_rows)
+        job = self._start_compression_job(
+            job_type="context_build",
+            session_id=session_id,
+            run_id=run_id,
+            owner_agent_id=scope.get("owner_agent_id"),
+            budget_chars=budget,
+            scope=scope,
+            records=records,
+            metadata={"query": query, "include_domains": selected_domains, **dict(metadata or {})},
+        )
+        compression, status, provider, model, error = self._run_contextual_compression(
+            job_type="context_build",
+            records=records,
+            scope=scope,
+            budget_chars=budget,
+            use_platform_llm=use_platform_llm,
+            metadata={"query": query, "include_domains": selected_domains, **dict(metadata or {})},
+        )
+        content = self._format_compression_content("Context Brief", compression) or f"## Context Brief\n{query}"
+        source_refs = self._source_refs_from_rows(source_rows)
+        artifact = self._create_context_artifact(
+            artifact_type="prompt_context",
+            session_id=session_id,
+            run_id=run_id,
+            owner_agent_id=scope.get("owner_agent_id"),
+            target_agent_id=target_agent_id,
+            namespace_key=scope.get("namespace_key"),
+            provider=provider,
+            model=model,
+            budget_chars=budget,
+            source_refs=source_refs,
+            content=content,
+            scope_metadata=self._scope_metadata(scope),
+            visibility="target_agent" if target_agent_id else "private_agent",
+            metadata={
+                "query": query,
+                "include_domains": selected_domains,
+                "compression": compression,
+                **dict(metadata or {}),
+            },
+            expires_at=expires_at,
+        )
+        job = self._finish_compression_job(
+            job["id"],
+            status=status,
+            provider=provider,
+            model=model,
+            result_artifact_id=artifact["id"],
+            error=error,
+        )
+        return {
+            "query": query,
+            "artifact": artifact,
+            "job": job,
+            "compression": compression,
+            "results": recall.get("results", []),
+            "source_count": len(source_rows),
+            "domains": selected_domains,
+        }
+
+    def build_handoff_pack(
+        self,
+        target_agent_id: str,
+        *,
+        source_run_id: str | None = None,
+        source_session_id: str | None = None,
+        run_id: str | None = None,
+        source_agent_id: str | None = None,
+        budget_chars: int | None = None,
+        visibility: str = "target_agent",
+        use_platform_llm: bool = True,
+        metadata: dict[str, Any] | None = None,
+        query: str | None = None,
+        expires_at: str | None = None,
+        user_id: str | None = None,
+        owner_agent_id: str | None = None,
+        subject_type: str | None = None,
+        subject_id: str | None = None,
+        interaction_type: str | None = None,
+        agent_id: str | None = None,
+        platform_id: str | None = None,
+        workspace_id: str | None = None,
+        team_id: str | None = None,
+        project_id: str | None = None,
+        namespace_key: str | None = None,
+    ) -> dict[str, Any]:
+        actor_agent_id = agent_id or owner_agent_id or source_agent_id
+        resolved_run_id = source_run_id or run_id
+        run = _deserialize_row(self.db.fetch_one("SELECT * FROM runs WHERE id = ?", (resolved_run_id,))) if resolved_run_id else None
+        resolved_session_id = source_session_id or (run.get("session_id") if run else None)
+        session = self.get_session(resolved_session_id) if resolved_session_id else None
+        scope = self._resolve_scope(
+            user_id=user_id or (run.get("user_id") if run else None),
+            agent_id=agent_id,
+            owner_agent_id=owner_agent_id or (run.get("owner_agent_id") if run else None) or (session.get("owner_agent_id") if session else None),
+            subject_type=subject_type or (run.get("subject_type") if run else None) or (session.get("subject_type") if session else None),
+            subject_id=subject_id or (run.get("subject_id") if run else None) or (session.get("subject_id") if session else None),
+            interaction_type=interaction_type or (run.get("interaction_type") if run else None) or (session.get("interaction_type") if session else None),
+            platform_id=platform_id or (run.get("platform_id") if run else None) or (session.get("platform_id") if session else None),
+            workspace_id=workspace_id or (run.get("workspace_id") if run else None) or (session.get("workspace_id") if session else None),
+            team_id=team_id or (run.get("team_id") if run else None) or (session.get("team_id") if session else None),
+            project_id=project_id or (run.get("project_id") if run else None) or (session.get("project_id") if session else None),
+            namespace_key=namespace_key or (run.get("namespace_key") if run else None) or (session.get("namespace_key") if session else None),
+        )
+        requester_scope = self._request_access_scope_for_scope(
+            scope,
+            actor_user_id=user_id,
+            actor_agent_id=actor_agent_id,
+        )
+        self._assert_namespace_permission(
+            namespace_key=scope.get("namespace_key"),
+            resource_type="handoff",
+            resource_scope="handoff",
+            requester_scope=requester_scope,
+            permission="write",
+            action_label="build handoff pack",
+        )
+        budget = int(budget_chars or max(self.config.memory_policy.compression_budget_chars, 900))
+        rows: list[dict[str, Any]] = []
+        if run is not None:
+            run_text = "\n".join(
+                part for part in [str(run.get("goal") or "").strip(), f"Run status: {run.get('status')}" if run.get("status") else ""] if part
+            ).strip()
+            if run_text:
+                rows.append(
+                    {
+                        "id": run["id"],
+                        "domain": "execution",
+                        "text": run_text,
+                        "score": 0.82,
+                        "run_id": run["id"],
+                        "metadata": {"kind": "run"},
+                    }
+                )
+        if session is not None:
+            for turn in self._session_turns(session["id"]):
+                rows.append(
+                    {
+                        "id": turn["id"],
+                        "domain": "interaction",
+                        "text": str(turn.get("content") or ""),
+                        "score": 0.52 + min(0.22, float(turn.get("salience_score", 0.0) or 0.0) * 0.2),
+                        "session_id": session["id"],
+                        "run_id": turn.get("run_id"),
+                        "metadata": {"role": turn.get("role"), "turn_type": turn.get("turn_type")},
+                    }
+                )
+            snapshot = self.session_health(session["id"]).get("latest_snapshot")
+            snapshot_text = self._snapshot_text(snapshot)
+            if snapshot_text:
+                rows.append(
+                    {
+                        "id": snapshot["id"],
+                        "domain": "interaction",
+                        "text": snapshot_text,
+                        "score": 0.78,
+                        "session_id": session["id"],
+                        "run_id": snapshot.get("run_id"),
+                        "metadata": {"kind": "working_memory_snapshot"},
+                    }
+                )
+        seed_query = str(query or (run.get("goal") if run else None) or (session.get("title") if session else None) or f"handoff to {target_agent_id}").strip()
+        related = self.query(
+            seed_query,
+            user_id=scope.get("user_id"),
+            owner_agent_id=scope.get("owner_agent_id"),
+            subject_type=scope.get("subject_type"),
+            subject_id=scope.get("subject_id"),
+            interaction_type=scope.get("interaction_type"),
+            session_id=resolved_session_id,
+            agent_id=agent_id or scope.get("owner_agent_id"),
+            platform_id=scope.get("platform_id"),
+            workspace_id=scope.get("workspace_id"),
+            team_id=scope.get("team_id"),
+            project_id=scope.get("project_id"),
+            namespace_key=scope.get("namespace_key"),
+            run_id=resolved_run_id,
+            domains=["memory", "knowledge", "execution", "archive"],
+            limit=12,
+        )
+        rows.extend(related.get("results", []))
+        source_rows = self._dedupe_compression_rows(rows)
+        records = self._compression_records_from_rows(source_rows)
+        job = self._start_compression_job(
+            job_type="handoff_build",
+            session_id=resolved_session_id,
+            run_id=resolved_run_id,
+            owner_agent_id=scope.get("owner_agent_id"),
+            budget_chars=budget,
+            scope=scope,
+            records=records,
+            metadata={"target_agent_id": target_agent_id, **dict(metadata or {})},
+        )
+        compression, status, provider, model, error = self._run_contextual_compression(
+            job_type="handoff_build",
+            records=records,
+            scope=scope,
+            budget_chars=budget,
+            use_platform_llm=use_platform_llm,
+            metadata={"target_agent_id": target_agent_id, **dict(metadata or {})},
+        )
+        source_refs = self._source_refs_from_rows(source_rows)
+        snapshot = self.session_health(resolved_session_id).get("latest_snapshot") if resolved_session_id else None
+        snapshot_open_tasks = [str(item).strip() for item in list((snapshot or {}).get("next_actions") or []) if str(item).strip()]
+        snapshot_constraints = [str(item).strip() for item in list((snapshot or {}).get("constraints") or []) if str(item).strip()]
+        open_tasks = list(dict.fromkeys(snapshot_open_tasks + [str(item).strip() for item in list(compression.get("steps") or []) if str(item).strip()]))
+        constraints = list(dict.fromkeys(snapshot_constraints + [str(item).strip() for item in list(compression.get("constraints") or []) if str(item).strip()]))
+        highlights = [str(item).strip() for item in list(compression.get("highlights") or []) if str(item).strip()]
+        summary = str(compression.get("summary") or seed_query or f"Handoff for {target_agent_id}").strip()
+        handoff = self._create_handoff_pack_row(
+            source_run_id=resolved_run_id,
+            source_session_id=resolved_session_id,
+            source_agent_id=source_agent_id or scope.get("owner_agent_id"),
+            target_agent_id=target_agent_id,
+            namespace_key=scope.get("namespace_key"),
+            visibility=visibility,
+            summary=summary,
+            highlights=highlights,
+            open_tasks=open_tasks,
+            constraints=constraints,
+            source_refs=source_refs,
+            scope_metadata=self._scope_metadata(scope),
+            metadata={"compression": compression, **dict(metadata or {})},
+            expires_at=expires_at,
+        )
+        artifact = self._create_context_artifact(
+            artifact_type="handoff_pack",
+            session_id=resolved_session_id,
+            run_id=resolved_run_id,
+            owner_agent_id=scope.get("owner_agent_id"),
+            target_agent_id=target_agent_id,
+            namespace_key=scope.get("namespace_key"),
+            provider=provider,
+            model=model,
+            budget_chars=budget,
+            source_refs=source_refs,
+            content=self._format_compression_content(
+                "Handoff Brief",
+                {"summary": summary, "steps": open_tasks, "constraints": constraints, "highlights": highlights, "supporting_passages": compression.get("supporting_passages")},
+            ),
+            scope_metadata=self._scope_metadata(scope),
+            visibility="target_agent",
+            metadata={"handoff_id": handoff["id"], "compression": compression, **dict(metadata or {})},
+            expires_at=expires_at,
+        )
+        job = self._finish_compression_job(
+            job["id"],
+            status=status,
+            provider=provider,
+            model=model,
+            result_artifact_id=artifact["id"],
+            error=error,
+        )
+        return {
+            **handoff,
+            "artifact": artifact,
+            "job": job,
+            "compression": compression,
+            "source_count": len(source_rows),
+        }
+
+    def reflect_session(
+        self,
+        session_id: str,
+        *,
+        run_id: str | None = None,
+        mode: str | None = None,
+        budget_chars: int | None = None,
+        use_platform_llm: bool = True,
+        metadata: dict[str, Any] | None = None,
+        expires_at: str | None = None,
+        user_id: str | None = None,
+        owner_agent_id: str | None = None,
+        subject_type: str | None = None,
+        subject_id: str | None = None,
+        interaction_type: str | None = None,
+        platform_id: str | None = None,
+        workspace_id: str | None = None,
+        team_id: str | None = None,
+        project_id: str | None = None,
+        namespace_key: str | None = None,
+    ) -> dict[str, Any]:
+        actor_agent_id = owner_agent_id
+        session = self.get_session(session_id)
+        if session is None:
+            raise ValueError(f"Session `{session_id}` does not exist.")
+        budget = int(budget_chars or max(self.config.memory_policy.compression_budget_chars, 900))
+        rows: list[dict[str, Any]] = []
+        for turn in self._session_turns(session_id):
+            rows.append(
+                {
+                    "id": turn["id"],
+                    "domain": "interaction",
+                    "text": str(turn.get("content") or ""),
+                    "score": 0.5 + min(0.25, float(turn.get("salience_score", 0.0) or 0.0) * 0.25),
+                    "session_id": session_id,
+                    "run_id": turn.get("run_id"),
+                    "metadata": {"role": turn.get("role"), "turn_type": turn.get("turn_type")},
+                }
+            )
+        snapshot = self.session_health(session_id).get("latest_snapshot")
+        snapshot_text = self._snapshot_text(snapshot)
+        if snapshot_text:
+            rows.append(
+                {
+                    "id": snapshot["id"],
+                    "domain": "interaction",
+                    "text": snapshot_text,
+                    "score": 0.8,
+                    "session_id": session_id,
+                    "run_id": snapshot.get("run_id"),
+                    "metadata": {"kind": "working_memory_snapshot"},
+                }
+            )
+        for memory in self.memory_list(
+            user_id=session.get("user_id"),
+            owner_agent_id=session.get("owner_agent_id"),
+            subject_type=session.get("subject_type"),
+            subject_id=session.get("subject_id"),
+            interaction_type=session.get("interaction_type"),
+            session_id=session_id,
+            scope=str(MemoryScope.SESSION),
+            limit=24,
+        )["results"]:
+            rows.append(
+                {
+                    "id": memory["id"],
+                    "domain": "memory",
+                    "text": str(memory.get("text") or ""),
+                    "score": float(memory.get("importance", 0.55) or 0.0),
+                    "session_id": session_id,
+                    "run_id": memory.get("run_id"),
+                    "metadata": {"memory_type": memory.get("memory_type")},
+                }
+            )
+        source_rows = self._dedupe_compression_rows(rows)
+        records = self._compression_records_from_rows(source_rows)
+        scope = self._resolve_scope(
+            user_id=user_id or session.get("user_id"),
+            owner_agent_id=owner_agent_id or session.get("owner_agent_id"),
+            subject_type=subject_type or session.get("subject_type"),
+            subject_id=subject_id or session.get("subject_id"),
+            interaction_type=interaction_type or session.get("interaction_type"),
+            platform_id=platform_id or session.get("platform_id"),
+            workspace_id=workspace_id or session.get("workspace_id"),
+            team_id=team_id or session.get("team_id"),
+            project_id=project_id or session.get("project_id"),
+            namespace_key=namespace_key or session.get("namespace_key"),
+        )
+        requester_scope = self._request_access_scope_for_scope(
+            scope,
+            actor_user_id=user_id,
+            actor_agent_id=actor_agent_id,
+        )
+        self._assert_namespace_permission(
+            namespace_key=scope.get("namespace_key"),
+            resource_type="reflection",
+            resource_scope="reflection",
+            requester_scope=requester_scope,
+            permission="write",
+            action_label="create reflection artifacts",
+        )
+        job = self._start_compression_job(
+            job_type="reflection_session",
+            session_id=session_id,
+            run_id=run_id,
+            owner_agent_id=scope.get("owner_agent_id"),
+            budget_chars=budget,
+            scope=scope,
+            records=records,
+            metadata={"mode": mode or "derived+invariant", **dict(metadata or {})},
+        )
+        compression, status, provider, model, error = self._run_contextual_compression(
+            job_type="reflection_session",
+            records=records,
+            scope=scope,
+            budget_chars=budget,
+            use_platform_llm=use_platform_llm,
+            metadata={"mode": mode or "derived+invariant", **dict(metadata or {})},
+        )
+        source_refs = self._source_refs_from_rows(source_rows)
+        reflections: list[dict[str, Any]] = []
+        for reflection_type in self._reflection_types(mode):
+            summary, details, confidence = self._reflection_payload_for_type(reflection_type, compression)
+            if not summary:
+                continue
+            reflections.append(
+                self._create_reflection_memory_row(
+                    owner_agent_id=scope.get("owner_agent_id"),
+                    session_id=session_id,
+                    run_id=run_id,
+                    reflection_type=reflection_type,
+                    summary=summary,
+                    details=details,
+                    confidence=confidence,
+                    decay_half_life_days=self.config.memory_policy.long_term_half_life_days,
+                    source_refs=source_refs,
+                    scope_metadata=self._scope_metadata(scope),
+                    visibility="private_agent",
+                    metadata={
+                        "compression": compression,
+                        "namespace_key": scope.get("namespace_key"),
+                        **dict(metadata or {}),
+                    },
+                )
+            )
+        artifact = self._create_context_artifact(
+            artifact_type="reflection_pack",
+            session_id=session_id,
+            run_id=run_id,
+            owner_agent_id=scope.get("owner_agent_id"),
+            target_agent_id=None,
+            namespace_key=scope.get("namespace_key"),
+            provider=provider,
+            model=model,
+            budget_chars=budget,
+            source_refs=source_refs,
+            content=self._format_compression_content("Reflection Brief", compression),
+            scope_metadata=self._scope_metadata(scope),
+            visibility="private_agent",
+            metadata={
+                "mode": mode or "derived+invariant",
+                "reflection_ids": [item["id"] for item in reflections],
+                "compression": compression,
+                **dict(metadata or {}),
+            },
+            expires_at=expires_at,
+        )
+        job = self._finish_compression_job(
+            job["id"],
+            status=status,
+            provider=provider,
+            model=model,
+            result_artifact_id=artifact["id"],
+            error=error,
+        )
+        return {
+            "session_id": session_id,
+            "run_id": run_id,
+            "mode": mode or "derived+invariant",
+            "reflections": reflections,
+            "artifact": artifact,
+            "job": job,
+            "compression": compression,
+        }
+
+    def reflect_run(self, run_id: str, **kwargs) -> dict[str, Any]:
+        run = _deserialize_row(self.db.fetch_one("SELECT * FROM runs WHERE id = ?", (run_id,)))
+        if run is None:
+            raise ValueError(f"Run `{run_id}` does not exist.")
+        if run.get("session_id"):
+            return self.reflect_session(str(run["session_id"]), run_id=run_id, **kwargs)
+        requester_scope = self._pop_request_access_scope(kwargs)
+        rows = [
+            {
+                "id": run["id"],
+                "domain": "execution",
+                "text": "\n".join(
+                    part for part in [str(run.get("goal") or "").strip(), f"Run status: {run.get('status')}" if run.get("status") else ""] if part
+                ).strip(),
+                "score": 0.82,
+                "run_id": run_id,
+                "metadata": {"kind": "run"},
+            }
+        ]
+        for row in self.db.fetch_all("SELECT * FROM observations WHERE run_id = ? ORDER BY created_at ASC", (run_id,)):
+            text = str(row.get("content") or "").strip()
+            if not text:
+                continue
+            rows.append(
+                {
+                    "id": row["id"],
+                    "domain": "execution",
+                    "text": text,
+                    "score": 0.64,
+                    "run_id": run_id,
+                    "metadata": {"kind": row.get("kind")},
+                }
+            )
+        scope = self._resolve_scope(
+            user_id=run.get("user_id"),
+            owner_agent_id=run.get("owner_agent_id"),
+            subject_type=run.get("subject_type"),
+            subject_id=run.get("subject_id"),
+            interaction_type=run.get("interaction_type"),
+            platform_id=run.get("platform_id"),
+            workspace_id=run.get("workspace_id"),
+            team_id=run.get("team_id"),
+            project_id=run.get("project_id"),
+            namespace_key=run.get("namespace_key"),
+        )
+        self._assert_namespace_permission(
+            namespace_key=scope.get("namespace_key"),
+            resource_type="reflection",
+            resource_scope="reflection",
+            requester_scope=requester_scope,
+            permission="write",
+            action_label="create run reflections",
+        )
+        budget = int(kwargs.pop("budget_chars", max(self.config.memory_policy.compression_budget_chars, 900)))
+        mode = kwargs.pop("mode", None)
+        metadata = dict(kwargs.pop("metadata", {}) or {})
+        use_platform_llm = bool(kwargs.pop("use_platform_llm", True))
+        source_rows = self._dedupe_compression_rows(rows)
+        records = self._compression_records_from_rows(source_rows)
+        job = self._start_compression_job(
+            job_type="reflection_run",
+            session_id=None,
+            run_id=run_id,
+            owner_agent_id=scope.get("owner_agent_id"),
+            budget_chars=budget,
+            scope=scope,
+            records=records,
+            metadata={"mode": mode or "derived+invariant", **metadata},
+        )
+        compression, status, provider, model, error = self._run_contextual_compression(
+            job_type="reflection_run",
+            records=records,
+            scope=scope,
+            budget_chars=budget,
+            use_platform_llm=use_platform_llm,
+            metadata={"mode": mode or "derived+invariant", **metadata},
+        )
+        source_refs = self._source_refs_from_rows(source_rows)
+        reflections: list[dict[str, Any]] = []
+        for reflection_type in self._reflection_types(mode):
+            summary, details, confidence = self._reflection_payload_for_type(reflection_type, compression)
+            if not summary:
+                continue
+            reflections.append(
+                self._create_reflection_memory_row(
+                    owner_agent_id=scope.get("owner_agent_id"),
+                    session_id=None,
+                    run_id=run_id,
+                    reflection_type=reflection_type,
+                    summary=summary,
+                    details=details,
+                    confidence=confidence,
+                    decay_half_life_days=self.config.memory_policy.long_term_half_life_days,
+                    source_refs=source_refs,
+                    scope_metadata=self._scope_metadata(scope),
+                    visibility="private_agent",
+                    metadata={"namespace_key": scope.get("namespace_key"), "compression": compression, **metadata},
+                )
+            )
+        artifact = self._create_context_artifact(
+            artifact_type="reflection_pack",
+            session_id=None,
+            run_id=run_id,
+            owner_agent_id=scope.get("owner_agent_id"),
+            target_agent_id=None,
+            namespace_key=scope.get("namespace_key"),
+            provider=provider,
+            model=model,
+            budget_chars=budget,
+            source_refs=source_refs,
+            content=self._format_compression_content("Run Reflection", compression),
+            scope_metadata=self._scope_metadata(scope),
+            visibility="private_agent",
+            metadata={"mode": mode or "derived+invariant", "reflection_ids": [item["id"] for item in reflections], "compression": compression, **metadata},
+            expires_at=kwargs.pop("expires_at", None),
+        )
+        job = self._finish_compression_job(
+            job["id"],
+            status=status,
+            provider=provider,
+            model=model,
+            result_artifact_id=artifact["id"],
+            error=error,
+        )
+        return {
+            "run_id": run_id,
+            "mode": mode or "derived+invariant",
+            "reflections": reflections,
+            "artifact": artifact,
+            "job": job,
+            "compression": compression,
         }
 
     def create_session(self, user_id: str | None = None, session_id: str | None = None, **kwargs) -> dict[str, Any]:
         session_id = session_id or make_id("sess")
         now = utcnow_iso()
         metadata = dict(kwargs.pop("metadata", {}) or {})
+        raw_agent_id = kwargs.pop("agent_id", None)
+        raw_owner_agent_id = kwargs.pop("owner_agent_id", None)
+        actor_agent_id = raw_agent_id or raw_owner_agent_id
         scope = self._resolve_scope(
             user_id=user_id,
-            agent_id=kwargs.pop("agent_id", None),
-            owner_agent_id=kwargs.pop("owner_agent_id", None),
+            agent_id=raw_agent_id,
+            owner_agent_id=raw_owner_agent_id,
             subject_type=kwargs.pop("subject_type", None),
             subject_id=kwargs.pop("subject_id", None),
             interaction_type=kwargs.pop("interaction_type", None),
@@ -1232,6 +4240,19 @@ class AIMemory:
             team_id=kwargs.pop("team_id", None),
             project_id=kwargs.pop("project_id", None),
             namespace_key=kwargs.pop("namespace_key", None),
+        )
+        requester_scope = self._request_access_scope_for_scope(
+            scope,
+            actor_user_id=user_id,
+            actor_agent_id=actor_agent_id,
+        )
+        self._assert_namespace_permission(
+            namespace_key=scope.get("namespace_key"),
+            resource_type="session",
+            resource_scope="session",
+            requester_scope=requester_scope,
+            permission="write",
+            action_label="create session",
         )
         title = kwargs.pop("title", None)
         self.db.execute(
@@ -1270,9 +4291,17 @@ class AIMemory:
         return session
 
     def append_turn(self, session_id: str, role: str, content: str, **kwargs) -> dict[str, Any]:
+        requester_scope = self._pop_request_access_scope(kwargs)
         session = self.get_session(session_id)
         if session is None:
             raise ValueError(f"Session `{session_id}` does not exist.")
+        self._assert_resource_permission(
+            session,
+            resource_type="session",
+            requester_scope=requester_scope,
+            permission="write",
+            action_label="append session turn",
+        )
         turn_id = make_id("turn")
         now = utcnow_iso()
         metadata = dict(kwargs.pop("metadata", {}) or {})
@@ -1434,17 +4463,84 @@ class AIMemory:
             self._index_execution_run(run)
         return run
 
+    def _store_document_payload(
+        self,
+        *,
+        document_id: str,
+        text: str,
+        scope: dict[str, Any],
+        metadata: dict[str, Any],
+        raw_store_policy: str | None,
+    ) -> dict[str, Any]:
+        policy = normalize_raw_store_policy(raw_store_policy, default=self.config.knowledge_raw_store_policy)
+        externalize = should_externalize_text(
+            text,
+            policy=policy,
+            inline_char_limit=int(self.config.knowledge_inline_char_limit),
+        )
+        payload_bytes = payload_size_bytes(text)
+        inline_text = None if externalize else text
+        storage_ref = None
+        object_row = None
+        if externalize:
+            stored = self.object_store.put_text(
+                text,
+                object_type="knowledge",
+                suffix=".txt",
+                prefix=self._object_store_prefix(scope, "knowledge"),
+            )
+            object_row = self._persist_object(
+                stored,
+                mime_type="text/plain",
+                metadata={"document_id": document_id, **self._scope_metadata(scope), **metadata},
+            )
+            storage_ref = object_row["object_key"]
+        return {
+            "storage_policy": policy,
+            "inline_text": inline_text,
+            "inline_excerpt": build_inline_excerpt(text),
+            "storage_ref": storage_ref,
+            "payload_bytes": payload_bytes,
+            "object_row": object_row,
+        }
+
+    def _document_text(self, document: dict[str, Any]) -> str:
+        inline_text = str(document.get("inline_text") or "")
+        if inline_text:
+            return inline_text
+        storage_ref = str(document.get("storage_ref") or "")
+        if storage_ref:
+            try:
+                return self.object_store.get_text(storage_ref)
+            except (FileNotFoundError, UnicodeDecodeError):
+                pass
+        latest_version = document["versions"][0] if document.get("versions") else None
+        if latest_version is not None and latest_version.get("object_id"):
+            object_row = self.db.fetch_one("SELECT * FROM objects WHERE id = ?", (latest_version["object_id"],))
+            if object_row is not None:
+                try:
+                    return self.object_store.get_text(object_row["object_key"])
+                except (FileNotFoundError, UnicodeDecodeError):
+                    pass
+        return "\n".join(str(chunk.get("content") or "") for chunk in document.get("chunks", []))
+
     def ingest_document(self, title: str, text: str, **kwargs) -> dict[str, Any]:
         source_name = kwargs.pop("source_name", title)
         source_type = kwargs.pop("source_type", "inline")
         uri = kwargs.pop("uri", None)
         global_scope = bool(kwargs.pop("global_scope", False))
+        raw_user_id = kwargs.pop("user_id", None)
+        raw_agent_id = kwargs.pop("agent_id", None)
+        raw_owner_agent_id = kwargs.pop("owner_agent_id", None)
+        actor_agent_id = raw_agent_id or raw_owner_agent_id
+        raw_subject_type = kwargs.pop("source_subject_type", kwargs.pop("subject_type", None))
+        raw_subject_id = kwargs.pop("source_subject_id", kwargs.pop("subject_id", None))
         scope = self._resolve_scope(
-            user_id=kwargs.pop("user_id", None),
-            agent_id=kwargs.pop("agent_id", None),
-            owner_agent_id=kwargs.pop("owner_agent_id", None),
-            subject_type=kwargs.pop("source_subject_type", kwargs.pop("subject_type", None)),
-            subject_id=kwargs.pop("source_subject_id", kwargs.pop("subject_id", None)),
+            user_id=raw_user_id,
+            agent_id=raw_agent_id,
+            owner_agent_id=raw_owner_agent_id,
+            subject_type=raw_subject_type,
+            subject_id=raw_subject_id,
             interaction_type=kwargs.pop("interaction_type", None),
             platform_id=kwargs.pop("platform_id", None),
             workspace_id=kwargs.pop("workspace_id", None),
@@ -1453,12 +4549,26 @@ class AIMemory:
             namespace_key=kwargs.pop("namespace_key", None),
             global_scope=global_scope,
         )
+        requester_scope = self._request_access_scope_for_scope(
+            scope,
+            actor_user_id=raw_user_id,
+            actor_agent_id=actor_agent_id,
+        )
+        self._assert_namespace_permission(
+            namespace_key=scope.get("namespace_key"),
+            resource_type="knowledge",
+            resource_scope="document",
+            requester_scope=requester_scope,
+            permission="write",
+            action_label="create knowledge document",
+        )
         user_id = scope["user_id"]
         owner_agent_id = scope["owner_agent_id"]
         source_subject_type = scope["subject_type"]
         source_subject_id = scope["subject_id"]
         external_id = kwargs.pop("external_id", None)
         metadata = dict(kwargs.pop("metadata", {}) or {})
+        raw_store_policy = kwargs.pop("raw_store_policy", kwargs.pop("knowledge_raw_store_policy", None))
         chunk_size = int(kwargs.pop("chunk_size", self.config.memory_policy.chunk_size))
         chunk_overlap = int(kwargs.pop("chunk_overlap", self.config.memory_policy.chunk_overlap))
         kb_namespace = kwargs.pop("kb_namespace", scope.get("namespace_key") or owner_agent_id or "default")
@@ -1478,10 +4588,21 @@ class AIMemory:
             source_id = source["id"]
 
         document_id = make_id("doc")
+        payload = self._store_document_payload(
+            document_id=document_id,
+            text=text,
+            scope=scope,
+            metadata=metadata,
+            raw_store_policy=raw_store_policy,
+        )
         self.db.execute(
             """
-            INSERT INTO documents(id, source_id, title, user_id, owner_agent_id, kb_namespace, source_subject_type, source_subject_id, namespace_key, external_id, status, metadata, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO documents(
+                id, source_id, title, user_id, owner_agent_id, kb_namespace, source_subject_type, source_subject_id,
+                namespace_key, inline_text, inline_excerpt, storage_policy, storage_ref, payload_bytes, external_id,
+                status, metadata, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 document_id,
@@ -1493,6 +4614,11 @@ class AIMemory:
                 source_subject_type,
                 source_subject_id,
                 scope.get("namespace_key"),
+                payload["inline_text"],
+                payload["inline_excerpt"],
+                payload["storage_policy"],
+                payload["storage_ref"],
+                payload["payload_bytes"],
                 external_id,
                 "active",
                 json_dumps(merge_metadata(metadata, self._scope_metadata(scope))),
@@ -1500,15 +4626,23 @@ class AIMemory:
                 now,
             ),
         )
-        stored = self.object_store.put_text(text, object_type="knowledge", suffix=".txt", prefix=self._object_store_prefix(scope, "knowledge"))
-        object_row = self._persist_object(stored, mime_type="text/plain", metadata={"document_id": document_id, **self._scope_metadata(scope), **metadata})
         version_id = make_id("docver")
+        object_row = payload.get("object_row")
         self.db.execute(
             """
             INSERT INTO document_versions(id, document_id, version_label, object_id, checksum, size_bytes, metadata, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (version_id, document_id, "v1", object_row["id"], object_row["checksum"], object_row["size_bytes"], json_dumps(metadata), now),
+            (
+                version_id,
+                document_id,
+                "v1",
+                object_row["id"] if object_row is not None else None,
+                object_row["checksum"] if object_row is not None else fingerprint(text),
+                payload["payload_bytes"],
+                json_dumps(metadata),
+                now,
+            ),
         )
         chunks = chunk_text_units(text, source_id=document_id, chunk_size=chunk_size, overlap=chunk_overlap)
         for index, chunk in enumerate(chunks):
@@ -1555,6 +4689,7 @@ class AIMemory:
         chunks = _deserialize_rows(self.db.fetch_all("SELECT * FROM document_chunks WHERE document_id = ? ORDER BY chunk_index ASC", (document_id,)))
         document["versions"] = versions
         document["chunks"] = chunks
+        document["text"] = self._document_text(document)
         return document
 
     def search_knowledge(
@@ -1645,18 +4780,37 @@ class AIMemory:
     def save_skill(self, name: str, description: str, **kwargs) -> dict[str, Any]:
         now = utcnow_iso()
         owner_id = kwargs.pop("owner_id", None)
+        raw_user_id = kwargs.pop("user_id", None)
+        raw_agent_id = kwargs.pop("agent_id", owner_id)
+        raw_owner_agent_id = kwargs.pop("owner_agent_id", owner_id)
+        actor_agent_id = raw_agent_id or raw_owner_agent_id
+        raw_subject_type = kwargs.pop("source_subject_type", kwargs.pop("subject_type", None))
+        raw_subject_id = kwargs.pop("source_subject_id", kwargs.pop("subject_id", None))
         scope = self._resolve_scope(
-            agent_id=kwargs.pop("agent_id", owner_id),
-            owner_agent_id=kwargs.pop("owner_agent_id", owner_id),
-            subject_type=kwargs.pop("source_subject_type", kwargs.pop("subject_type", None)),
-            subject_id=kwargs.pop("source_subject_id", kwargs.pop("subject_id", None)),
+            agent_id=raw_agent_id,
+            owner_agent_id=raw_owner_agent_id,
+            subject_type=raw_subject_type,
+            subject_id=raw_subject_id,
             interaction_type=kwargs.pop("interaction_type", None),
-            user_id=kwargs.pop("user_id", None),
+            user_id=raw_user_id,
             platform_id=kwargs.pop("platform_id", None),
             workspace_id=kwargs.pop("workspace_id", None),
             team_id=kwargs.pop("team_id", None),
             project_id=kwargs.pop("project_id", None),
             namespace_key=kwargs.pop("namespace_key", None),
+        )
+        requester_scope = self._request_access_scope_for_scope(
+            scope,
+            actor_user_id=raw_user_id,
+            actor_agent_id=actor_agent_id,
+        )
+        self._assert_namespace_permission(
+            namespace_key=scope.get("namespace_key"),
+            resource_type="skill",
+            resource_scope="skill",
+            requester_scope=requester_scope,
+            permission="write",
+            action_label="save skill",
         )
         owner_agent_id = scope["owner_agent_id"]
         source_subject_type = scope["subject_type"]
@@ -2515,9 +5669,17 @@ class AIMemory:
         return {"results": ranked[:limit]}
 
     def archive_memory(self, memory_id: str, **kwargs) -> dict[str, Any]:
+        requester_scope = self._pop_request_access_scope(kwargs)
         memory = self.get(memory_id)
         if memory is None:
             raise ValueError(f"Memory `{memory_id}` does not exist.")
+        self._assert_resource_permission(
+            memory,
+            resource_type="memory",
+            requester_scope=requester_scope,
+            permission="write",
+            action_label="archive memory",
+        )
         if memory.get("status") == "archived":
             return {"memory": memory, "archive": None}
         now = utcnow_iso()
@@ -2626,9 +5788,17 @@ class AIMemory:
         return {"memory": self.get(memory_id), "archive": self.get_archive_unit(archive_id)}
 
     def archive_session(self, session_id: str, **kwargs) -> dict[str, Any]:
+        requester_scope = self._pop_request_access_scope(kwargs)
         session = self.get_session(session_id)
         if session is None:
             raise ValueError(f"Session `{session_id}` does not exist.")
+        self._assert_resource_permission(
+            session,
+            resource_type="session",
+            requester_scope=requester_scope,
+            permission="write",
+            action_label="archive session",
+        )
         turns = self._session_turns(session_id)
         snapshots = _deserialize_rows(self.db.fetch_all("SELECT * FROM working_memory_snapshots WHERE session_id = ? ORDER BY updated_at DESC", (session_id,)))
         memories = self.memory_list(
@@ -3244,9 +6414,17 @@ class AIMemory:
         return {"results": ranked[:limit]}
 
     def promote_session_memories(self, session_id: str, **kwargs) -> dict[str, Any]:
+        requester_scope = self._pop_request_access_scope(kwargs)
         session = self.get_session(session_id)
         if session is None:
             raise ValueError(f"Session `{session_id}` does not exist.")
+        self._assert_resource_permission(
+            session,
+            resource_type="session",
+            requester_scope=requester_scope,
+            permission="write",
+            action_label="promote session memories",
+        )
         turns = self._session_turns(session_id)
         recent_long_term = self.memory_list(
             user_id=session["user_id"],
@@ -3289,9 +6467,17 @@ class AIMemory:
         return {"results": created}
 
     def compress_session_context(self, session_id: str, **kwargs) -> dict[str, Any]:
+        requester_scope = self._pop_request_access_scope(kwargs)
         session = self.get_session(session_id)
         if session is None:
             raise ValueError(f"Session `{session_id}` does not exist.")
+        self._assert_resource_permission(
+            session,
+            resource_type="session",
+            requester_scope=requester_scope,
+            permission="write",
+            action_label="compress session context",
+        )
         turns = self._session_turns(session_id)
         if len(turns) < self.config.memory_policy.compression_turn_threshold:
             return {"snapshot": None, "compressed": False, "turn_count": len(turns)}
@@ -3370,6 +6556,17 @@ class AIMemory:
         }
 
     def prune_session_snapshots(self, session_id: str, **kwargs) -> dict[str, Any]:
+        requester_scope = self._pop_request_access_scope(kwargs)
+        session = self.get_session(session_id)
+        if session is None:
+            raise ValueError(f"Session `{session_id}` does not exist.")
+        self._assert_resource_permission(
+            session,
+            resource_type="session",
+            requester_scope=requester_scope,
+            permission="manage",
+            action_label="prune session snapshots",
+        )
         keep_recent = int(kwargs.pop("keep_recent", self.config.memory_policy.snapshot_keep_recent))
         snapshots = self.db.fetch_all("SELECT id FROM working_memory_snapshots WHERE session_id = ? ORDER BY updated_at DESC", (session_id,))
         removed = 0
@@ -3412,12 +6609,24 @@ class AIMemory:
         return {"results": archived}
 
     def govern_session(self, session_id: str, **kwargs) -> dict[str, Any]:
+        requester_scope = self._pop_request_access_scope(kwargs)
+        session = self.get_session(session_id)
+        if session is None:
+            raise ValueError(f"Session `{session_id}` does not exist.")
+        self._assert_resource_permission(
+            session,
+            resource_type="session",
+            requester_scope=requester_scope,
+            permission="manage",
+            action_label="govern session",
+        )
+        scoped_kwargs = {key: value for key, value in requester_scope.items() if value is not None}
         return {
-            "session": self.get_session(session_id),
+            "session": session,
             "health": self.session_health(session_id),
-            "compression": self.compress_session_context(session_id, **kwargs),
-            "promotion": self.promote_session_memories(session_id, **kwargs),
-            "snapshot_prune": self.prune_session_snapshots(session_id, **kwargs),
+            "compression": self.compress_session_context(session_id, **scoped_kwargs, **kwargs),
+            "promotion": self.promote_session_memories(session_id, **scoped_kwargs, **kwargs),
+            "snapshot_prune": self.prune_session_snapshots(session_id, **scoped_kwargs, **kwargs),
         }
 
     def project(self, limit: int | None = None) -> dict[str, Any]:
@@ -3556,6 +6765,25 @@ class AIMemory:
                     "team_scoped_namespace": True,
                 },
             ),
+            "platform": capability_dict(
+                category="platform",
+                provider="plugin-registry" if self.platform_llm is not None else "local-only",
+                features={
+                    "platform_event_adapter": self.platform_events is not None,
+                    "platform_llm_plugin_registry": True,
+                    "platform_llm_compression": True,
+                    "mcp_required_for_platform_llm": False,
+                },
+                items={
+                    "registered_platform_llm_plugins": list_platform_llm_plugins(),
+                    "configured_platform_llm_plugin": (
+                        asdict(self.config.platform_llm_plugin) if self.config.platform_llm_plugin is not None else None
+                    ),
+                    "active_platform_llm_provider": getattr(self.platform_llm, "provider", None),
+                    "active_platform_llm_model": getattr(self.platform_llm, "model", None),
+                    "platform_event_adapter": type(self.platform_events).__name__ if self.platform_events is not None else None,
+                },
+            ),
             "embeddings": describe_embedding_runtime(),
             "vector_index": getattr(self.vector_index, "describe_capabilities", lambda: {})(),
             "graph_store": getattr(self.graph_store, "describe_capabilities", lambda: {})(),
@@ -3625,6 +6853,10 @@ class AIMemory:
 
             self._structured_api = StructuredAIMemoryAPI(self)
         return self._structured_api
+
+    @property
+    def events(self):
+        return self.platform_events
 
     def litellm_config(self) -> dict[str, Any]:
         return self.config.providers.as_litellm_kwargs()
@@ -3703,10 +6935,24 @@ class AIMemory:
         budget_chars: int | None = None,
         max_sentences: int = 8,
         max_highlights: int = 12,
+        **kwargs: Any,
     ) -> dict[str, Any]:
+        requester_scope = self._pop_request_access_scope(kwargs)
         skill = self.get_skill(skill_id)
         if skill is None:
             raise ValueError(f"Skill `{skill_id}` does not exist.")
+        self._assert_resource_permission(
+            {
+                **skill,
+                "resource_scope": "skill",
+                "subject_type": skill.get("source_subject_type") or skill.get("subject_type"),
+                "subject_id": skill.get("source_subject_id") or skill.get("subject_id"),
+            },
+            resource_type="skill",
+            requester_scope=requester_scope,
+            permission="write",
+            action_label="refresh skill execution context",
+        )
         current_snapshot = skill.get("current_snapshot")
         if current_snapshot is None:
             raise ValueError(f"Skill `{skill_id}` does not have a stored snapshot.")
@@ -4095,6 +7341,486 @@ class AIMemory:
             if value is not None
         }
 
+    def _request_access_scope(
+        self,
+        *,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        owner_agent_id: str | None = None,
+        subject_type: str | None = None,
+        subject_id: str | None = None,
+        interaction_type: str | None = None,
+        platform_id: str | None = None,
+        workspace_id: str | None = None,
+        team_id: str | None = None,
+        project_id: str | None = None,
+        namespace_key: str | None = None,
+    ) -> dict[str, Any]:
+        explicit_values = (
+            user_id,
+            agent_id,
+            owner_agent_id,
+            subject_type,
+            subject_id,
+            interaction_type,
+            platform_id,
+            workspace_id,
+            team_id,
+            project_id,
+            namespace_key,
+        )
+        if not any(value is not None for value in explicit_values):
+            return CollaborationScope().as_dict(include_none=True)
+        scope = CollaborationScope.from_value(
+            {
+                "user_id": user_id,
+                "agent_id": agent_id,
+                "owner_agent_id": owner_agent_id,
+                "subject_type": subject_type,
+                "subject_id": subject_id,
+                "interaction_type": interaction_type,
+                "platform_id": platform_id or self.config.platform_id,
+                "workspace_id": workspace_id or self.config.workspace_id,
+                "team_id": team_id or self.config.team_id,
+                "project_id": project_id or self.config.project_id,
+                "namespace_key": namespace_key,
+            }
+        )
+        payload = scope.as_dict(include_none=True)
+        payload["namespace_key"] = scope.resolved_namespace_key()
+        return payload
+
+    def _request_access_scope_for_scope(
+        self,
+        scope: dict[str, Any] | None,
+        *,
+        actor_user_id: str | None = None,
+        actor_agent_id: str | None = None,
+    ) -> dict[str, Any]:
+        resolved_scope = dict(scope or {})
+        if actor_user_id is None and actor_agent_id is None:
+            return self._request_access_scope()
+        resolved_actor_agent_id = actor_agent_id or resolved_scope.get("owner_agent_id") or resolved_scope.get("agent_id")
+        return self._request_access_scope(
+            user_id=actor_user_id if actor_user_id is not None else resolved_scope.get("user_id"),
+            agent_id=resolved_actor_agent_id,
+            owner_agent_id=resolved_actor_agent_id,
+            subject_type=resolved_scope.get("subject_type"),
+            subject_id=resolved_scope.get("subject_id"),
+            interaction_type=resolved_scope.get("interaction_type"),
+            platform_id=resolved_scope.get("platform_id"),
+            workspace_id=resolved_scope.get("workspace_id"),
+            team_id=resolved_scope.get("team_id"),
+            project_id=resolved_scope.get("project_id"),
+            namespace_key=resolved_scope.get("namespace_key"),
+        )
+
+    def _resource_metadata(self, row: dict[str, Any] | None) -> dict[str, Any]:
+        payload = dict((row or {}).get("metadata") or {})
+        for key in (
+            "user_id",
+            "agent_id",
+            "owner_agent_id",
+            "source_agent_id",
+            "target_agent_id",
+            "subject_type",
+            "subject_id",
+            "interaction_type",
+            "platform_id",
+            "workspace_id",
+            "team_id",
+            "project_id",
+            "namespace_key",
+            "visibility",
+            "scope",
+            "artifact_type",
+            "reflection_type",
+            "memory_type",
+        ):
+            value = (row or {}).get(key)
+            if value is not None and payload.get(key) is None:
+                payload[key] = value
+        return payload
+
+    def _resource_scope_value(self, resource_type: str, row: dict[str, Any]) -> str:
+        if resource_type == "memory":
+            return str(row.get("scope") or row.get("memory_scope") or "all")
+        if resource_type == "context":
+            return str(row.get("artifact_type") or "artifact")
+        if resource_type == "handoff":
+            return "handoff"
+        if resource_type == "reflection":
+            return str(row.get("reflection_type") or "reflection")
+        if resource_type == "archive":
+            return str(row.get("domain") or row.get("resource_scope") or "archive")
+        if resource_type == "knowledge":
+            return str(row.get("resource_scope") or "document")
+        if resource_type == "skill":
+            return str(row.get("resource_scope") or "skill")
+        if resource_type == "session":
+            return str(row.get("resource_scope") or "session")
+        return str(row.get("resource_scope") or "namespace")
+
+    def _acl_principals(self, requester_scope: dict[str, Any]) -> list[tuple[str, str]]:
+        principals: list[tuple[str, str]] = []
+        for principal_type, principal_id in (
+            ("agent", requester_scope.get("owner_agent_id")),
+            ("agent", requester_scope.get("agent_id")),
+            ("user", requester_scope.get("user_id")),
+            ("workspace", requester_scope.get("workspace_id")),
+            ("team", requester_scope.get("team_id")),
+            ("project", requester_scope.get("project_id")),
+            ("namespace", requester_scope.get("namespace_key")),
+        ):
+            if principal_id:
+                principals.append((principal_type, str(principal_id)))
+        subject_type = requester_scope.get("subject_type")
+        subject_id = requester_scope.get("subject_id")
+        if subject_id:
+            principals.append(("subject", str(subject_id)))
+            if subject_type:
+                principals.append((f"subject:{subject_type}", str(subject_id)))
+        deduped: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in principals:
+            if item in seen:
+                continue
+            seen.add(item)
+            deduped.append(item)
+        return deduped
+
+    def _acl_permission_candidates(self, permission: str) -> list[str]:
+        normalized = str(permission or "read").strip().lower()
+        if normalized == "write":
+            return ["write", "read_write", "manage", "admin", "*"]
+        return ["read", "read_write", "manage", "admin", "*"]
+
+    def _acl_resource_scope_candidates(self, resource_scope: str) -> list[str]:
+        normalized = str(resource_scope or "namespace").strip() or "namespace"
+        candidates = [normalized]
+        for candidate in (normalized.replace("-", "_"), normalized.replace("_", "-")):
+            if candidate and candidate not in candidates:
+                candidates.append(candidate)
+        while len(candidates) < 3:
+            candidates.append(candidates[-1])
+        return candidates[:3]
+
+    def _acl_rule_allows(
+        self,
+        *,
+        namespace_key: str | None,
+        resource_type: str,
+        resource_scope: str,
+        requester_scope: dict[str, Any],
+        permission: str = "read",
+    ) -> bool:
+        if not namespace_key:
+            return False
+        for principal_type, principal_id in self._acl_principals(requester_scope):
+            scope_candidates = self._acl_resource_scope_candidates(resource_scope)
+            allowed = self.db.fetch_one(
+                """
+                SELECT id
+                FROM scope_acl_rules
+                WHERE namespace_key = ?
+                  AND principal_type = ?
+                  AND principal_id = ?
+                  AND resource_type IN (?, '*', 'all')
+                  AND resource_scope IN (?, ?, ?, 'namespace', '*', 'all')
+                  AND permission IN (?, ?, ?, ?, ?)
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (
+                    namespace_key,
+                    principal_type,
+                    principal_id,
+                    resource_type,
+                    *scope_candidates,
+                    *self._acl_permission_candidates(permission),
+                ),
+            )
+            if allowed is not None:
+                return True
+        return False
+
+    def _default_visibility(self, resource_type: str, row: dict[str, Any]) -> str:
+        if resource_type == "handoff":
+            return str(row.get("visibility") or "target_agent")
+        if resource_type == "context":
+            return "target_agent" if row.get("target_agent_id") else "private_agent"
+        if resource_type == "reflection":
+            return "private_agent"
+        return str(row.get("visibility") or "private_agent")
+
+    def _is_resource_visible(
+        self,
+        row: dict[str, Any],
+        *,
+        resource_type: str,
+        requester_scope: dict[str, Any] | None,
+        permission: str = "read",
+    ) -> bool:
+        if requester_scope is None or not any(value is not None for value in requester_scope.values()):
+            return True
+        metadata = self._resource_metadata(row)
+        namespace_key = str(row.get("namespace_key") or metadata.get("namespace_key") or "").strip() or None
+        resource_scope = self._resource_scope_value(resource_type, row)
+        if self._acl_rule_allows(
+            namespace_key=namespace_key,
+            resource_type=resource_type,
+            resource_scope=resource_scope,
+            requester_scope=requester_scope,
+            permission=permission,
+        ):
+            return True
+
+        visibility = str(
+            row.get("visibility")
+            or metadata.get("visibility")
+            or self._default_visibility(resource_type, row)
+        ).strip().lower()
+        requester_agents = {
+            str(value)
+            for value in [requester_scope.get("owner_agent_id"), requester_scope.get("agent_id")]
+            if value
+        }
+        requester_user = str(requester_scope.get("user_id") or "").strip()
+        requester_subject_id = str(requester_scope.get("subject_id") or "").strip()
+        requester_subject_type = str(requester_scope.get("subject_type") or "").strip()
+
+        row_owner_agent = str(
+            row.get("owner_agent_id")
+            or row.get("source_agent_id")
+            or metadata.get("owner_agent_id")
+            or metadata.get("source_agent_id")
+            or row.get("agent_id")
+            or metadata.get("agent_id")
+            or ""
+        ).strip()
+        row_target_agent = str(row.get("target_agent_id") or metadata.get("target_agent_id") or "").strip()
+        row_user = str(row.get("user_id") or metadata.get("user_id") or "").strip()
+        row_subject_id = str(row.get("subject_id") or metadata.get("subject_id") or "").strip()
+        row_subject_type = str(row.get("subject_type") or metadata.get("subject_type") or "").strip()
+
+        if visibility in {"public", "global"}:
+            return True
+        if visibility in {"workspace", "shared_workspace"}:
+            return bool(
+                requester_scope.get("workspace_id")
+                and metadata.get("workspace_id")
+                and str(requester_scope.get("workspace_id")) == str(metadata.get("workspace_id"))
+            )
+        if visibility in {"team", "shared_team"}:
+            return bool(
+                requester_scope.get("team_id")
+                and metadata.get("team_id")
+                and str(requester_scope.get("team_id")) == str(metadata.get("team_id"))
+            )
+        if visibility in {"project", "shared_project"}:
+            return bool(
+                requester_scope.get("project_id")
+                and metadata.get("project_id")
+                and str(requester_scope.get("project_id")) == str(metadata.get("project_id"))
+            )
+        if visibility in {"private_user", "user_private", "user"}:
+            return bool(requester_user and row_user and requester_user == row_user)
+        if visibility in {"subject", "subject_private", "private_subject"}:
+            return bool(
+                requester_subject_id
+                and row_subject_id
+                and requester_subject_id == row_subject_id
+                and (not requester_subject_type or not row_subject_type or requester_subject_type == row_subject_type)
+            )
+        if visibility in {"target_agent"}:
+            if requester_agents & {row_owner_agent, row_target_agent}:
+                return True
+            return False
+        if visibility in {"shared_agents", "agent_shared"}:
+            if requester_agents & {row_owner_agent, row_target_agent}:
+                return True
+            if namespace_key and requester_scope.get("namespace_key") and str(requester_scope.get("namespace_key")) == namespace_key:
+                return True
+            return False
+        if requester_agents & {row_owner_agent}:
+            return True
+        if not row_owner_agent and requester_user and row_user and requester_user == row_user:
+            return True
+        return False
+
+    def _request_scope_active(self, requester_scope: dict[str, Any] | None) -> bool:
+        return bool(requester_scope and any(value is not None for value in requester_scope.values()))
+
+    def _resource_owner_matches(self, row: dict[str, Any], requester_scope: dict[str, Any] | None) -> bool:
+        if not self._request_scope_active(requester_scope):
+            return True
+        metadata = self._resource_metadata(row)
+        requester_agents = {
+            str(value)
+            for value in [requester_scope.get("owner_agent_id"), requester_scope.get("agent_id")]
+            if value
+        }
+        requester_user = str(requester_scope.get("user_id") or "").strip()
+        row_owner_agent = str(
+            row.get("owner_agent_id")
+            or row.get("source_agent_id")
+            or metadata.get("owner_agent_id")
+            or metadata.get("source_agent_id")
+            or row.get("agent_id")
+            or metadata.get("agent_id")
+            or ""
+        ).strip()
+        row_user = str(row.get("user_id") or metadata.get("user_id") or "").strip()
+        if requester_agents and row_owner_agent and requester_agents & {row_owner_agent}:
+            return True
+        if not row_owner_agent and requester_user and row_user and requester_user == row_user:
+            return True
+        return False
+
+    def _requester_namespace_matches(self, requester_scope: dict[str, Any] | None, namespace_key: str | None) -> bool:
+        if not self._request_scope_active(requester_scope):
+            return True
+        requester_namespace = str((requester_scope or {}).get("namespace_key") or "").strip()
+        resolved_namespace = str(namespace_key or "").strip()
+        return bool(requester_namespace and resolved_namespace and requester_namespace == resolved_namespace)
+
+    def _has_namespace_permission(
+        self,
+        *,
+        namespace_key: str | None,
+        resource_type: str,
+        resource_scope: str,
+        requester_scope: dict[str, Any] | None,
+        permission: str = "write",
+    ) -> bool:
+        if not self._request_scope_active(requester_scope):
+            return True
+        resolved_namespace = str(namespace_key or "").strip() or None
+        if self._acl_rule_allows(
+            namespace_key=resolved_namespace,
+            resource_type=resource_type,
+            resource_scope=resource_scope,
+            requester_scope=requester_scope or {},
+            permission=permission,
+        ):
+            return True
+        if permission in {"manage", "admin"}:
+            return bool(
+                self._requester_namespace_matches(requester_scope, resolved_namespace)
+                and ((requester_scope or {}).get("owner_agent_id") or (requester_scope or {}).get("user_id"))
+            )
+        return bool(
+            self._requester_namespace_matches(requester_scope, resolved_namespace)
+            and (
+                (requester_scope or {}).get("owner_agent_id")
+                or (requester_scope or {}).get("agent_id")
+                or (requester_scope or {}).get("user_id")
+            )
+        )
+
+    def _assert_namespace_permission(
+        self,
+        *,
+        namespace_key: str | None,
+        resource_type: str,
+        resource_scope: str,
+        requester_scope: dict[str, Any] | None,
+        permission: str = "write",
+        action_label: str | None = None,
+    ) -> None:
+        if self._has_namespace_permission(
+            namespace_key=namespace_key,
+            resource_type=resource_type,
+            resource_scope=resource_scope,
+            requester_scope=requester_scope,
+            permission=permission,
+        ):
+            return
+        label = action_label or f"{permission} {resource_type}"
+        raise PermissionError(
+            f"Requester does not have `{permission}` access for `{label}` in namespace `{namespace_key or 'default'}`."
+        )
+
+    def _has_resource_permission(
+        self,
+        row: dict[str, Any],
+        *,
+        resource_type: str,
+        requester_scope: dict[str, Any] | None,
+        permission: str = "write",
+    ) -> bool:
+        if not self._request_scope_active(requester_scope):
+            return True
+        if permission == "read":
+            return self._is_resource_visible(row, resource_type=resource_type, requester_scope=requester_scope, permission=permission)
+        if self._resource_owner_matches(row, requester_scope):
+            return True
+        metadata = self._resource_metadata(row)
+        namespace_key = str(row.get("namespace_key") or metadata.get("namespace_key") or "").strip() or None
+        resource_scope = self._resource_scope_value(resource_type, row)
+        if self._acl_rule_allows(
+            namespace_key=namespace_key,
+            resource_type=resource_type,
+            resource_scope=resource_scope,
+            requester_scope=requester_scope or {},
+            permission=permission,
+        ):
+            return True
+        return False
+
+    def _assert_resource_permission(
+        self,
+        row: dict[str, Any],
+        *,
+        resource_type: str,
+        requester_scope: dict[str, Any] | None,
+        permission: str = "write",
+        action_label: str | None = None,
+    ) -> None:
+        if self._has_resource_permission(
+            row,
+            resource_type=resource_type,
+            requester_scope=requester_scope,
+            permission=permission,
+        ):
+            return
+        label = action_label or f"{permission} {resource_type}"
+        raise PermissionError(
+            f"Requester does not have `{permission}` access for `{label}` on `{row.get('id') or row.get('record_id') or 'resource'}`."
+        )
+
+    def _pop_request_access_scope(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        agent_id = kwargs.pop("agent_id", None)
+        owner_agent_id = kwargs.pop("owner_agent_id", None)
+        actor_agent_id = agent_id or owner_agent_id
+        return self._request_access_scope(
+            user_id=kwargs.pop("user_id", None),
+            agent_id=actor_agent_id,
+            owner_agent_id=actor_agent_id,
+            subject_type=kwargs.pop("subject_type", kwargs.pop("source_subject_type", None)),
+            subject_id=kwargs.pop("subject_id", kwargs.pop("source_subject_id", None)),
+            interaction_type=kwargs.pop("interaction_type", None),
+            platform_id=kwargs.pop("platform_id", None),
+            workspace_id=kwargs.pop("workspace_id", None),
+            team_id=kwargs.pop("team_id", None),
+            project_id=kwargs.pop("project_id", None),
+            namespace_key=kwargs.pop("namespace_key", None),
+        )
+
+    def _filter_accessible_rows(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        resource_type: str,
+        requester_scope: dict[str, Any] | None,
+        permission: str = "read",
+    ) -> list[dict[str, Any]]:
+        return [
+            row
+            for row in rows
+            if self._is_resource_visible(row, resource_type=resource_type, requester_scope=requester_scope, permission=permission)
+        ]
+
     def _namespace_filter_value(
         self,
         *,
@@ -4425,13 +8151,25 @@ class AIMemory:
         metadata: dict[str, Any] | None = None,
         memory_type: str = str(MemoryType.SEMANTIC),
         importance: float = 0.5,
+        confidence: float = 0.5,
+        tier: str | None = None,
+        summary_l0: str | None = None,
+        summary_l1: str | None = None,
         long_term: bool = True,
         source: str = "manual",
+        version: int = 1,
+        supersedes_memory_id: str | None = None,
+        superseded_by_memory_id: str | None = None,
+        skip_existing_lookup: bool = False,
+        event_type: str = "ADD",
+        event_payload: dict[str, Any] | None = None,
+        reason_code: str | None = None,
     ) -> dict[str, Any]:
         cleaned = text.strip()
         if not cleaned:
             raise ValueError("text must not be empty")
         scope = str(MemoryScope.LONG_TERM if long_term else MemoryScope.SESSION)
+        actor_agent_id = agent_id or owner_agent_id
         resolved_scope = self._resolve_scope(
             user_id=user_id,
             agent_id=agent_id,
@@ -4445,6 +8183,19 @@ class AIMemory:
             project_id=project_id,
             namespace_key=namespace_key,
         )
+        requester_scope = self._request_access_scope_for_scope(
+            resolved_scope,
+            actor_user_id=user_id,
+            actor_agent_id=actor_agent_id,
+        )
+        self._assert_namespace_permission(
+            namespace_key=resolved_scope.get("namespace_key"),
+            resource_type="memory",
+            resource_scope=scope,
+            requester_scope=requester_scope,
+            permission="write",
+            action_label="create memory",
+        )
         user_id = resolved_scope["user_id"] or self.config.default_user_id
         owner_agent_id = resolved_scope["owner_agent_id"]
         subject_type = resolved_scope["subject_type"]
@@ -4452,6 +8203,13 @@ class AIMemory:
         interaction_type = resolved_scope["interaction_type"]
         namespace_key = resolved_scope.get("namespace_key")
         metadata = merge_metadata(metadata or {}, self._scope_metadata(resolved_scope))
+        structured = self._memory_structured_fields(
+            metadata,
+            confidence=confidence,
+            tier=tier,
+            summary_l0=summary_l0,
+            summary_l1=summary_l1,
+        )
         now = utcnow_iso()
         table_name = self._memory_table_for_scope(scope)
         bundle = self._ensure_memory_bundle(
@@ -4465,7 +8223,7 @@ class AIMemory:
             metadata=self._scope_metadata(resolved_scope),
         )
         existing, relation = (None, None)
-        if source != "auto_compression":
+        if source != "auto_compression" and not skip_existing_lookup:
             existing, relation = self._find_existing_memory(
                 cleaned,
                 user_id=user_id,
@@ -4500,8 +8258,7 @@ class AIMemory:
                         "importance": new_importance,
                         "metadata": merged_metadata,
                         "updated_at": now,
-                    },
-                    text=existing["text"],
+                    }
                 ),
             )
             self._record_memory_event(existing["id"], "DUPLICATE_TOUCH", {"incoming_text": cleaned})
@@ -4526,18 +8283,43 @@ class AIMemory:
             return touched
         if existing is not None and relation == "merge":
             merged_text = merge_text_fragments([existing["text"], cleaned], max_sentences=6, max_chars=480)
-            merged_summary = build_summary(split_sentences(merged_text), max_sentences=3, max_chars=220)
+            merged_payload = self._memory_text_payload(
+                merged_text,
+                summary_l0=structured["summary_l0"],
+                summary_l1=structured["summary_l1"],
+            )
+            merged_summary = merged_payload["summary_l1"]
             merged_metadata = merge_metadata(existing.get("metadata"), metadata)
             new_importance = max(float(existing.get("importance", 0.5) or 0.0), float(importance))
+            new_confidence = max(float(existing.get("confidence", 0.5) or 0.0), float(structured["confidence"]))
+            new_tier = str(merged_metadata.get("tier") or structured["tier"] or existing.get("tier") or "working")
             existing_table = self._memory_table_for_id(existing["id"])
             assert existing_table is not None
             self.db.execute(
                 f"""
                 UPDATE {existing_table}
-                SET summary = ?, importance = ?, namespace_key = ?, metadata = ?, updated_at = ?, bundle_id = ?
+                SET text = ?, text_hash = ?, storage_policy = ?, storage_ref = ?, payload_bytes = ?, summary = ?, summary_l0 = ?, summary_l1 = ?,
+                    importance = ?, confidence = ?, tier = ?, namespace_key = ?, metadata = ?, updated_at = ?, bundle_id = ?
                 WHERE id = ?
                 """,
-                (merged_summary, new_importance, namespace_key or existing.get("namespace_key"), json_dumps(merged_metadata), now, bundle["id"], existing["id"]),
+                (
+                    merged_payload["text"],
+                    merged_payload["text_hash"],
+                    merged_payload["storage_policy"],
+                    merged_payload["storage_ref"],
+                    merged_payload["payload_bytes"],
+                    merged_summary,
+                    merged_payload["summary_l0"],
+                    merged_payload["summary_l1"],
+                    new_importance,
+                    new_confidence,
+                    new_tier,
+                    namespace_key or existing.get("namespace_key"),
+                    json_dumps(merged_metadata),
+                    now,
+                    bundle["id"],
+                    existing["id"],
+                ),
             )
             self._upsert_bundle_item(
                 existing["scope"],
@@ -4545,13 +8327,21 @@ class AIMemory:
                 self._bundle_memory_item_payload(
                     {
                         **existing,
+                        "text": merged_payload["text"],
+                        "text_hash": merged_payload["text_hash"],
+                        "storage_policy": merged_payload["storage_policy"],
+                        "storage_ref": merged_payload["storage_ref"],
+                        "payload_bytes": merged_payload["payload_bytes"],
                         "bundle_id": bundle["id"],
                         "summary": merged_summary,
+                        "summary_l0": merged_payload["summary_l0"],
+                        "summary_l1": merged_payload["summary_l1"],
                         "importance": new_importance,
+                        "confidence": new_confidence,
+                        "tier": new_tier,
                         "metadata": merged_metadata,
                         "updated_at": now,
-                    },
-                    text=merged_text,
+                    }
                 ),
             )
             self._record_memory_event(existing["id"], "MERGE", {"incoming_text": cleaned})
@@ -4577,16 +8367,32 @@ class AIMemory:
 
         memory_id = make_id("mem")
         content_id = make_uuid7()
-        summary = build_summary(split_sentences(cleaned), max_sentences=3, max_chars=220)
+        text_payload = self._memory_text_payload(
+            cleaned,
+            summary_l0=structured["summary_l0"],
+            summary_l1=structured["summary_l1"],
+        )
+        summary = text_payload["summary_l1"]
         self.db.execute(
             f"""
-            INSERT INTO {table_name}(id, bundle_id, content_id, user_id, agent_id, owner_agent_id, subject_type, subject_id, interaction_type, namespace_key, session_id, run_id, source_session_id, source_run_id, memory_type, summary, importance, status, source, metadata, content_format, created_at, updated_at, archived_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO {table_name}(
+                id, bundle_id, content_id, text, text_hash, storage_policy, storage_ref, payload_bytes,
+                user_id, agent_id, owner_agent_id, subject_type, subject_id, interaction_type, namespace_key,
+                session_id, run_id, source_session_id, source_run_id, memory_type, summary, summary_l0, summary_l1,
+                importance, confidence, visibility, tier, version, supersedes_memory_id, superseded_by_memory_id,
+                status, source, metadata, content_format, created_at, updated_at, archived_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 memory_id,
                 bundle["id"],
                 content_id,
+                text_payload["text"],
+                text_payload["text_hash"],
+                text_payload["storage_policy"],
+                text_payload["storage_ref"],
+                text_payload["payload_bytes"],
                 user_id,
                 owner_agent_id,
                 owner_agent_id,
@@ -4600,7 +8406,15 @@ class AIMemory:
                 run_id,
                 memory_type,
                 summary,
+                text_payload["summary_l0"],
+                text_payload["summary_l1"],
                 float(importance),
+                float(structured["confidence"]),
+                "private_agent",
+                str(structured["tier"]),
+                int(version),
+                supersedes_memory_id,
+                superseded_by_memory_id,
                 "active",
                 source,
                 json_dumps(metadata),
@@ -4618,8 +8432,20 @@ class AIMemory:
                     "id": memory_id,
                     "bundle_id": bundle["id"],
                     "content_id": content_id,
+                    "text": text_payload["text"],
+                    "text_hash": text_payload["text_hash"],
+                    "storage_policy": text_payload["storage_policy"],
+                    "storage_ref": text_payload["storage_ref"],
+                    "payload_bytes": text_payload["payload_bytes"],
                     "summary": summary,
+                    "summary_l0": text_payload["summary_l0"],
+                    "summary_l1": text_payload["summary_l1"],
                     "importance": float(importance),
+                    "confidence": float(structured["confidence"]),
+                    "tier": str(structured["tier"]),
+                    "version": int(version),
+                    "supersedes_memory_id": supersedes_memory_id,
+                    "superseded_by_memory_id": superseded_by_memory_id,
                     "status": "active",
                     "source": source,
                     "memory_type": memory_type,
@@ -4631,15 +8457,37 @@ class AIMemory:
                     "created_at": now,
                     "updated_at": now,
                     "archived_at": None,
-                },
-                text=cleaned,
+                }
             ),
         )
-        self._record_memory_event(memory_id, "ADD", {"text": cleaned, "scope": scope})
+        self._record_memory_event(
+            memory_id,
+            event_type,
+            {"text": cleaned, "scope": scope, **dict(event_payload or {})},
+            reason_code=reason_code or event_type.lower(),
+            source_row={
+                "id": memory_id,
+                "scope": scope,
+                "bundle_id": bundle["id"],
+                "user_id": user_id,
+                "agent_id": owner_agent_id,
+                "owner_agent_id": owner_agent_id,
+                "subject_type": subject_type,
+                "subject_id": subject_id,
+                "interaction_type": interaction_type,
+                "namespace_key": namespace_key,
+                "session_id": session_id,
+                "run_id": run_id,
+                "version": int(version),
+                "metadata": metadata,
+            },
+            source_table=table_name,
+            version=int(version),
+        )
         created = self.get(memory_id)
         assert created is not None
         self._index_memory(created)
-        created["_event"] = "ADD"
+        created["_event"] = event_type
         warning = self._maybe_compact_memory_scope(
             scope=scope,
             bundle_id=bundle["id"],
@@ -4871,11 +8719,111 @@ class AIMemory:
             "compression": compression.as_dict(),
         }
 
-    def _record_memory_event(self, memory_id: str, event_type: str, payload: dict[str, Any]) -> None:
+    def _record_memory_event(
+        self,
+        memory_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+        *,
+        reason_code: str | None = None,
+        source_row: dict[str, Any] | None = None,
+        source_table: str | None = None,
+        version: int | None = None,
+    ) -> None:
+        row = source_row or self.get(memory_id) or {}
+        metadata = dict(row.get("metadata") or {})
+        actor_id = row.get("actor_id") or metadata.get("actor_id")
         self.db.execute(
-            "INSERT INTO memory_events(id, memory_id, event_type, payload, created_at) VALUES (?, ?, ?, ?, ?)",
-            (make_id("mevt"), memory_id, event_type, json_dumps(payload), utcnow_iso()),
+            """
+            INSERT INTO memory_events(
+                id, memory_id, event_type, session_id, run_id, actor_id, reason_code, source_table, version, payload, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                make_id("mevt"),
+                memory_id,
+                event_type,
+                row.get("session_id"),
+                row.get("run_id"),
+                actor_id,
+                reason_code,
+                source_table or self._memory_table_for_id(memory_id),
+                int(version if version is not None else row.get("version", 1) or 1),
+                json_dumps(payload),
+                utcnow_iso(),
+            ),
         )
+
+    def _upsert_memory_link(
+        self,
+        source_memory_id: str,
+        target_memory_id: str,
+        *,
+        link_type: str,
+        weight: float = 1.0,
+        confidence: float = 0.5,
+        metadata: dict[str, Any] | None = None,
+        bundle_id: str | None = None,
+        source_domain: str = "memory",
+        target_domain: str = "memory",
+    ) -> dict[str, Any]:
+        now = utcnow_iso()
+        payload = dict(metadata or {})
+        existing = self.db.fetch_one(
+            """
+            SELECT * FROM memory_links
+            WHERE source_memory_id = ? AND target_memory_id = ? AND link_type = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (source_memory_id, target_memory_id, link_type),
+        )
+        if existing is None:
+            link_id = make_id("mlink")
+            self.db.execute(
+                """
+                INSERT INTO memory_links(
+                    id, source_memory_id, target_memory_id, link_type, bundle_id, weight, confidence,
+                    source_domain, target_domain, metadata, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    link_id,
+                    source_memory_id,
+                    target_memory_id,
+                    link_type,
+                    bundle_id,
+                    float(weight),
+                    float(confidence),
+                    source_domain,
+                    target_domain,
+                    json_dumps(payload),
+                    now,
+                ),
+            )
+            existing = self.db.fetch_one("SELECT * FROM memory_links WHERE id = ?", (link_id,))
+        else:
+            merged_metadata = merge_metadata(_loads(existing.get("metadata"), {}), payload)
+            self.db.execute(
+                """
+                UPDATE memory_links
+                SET bundle_id = ?, weight = ?, confidence = ?, source_domain = ?, target_domain = ?, metadata = ?
+                WHERE id = ?
+                """,
+                (
+                    bundle_id or existing.get("bundle_id"),
+                    float(weight),
+                    float(confidence),
+                    source_domain,
+                    target_domain,
+                    json_dumps(merged_metadata),
+                    existing["id"],
+                ),
+            )
+            existing = self.db.fetch_one("SELECT * FROM memory_links WHERE id = ?", (existing["id"],))
+        return _deserialize_row(existing) or dict(existing or {})
 
     def _persist_object(self, stored, *, mime_type: str, metadata: dict[str, Any]) -> dict[str, Any]:
         row = self.db.fetch_one("SELECT * FROM objects WHERE object_key = ?", (stored.object_key,))
@@ -4898,8 +8846,12 @@ class AIMemory:
         index_text = self._memory_index_text(memory)
         self.db.execute(
             """
-            INSERT INTO memory_index(record_id, domain, scope, user_id, owner_agent_id, subject_type, subject_id, interaction_type, namespace_key, session_id, text, keywords, score_boost, updated_at, metadata)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO memory_index(
+                record_id, domain, scope, user_id, owner_agent_id, subject_type, subject_id, interaction_type,
+                namespace_key, visibility, tier, access_count, last_accessed_at, actor_id, session_id, text,
+                keywords, score_boost, updated_at, metadata
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(record_id) DO UPDATE SET
                 scope = excluded.scope,
                 user_id = excluded.user_id,
@@ -4908,6 +8860,11 @@ class AIMemory:
                 subject_id = excluded.subject_id,
                 interaction_type = excluded.interaction_type,
                 namespace_key = excluded.namespace_key,
+                visibility = excluded.visibility,
+                tier = excluded.tier,
+                access_count = excluded.access_count,
+                last_accessed_at = excluded.last_accessed_at,
+                actor_id = excluded.actor_id,
                 session_id = excluded.session_id,
                 text = excluded.text,
                 keywords = excluded.keywords,
@@ -4925,6 +8882,11 @@ class AIMemory:
                 memory.get("subject_id"),
                 memory.get("interaction_type"),
                 memory.get("namespace_key"),
+                memory.get("visibility"),
+                memory.get("tier"),
+                int(memory.get("access_count", 0) or 0),
+                memory.get("last_accessed_at"),
+                memory.get("actor_id"),
                 memory.get("session_id"),
                 index_text,
                 json_dumps(keywords),
@@ -5218,6 +9180,101 @@ class AIMemory:
         )
         self.graph_store.upsert_node("archive", payload["archive_unit_id"], payload["text"][:120], payload.get("metadata"))
 
+    def _index_context_artifact(self, artifact: dict[str, Any]) -> None:
+        text = str(artifact.get("content") or "")
+        keywords = extract_keywords(" ".join(part for part in [artifact.get("artifact_type"), text] if part))
+        self._upsert_text_search_record(
+            record_id=artifact["id"],
+            domain="context",
+            collection="context_artifact_index",
+            title=artifact.get("artifact_type"),
+            text=text,
+            keywords=keywords,
+            updated_at=artifact.get("created_at"),
+            owner_agent_id=artifact.get("owner_agent_id"),
+            session_id=artifact.get("session_id"),
+            run_id=artifact.get("run_id"),
+            namespace_key=artifact.get("namespace_key"),
+        )
+        self._index_semantic_record(
+            collection="context_artifact_index",
+            record_id=artifact["id"],
+            domain="context",
+            text=text,
+            updated_at=str(artifact.get("created_at") or utcnow_iso()),
+            quality=0.74,
+            metadata={
+                "artifact_type": artifact.get("artifact_type"),
+                "target_agent_id": artifact.get("target_agent_id"),
+                **dict(artifact.get("metadata") or {}),
+            },
+            keywords=keywords,
+        )
+
+    def _index_handoff_pack(self, handoff: dict[str, Any]) -> None:
+        text = str(handoff.get("text") or "")
+        keywords = extract_keywords(" ".join(part for part in [handoff.get("source_agent_id"), handoff.get("target_agent_id"), text] if part))
+        self._upsert_text_search_record(
+            record_id=handoff["id"],
+            domain="handoff",
+            collection="handoff_pack_index",
+            title=" -> ".join(part for part in [handoff.get("source_agent_id"), handoff.get("target_agent_id")] if part),
+            text=text,
+            keywords=keywords,
+            updated_at=handoff.get("created_at"),
+            owner_agent_id=handoff.get("source_agent_id"),
+            session_id=handoff.get("source_session_id"),
+            run_id=handoff.get("source_run_id"),
+            namespace_key=handoff.get("namespace_key"),
+        )
+        self._index_semantic_record(
+            collection="handoff_pack_index",
+            record_id=handoff["id"],
+            domain="handoff",
+            text=text,
+            updated_at=str(handoff.get("created_at") or utcnow_iso()),
+            quality=0.78,
+            metadata={
+                "source_agent_id": handoff.get("source_agent_id"),
+                "target_agent_id": handoff.get("target_agent_id"),
+                "source_session_id": handoff.get("source_session_id"),
+                "source_run_id": handoff.get("source_run_id"),
+                **dict(handoff.get("metadata") or {}),
+            },
+            keywords=keywords,
+        )
+
+    def _index_reflection_memory(self, reflection: dict[str, Any]) -> None:
+        text = str(reflection.get("text") or "")
+        keywords = extract_keywords(" ".join(part for part in [reflection.get("reflection_type"), text] if part))
+        self._upsert_text_search_record(
+            record_id=reflection["id"],
+            domain="reflection",
+            collection="reflection_memory_index",
+            title=reflection.get("reflection_type"),
+            text=text,
+            keywords=keywords,
+            updated_at=reflection.get("updated_at"),
+            owner_agent_id=reflection.get("owner_agent_id"),
+            session_id=reflection.get("session_id"),
+            run_id=reflection.get("run_id"),
+        )
+        self._index_semantic_record(
+            collection="reflection_memory_index",
+            record_id=reflection["id"],
+            domain="reflection",
+            text=text,
+            updated_at=str(reflection.get("updated_at") or utcnow_iso()),
+            quality=float(reflection.get("confidence", 0.5) or 0.5),
+            metadata={
+                "reflection_type": reflection.get("reflection_type"),
+                "session_id": reflection.get("session_id"),
+                "run_id": reflection.get("run_id"),
+                **dict(reflection.get("metadata") or {}),
+            },
+            keywords=keywords,
+        )
+
     def _index_semantic_record(
         self,
         *,
@@ -5238,6 +9295,7 @@ class AIMemory:
             "fingerprint": fingerprint(source_text),
             "quality": quality,
             "updated_at": updated_at,
+            "source_updated_at": updated_at,
             "metadata": json_dumps(metadata),
             "keywords": keywords,
         }
@@ -5245,8 +9303,8 @@ class AIMemory:
         if getattr(self.vector_index, "name", "") != "sqlite":
             self.db.execute(
                 """
-                INSERT INTO semantic_index_cache(record_id, domain, collection, text, embedding, fingerprint, quality, updated_at, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO semantic_index_cache(record_id, domain, collection, text, embedding, fingerprint, quality, updated_at, source_updated_at, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(record_id) DO UPDATE SET
                     domain = excluded.domain,
                     collection = excluded.collection,
@@ -5255,6 +9313,7 @@ class AIMemory:
                     fingerprint = excluded.fingerprint,
                     quality = excluded.quality,
                     updated_at = excluded.updated_at,
+                    source_updated_at = excluded.source_updated_at,
                     metadata = excluded.metadata
                 """,
                 (
@@ -5265,6 +9324,7 @@ class AIMemory:
                     payload["embedding"],
                     payload["fingerprint"],
                     quality,
+                    updated_at,
                     updated_at,
                     payload["metadata"],
                 ),
@@ -5605,6 +9665,9 @@ class AIMemory:
             "SELECT COUNT(*) AS count FROM skill_index",
             "SELECT COUNT(*) AS count FROM skill_reference_index",
             "SELECT COUNT(*) AS count FROM archive_summary_index",
+            "SELECT COUNT(*) AS count FROM context_artifacts",
+            "SELECT COUNT(*) AS count FROM handoff_packs",
+            "SELECT COUNT(*) AS count FROM reflection_memories",
             "SELECT COUNT(*) AS count FROM conversation_turns",
             "SELECT COUNT(*) AS count FROM working_memory_snapshots",
             "SELECT COUNT(*) AS count FROM runs",
@@ -5636,6 +9699,9 @@ class AIMemory:
                     "SELECT COUNT(*) AS count FROM working_memory_snapshots",
                     "SELECT COUNT(*) AS count FROM runs",
                     "SELECT COUNT(*) AS count FROM observations",
+                    "SELECT COUNT(*) AS count FROM context_artifacts",
+                    "SELECT COUNT(*) AS count FROM handoff_packs",
+                    "SELECT COUNT(*) AS count FROM reflection_memories",
                 )
             )
             current = int(
@@ -5644,7 +9710,15 @@ class AIMemory:
                         """
                         SELECT COUNT(*) AS count
                         FROM semantic_index_cache
-                        WHERE collection IN ('interaction_turn', 'interaction_snapshot', 'execution_run', 'execution_observation')
+                        WHERE collection IN (
+                            'interaction_turn',
+                            'interaction_snapshot',
+                            'execution_run',
+                            'execution_observation',
+                            'context_artifact_index',
+                            'handoff_pack_index',
+                            'reflection_memory_index'
+                        )
                         """
                     )
                     or {}
@@ -5711,6 +9785,12 @@ class AIMemory:
                     "namespace_key": row.get("namespace_key"),
                 },
             )
+        for artifact in self.list_context_artifacts(limit=max(1, int((self.db.fetch_one("SELECT COUNT(*) AS count FROM context_artifacts") or {}).get("count", 0) or 0)))["results"]:
+            self._index_context_artifact(artifact)
+        for handoff in self.list_handoff_packs(limit=max(1, int((self.db.fetch_one("SELECT COUNT(*) AS count FROM handoff_packs") or {}).get("count", 0) or 0)))["results"]:
+            self._index_handoff_pack(handoff)
+        for reflection in self.list_reflection_memories(limit=max(1, int((self.db.fetch_one("SELECT COUNT(*) AS count FROM reflection_memories") or {}).get("count", 0) or 0)))["results"]:
+            self._index_reflection_memory(reflection)
 
     def _rebuild_text_search_index(self) -> None:
         memory_limit = max(
@@ -5795,6 +9875,15 @@ class AIMemory:
                 namespace_key=row.get("namespace_key"),
             )
 
+        for artifact in self.list_context_artifacts(limit=max(1, int((self.db.fetch_one("SELECT COUNT(*) AS count FROM context_artifacts") or {}).get("count", 0) or 0)))["results"]:
+            self._index_context_artifact(artifact)
+
+        for handoff in self.list_handoff_packs(limit=max(1, int((self.db.fetch_one("SELECT COUNT(*) AS count FROM handoff_packs") or {}).get("count", 0) or 0)))["results"]:
+            self._index_handoff_pack(handoff)
+
+        for reflection in self.list_reflection_memories(limit=max(1, int((self.db.fetch_one("SELECT COUNT(*) AS count FROM reflection_memories") or {}).get("count", 0) or 0)))["results"]:
+            self._index_reflection_memory(reflection)
+
         interaction_turns = self.db.fetch_all(
             """
             SELECT ct.id, ct.role, ct.turn_type, ct.content, ct.created_at, s.id AS session_id, s.title, s.user_id, s.owner_agent_id, s.agent_id, s.subject_type, s.subject_id, s.interaction_type, s.namespace_key
@@ -5850,7 +9939,7 @@ class AIMemory:
             )
 
     def _link_memory_relations(self, memory: dict[str, Any]) -> None:
-        self.db.execute("DELETE FROM memory_links WHERE source_memory_id = ?", (memory["id"],))
+        self.db.execute("DELETE FROM memory_links WHERE source_memory_id = ? AND link_type = 'semantic'", (memory["id"],))
         filters = ["id != ?", "status = 'active'", "user_id = ?"]
         params: list[Any] = [memory["id"], memory.get("user_id")]
         owner_agent_id = memory.get("owner_agent_id") or memory.get("agent_id")
@@ -5872,12 +9961,14 @@ class AIMemory:
             similarity = semantic_similarity(memory.get("text"), candidate.get("text"))
             if similarity < self.config.memory_policy.relation_threshold:
                 continue
-            self.db.execute(
-                """
-                INSERT INTO memory_links(id, source_memory_id, target_memory_id, link_type, weight, metadata, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (make_id("mlink"), memory["id"], candidate["id"], "semantic", similarity, json_dumps({"score": similarity}), utcnow_iso()),
+            self._upsert_memory_link(
+                memory["id"],
+                candidate["id"],
+                link_type="semantic",
+                bundle_id=memory.get("bundle_id"),
+                weight=similarity,
+                confidence=similarity,
+                metadata={"score": similarity, "origin": "auto_semantic"},
             )
             self.graph_store.upsert_edge("memory", memory["id"], "related_to", "memory", candidate["id"], {"score": similarity})
             relation_count += 1
@@ -6012,8 +10103,14 @@ class AIMemory:
 
 
 class AsyncAIMemory:
-    def __init__(self, config: AIMemoryConfig | dict[str, Any] | None = None):
-        self._sync = AIMemory(config)
+    def __init__(
+        self,
+        config: AIMemoryConfig | dict[str, Any] | None = None,
+        *,
+        platform_llm: Any | None = None,
+        platform_events: Any | None = None,
+    ):
+        self._sync = AIMemory(config, platform_llm=platform_llm, platform_events=platform_events)
         self._structured_api = None
 
     @property
@@ -6023,6 +10120,10 @@ class AsyncAIMemory:
 
             self._structured_api = AsyncStructuredAIMemoryAPI(self._sync)
         return self._structured_api
+
+    @property
+    def events(self):
+        return self._sync.events
 
     def __getattr__(self, name: str):
         target = getattr(self._sync, name)

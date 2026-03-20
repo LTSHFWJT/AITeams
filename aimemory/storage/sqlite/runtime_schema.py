@@ -1,12 +1,81 @@
 ADDITIONAL_COLUMNS: dict[str, dict[str, str]] = {
+    "memory_bundles": {
+        "bundle_summary": "TEXT",
+        "item_count": "INTEGER NOT NULL DEFAULT 0",
+        "compression_state": "TEXT",
+        "hot_refs": "TEXT",
+    },
     "short_term_memories": {
         "bundle_id": "TEXT",
+        "text": "TEXT",
+        "text_hash": "TEXT",
+        "storage_policy": "TEXT NOT NULL DEFAULT 'inline'",
+        "storage_ref": "TEXT",
+        "payload_bytes": "INTEGER",
+        "summary_l0": "TEXT",
+        "summary_l1": "TEXT",
+        "confidence": "REAL NOT NULL DEFAULT 0.5",
+        "visibility": "TEXT NOT NULL DEFAULT 'private_agent'",
+        "tier": "TEXT NOT NULL DEFAULT 'working'",
+        "version": "INTEGER NOT NULL DEFAULT 1",
+        "supersedes_memory_id": "TEXT",
+        "superseded_by_memory_id": "TEXT",
+        "access_count": "INTEGER NOT NULL DEFAULT 0",
+        "last_accessed_at": "TEXT",
+        "expires_at": "TEXT",
+        "actor_id": "TEXT",
+        "participants": "TEXT",
+        "compression_state": "TEXT",
     },
     "long_term_memories": {
         "bundle_id": "TEXT",
+        "text": "TEXT",
+        "text_hash": "TEXT",
+        "storage_policy": "TEXT NOT NULL DEFAULT 'inline'",
+        "storage_ref": "TEXT",
+        "payload_bytes": "INTEGER",
+        "summary_l0": "TEXT",
+        "summary_l1": "TEXT",
+        "confidence": "REAL NOT NULL DEFAULT 0.5",
+        "visibility": "TEXT NOT NULL DEFAULT 'private_agent'",
+        "tier": "TEXT NOT NULL DEFAULT 'working'",
+        "version": "INTEGER NOT NULL DEFAULT 1",
+        "supersedes_memory_id": "TEXT",
+        "superseded_by_memory_id": "TEXT",
+        "access_count": "INTEGER NOT NULL DEFAULT 0",
+        "last_accessed_at": "TEXT",
+        "expires_at": "TEXT",
+        "actor_id": "TEXT",
+        "participants": "TEXT",
+        "compression_state": "TEXT",
+    },
+    "memory_events": {
+        "session_id": "TEXT",
+        "run_id": "TEXT",
+        "actor_id": "TEXT",
+        "reason_code": "TEXT",
+        "source_table": "TEXT",
+        "version": "INTEGER",
+    },
+    "memory_links": {
+        "bundle_id": "TEXT",
+        "confidence": "REAL NOT NULL DEFAULT 0.5",
+        "source_domain": "TEXT",
+        "target_domain": "TEXT",
     },
     "archive_memories": {
         "bundle_id": "TEXT",
+        "storage_policy": "TEXT NOT NULL DEFAULT 'cold_only'",
+        "storage_ref": "TEXT",
+        "payload_bytes": "INTEGER",
+        "inline_excerpt": "TEXT",
+        "summary_l0": "TEXT",
+        "summary_l1": "TEXT",
+        "visibility": "TEXT",
+        "tier": "TEXT",
+        "compression_state": "TEXT",
+        "source_memory_ids": "TEXT",
+        "archive_reason": "TEXT",
     },
     "sessions": {
         "owner_agent_id": "TEXT",
@@ -47,6 +116,11 @@ ADDITIONAL_COLUMNS: dict[str, dict[str, str]] = {
         "kb_namespace": "TEXT",
         "source_subject_type": "TEXT",
         "source_subject_id": "TEXT",
+        "inline_text": "TEXT",
+        "inline_excerpt": "TEXT",
+        "storage_policy": "TEXT NOT NULL DEFAULT 'large_only'",
+        "storage_ref": "TEXT",
+        "payload_bytes": "INTEGER",
         "retrieval_count": "INTEGER NOT NULL DEFAULT 0",
         "last_retrieved_at": "TEXT",
         "credibility_score": "REAL NOT NULL DEFAULT 0.5",
@@ -70,6 +144,11 @@ ADDITIONAL_COLUMNS: dict[str, dict[str, str]] = {
         "subject_id": "TEXT",
         "interaction_type": "TEXT",
         "namespace_key": "TEXT",
+        "visibility": "TEXT",
+        "tier": "TEXT",
+        "access_count": "INTEGER NOT NULL DEFAULT 0",
+        "last_accessed_at": "TEXT",
+        "actor_id": "TEXT",
     },
     "knowledge_chunk_index": {
         "owner_agent_id": "TEXT",
@@ -91,6 +170,9 @@ ADDITIONAL_COLUMNS: dict[str, dict[str, str]] = {
         "source_type": "TEXT",
         "namespace_key": "TEXT",
     },
+    "semantic_index_cache": {
+        "source_updated_at": "TEXT",
+    },
 }
 
 EXTRA_SCHEMA_STATEMENTS = [
@@ -105,6 +187,10 @@ EXTRA_SCHEMA_STATEMENTS = [
         subject_id TEXT,
         interaction_type TEXT,
         namespace_key TEXT,
+        bundle_summary TEXT,
+        item_count INTEGER NOT NULL DEFAULT 0,
+        compression_state TEXT,
+        hot_refs TEXT,
         metadata TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -115,6 +201,8 @@ EXTRA_SCHEMA_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_short_term_memories_bundle ON short_term_memories(bundle_id, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_long_term_memories_bundle ON long_term_memories(bundle_id, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_archive_memories_bundle ON archive_memories(bundle_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_short_term_memories_text_hash ON short_term_memories(text_hash, updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_long_term_memories_text_hash ON long_term_memories(text_hash, updated_at)",
     """
     CREATE TABLE IF NOT EXISTS participants (
         id TEXT PRIMARY KEY,
@@ -148,6 +236,7 @@ EXTRA_SCHEMA_STATEMENTS = [
         fingerprint TEXT NOT NULL,
         quality REAL NOT NULL DEFAULT 0.0,
         updated_at TEXT NOT NULL,
+        source_updated_at TEXT,
         metadata TEXT
     )
     """,
@@ -224,6 +313,92 @@ EXTRA_SCHEMA_STATEMENTS = [
         tokenize = 'unicode61 remove_diacritics 2'
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS handoff_packs (
+        id TEXT PRIMARY KEY,
+        source_run_id TEXT,
+        source_session_id TEXT,
+        source_agent_id TEXT,
+        target_agent_id TEXT,
+        namespace_key TEXT,
+        visibility TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        highlights TEXT,
+        open_tasks TEXT,
+        constraints TEXT,
+        source_refs TEXT,
+        metadata TEXT,
+        created_at TEXT NOT NULL,
+        expires_at TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS reflection_memories (
+        id TEXT PRIMARY KEY,
+        owner_agent_id TEXT,
+        session_id TEXT,
+        run_id TEXT,
+        reflection_type TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        details TEXT,
+        confidence REAL NOT NULL DEFAULT 0.5,
+        decay_half_life_days REAL,
+        source_refs TEXT,
+        metadata TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS context_artifacts (
+        id TEXT PRIMARY KEY,
+        artifact_type TEXT NOT NULL,
+        session_id TEXT,
+        run_id TEXT,
+        owner_agent_id TEXT,
+        target_agent_id TEXT,
+        namespace_key TEXT,
+        provider TEXT,
+        model TEXT,
+        budget_chars INTEGER,
+        source_refs TEXT,
+        content TEXT NOT NULL,
+        metadata TEXT,
+        created_at TEXT NOT NULL,
+        expires_at TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS compression_jobs (
+        id TEXT PRIMARY KEY,
+        job_type TEXT NOT NULL,
+        session_id TEXT,
+        run_id TEXT,
+        owner_agent_id TEXT,
+        status TEXT NOT NULL,
+        provider TEXT,
+        model TEXT,
+        request_payload TEXT,
+        result_artifact_id TEXT,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS scope_acl_rules (
+        id TEXT PRIMARY KEY,
+        namespace_key TEXT NOT NULL,
+        resource_type TEXT NOT NULL,
+        resource_scope TEXT NOT NULL,
+        principal_type TEXT NOT NULL,
+        principal_id TEXT NOT NULL,
+        permission TEXT NOT NULL,
+        metadata TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
 ]
 
 POST_MIGRATION_SCHEMA_STATEMENTS = [
@@ -236,6 +411,7 @@ POST_MIGRATION_SCHEMA_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_turns_speaker ON conversation_turns(session_id, speaker_participant_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_documents_owner ON documents(owner_agent_id, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_documents_namespace ON documents(namespace_key, updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_documents_namespace_storage ON documents(namespace_key, storage_policy, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_skills_status ON skills(status, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_skills_owner ON skills(owner_agent_id, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_skills_namespace ON skills(namespace_key, updated_at)",
@@ -255,4 +431,9 @@ POST_MIGRATION_SCHEMA_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_skill_index_namespace ON skill_index(namespace_key, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_archive_index_owner ON archive_summary_index(owner_agent_id, subject_type, subject_id, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_archive_index_namespace ON archive_summary_index(namespace_key, updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_handoff_packs_route ON handoff_packs(source_agent_id, target_agent_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_reflection_memories_owner_type ON reflection_memories(owner_agent_id, reflection_type, updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_context_artifacts_lookup ON context_artifacts(artifact_type, session_id, run_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_compression_jobs_owner_status ON compression_jobs(owner_agent_id, status, updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_scope_acl_rules_lookup ON scope_acl_rules(namespace_key, principal_type, principal_id, permission)",
 ]

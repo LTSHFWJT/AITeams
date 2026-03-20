@@ -8,6 +8,7 @@ from aimemory.memory_intelligence.models import (
 )
 from aimemory.memory_intelligence.pipeline import MemoryIntelligencePipeline
 from aimemory.memory_intelligence.policies import MemoryPolicy
+from aimemory.memory_intelligence.semantic_categories import SemanticMemoryCategory
 
 __all__ = [
     "FactCandidate",
@@ -18,4 +19,5 @@ __all__ = [
     "MemoryScopeContext",
     "NeighborMemory",
     "NormalizedMessage",
+    "SemanticMemoryCategory",
 ]

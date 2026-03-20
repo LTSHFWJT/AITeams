@@ -7,8 +7,11 @@ from dataclasses import dataclass
 class MemoryPolicy:
     infer_by_default: bool = True
     conflict_threshold: float = 0.72
+    contradiction_threshold: float = 0.76
     merge_threshold: float = 0.9
     duplicate_threshold: float = 0.96
+    support_threshold: float = 0.93
+    contextualize_threshold: float = 0.72
     candidate_merge_threshold: float = 0.86
     relation_threshold: float = 0.68
     update_min_score: float = 0.58

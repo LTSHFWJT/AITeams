@@ -39,8 +39,19 @@ class MemoryService(ServiceBase):
         metadata: dict[str, Any] | None = None,
         memory_type: str = str(MemoryType.SEMANTIC),
         importance: float = 0.5,
+        confidence: float = 0.5,
+        tier: str | None = None,
+        summary_l0: str | None = None,
+        summary_l1: str | None = None,
         long_term: bool = True,
         source: str = "manual",
+        skip_existing_lookup: bool = False,
+        event_type: str = "ADD",
+        event_payload: dict[str, Any] | None = None,
+        reason_code: str | None = None,
+        version: int | None = None,
+        supersedes_memory_id: str | None = None,
+        superseded_by_memory_id: str | None = None,
     ) -> dict[str, Any]:
         return self._kernel().memory_store(
             text,
@@ -55,8 +66,19 @@ class MemoryService(ServiceBase):
             metadata=metadata,
             memory_type=memory_type,
             importance=importance,
+            confidence=confidence,
+            tier=tier,
+            summary_l0=summary_l0,
+            summary_l1=summary_l1,
             long_term=long_term,
             source=source,
+            skip_existing_lookup=skip_existing_lookup,
+            event_type=event_type,
+            event_payload=event_payload,
+            reason_code=reason_code,
+            version=version,
+            supersedes_memory_id=supersedes_memory_id,
+            superseded_by_memory_id=superseded_by_memory_id,
         )
 
     def get(self, memory_id: str) -> dict[str, Any] | None:
@@ -219,10 +241,32 @@ class MemoryService(ServiceBase):
         text: str | None = None,
         metadata: dict[str, Any] | None = None,
         importance: float | None = None,
+        confidence: float | None = None,
+        tier: str | None = None,
+        summary_l0: str | None = None,
+        summary_l1: str | None = None,
         status: str | None = None,
         timestamp: str | None = None,
+        mode: str = "update",
+        event_type: str | None = None,
+        reason_code: str | None = None,
+        audit_payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        result = self._kernel().update(memory_id, text=text, metadata=metadata, importance=importance, status=status)
+        result = self._kernel().update(
+            memory_id,
+            text=text,
+            metadata=metadata,
+            importance=importance,
+            confidence=confidence,
+            tier=tier,
+            summary_l0=summary_l0,
+            summary_l1=summary_l1,
+            status=status,
+            mode=mode,
+            event_type=event_type,
+            reason_code=reason_code,
+            audit_payload=audit_payload,
+        )
         if timestamp and result is not None:
             table_name = self._kernel()._memory_table_for_id(memory_id)
             if table_name:
@@ -231,6 +275,56 @@ class MemoryService(ServiceBase):
             assert refreshed is not None
             return refreshed
         return result
+
+    def supersede(
+        self,
+        memory_id: str,
+        *,
+        text: str,
+        metadata: dict[str, Any] | None = None,
+        importance: float | None = None,
+        confidence: float | None = None,
+        tier: str | None = None,
+        summary_l0: str | None = None,
+        summary_l1: str | None = None,
+        source: str | None = None,
+        reason_code: str | None = None,
+        audit_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return self._kernel().supersede_memory(
+            memory_id,
+            text=text,
+            metadata=metadata,
+            importance=importance,
+            confidence=confidence,
+            tier=tier,
+            summary_l0=summary_l0,
+            summary_l1=summary_l1,
+            source=source,
+            reason_code=reason_code,
+            audit_payload=audit_payload,
+        )
+
+    def link(
+        self,
+        source_memory_id: str,
+        target_memory_ids: str | list[str],
+        *,
+        link_type: str = "related",
+        weight: float = 1.0,
+        confidence: float = 0.5,
+        metadata: dict[str, Any] | None = None,
+        reason_code: str | None = None,
+    ) -> dict[str, Any]:
+        return self._kernel().link_memory(
+            source_memory_id,
+            target_memory_ids,
+            link_type=link_type,
+            weight=weight,
+            confidence=confidence,
+            metadata=metadata,
+            reason_code=reason_code,
+        )
 
     def delete(self, memory_id: str) -> dict[str, Any]:
         return self._kernel().delete(memory_id)

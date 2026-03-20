@@ -71,8 +71,8 @@ class AgentStoreAPI:
         result["compression"] = dict(result.get("memory_overflow_warning") or {"triggered": False})
         return result
 
-    def get_long_term_memory(self, memory_id: str) -> dict[str, Any]:
-        return self._require_memory_scope(memory_id, str(MemoryScope.LONG_TERM))
+    def get_long_term_memory(self, memory_id: str, **scope_kwargs: Any) -> dict[str, Any]:
+        return self._require_memory_scope(memory_id, str(MemoryScope.LONG_TERM), self._memory_scope_kwargs(scope_kwargs))
 
     def list_long_term_memories(
         self,
@@ -118,22 +118,51 @@ class AgentStoreAPI:
         return {"results": items[:limit], "count": len(items[:limit]), "query": query}
 
     def update_long_term_memory(self, memory_id: str, **kwargs: Any) -> dict[str, Any]:
-        self._require_memory_scope(memory_id, str(MemoryScope.LONG_TERM))
+        self._require_memory_scope(memory_id, str(MemoryScope.LONG_TERM), self._memory_scope_kwargs(kwargs))
         result = self.memory.update(memory_id, **kwargs)
         result["compression"] = dict(result.get("memory_overflow_warning") or {"triggered": False})
         return result
 
-    def delete_long_term_memory(self, memory_id: str) -> dict[str, Any]:
-        self._require_memory_scope(memory_id, str(MemoryScope.LONG_TERM))
+    def supersede_long_term_memory(self, memory_id: str, **kwargs: Any) -> dict[str, Any]:
+        self._require_memory_scope(memory_id, str(MemoryScope.LONG_TERM), self._memory_scope_kwargs(kwargs))
+        allowed = {"text", "metadata", "importance", "confidence", "tier", "summary_l0", "summary_l1", "source", "reason_code", "audit_payload"}
+        result = self.memory.supersede_memory(memory_id, **{key: value for key, value in kwargs.items() if key in allowed})
+        result["compression"] = dict(result.get("memory_overflow_warning") or {"triggered": False})
+        return result
+
+    def history_long_term_memory(self, memory_id: str, **scope_kwargs: Any) -> list[dict[str, Any]]:
+        self._require_memory_scope(memory_id, str(MemoryScope.LONG_TERM), self._memory_scope_kwargs(scope_kwargs))
+        return self.memory.history(memory_id)
+
+    def link_long_term_memory(self, memory_id: str, target_memory_ids: str | list[str], **kwargs: Any) -> dict[str, Any]:
+        access_scope = self._memory_scope_kwargs(kwargs)
+        self._require_memory_scope(memory_id, str(MemoryScope.LONG_TERM), access_scope)
+        for target_id in ([target_memory_ids] if isinstance(target_memory_ids, str) else list(target_memory_ids)):
+            self._require_memory_scope(target_id, str(MemoryScope.LONG_TERM), access_scope)
+        allowed = {"link_type", "weight", "confidence", "metadata", "reason_code", "emit_event"}
+        return self.memory.link_memory(memory_id, target_memory_ids, **{key: value for key, value in kwargs.items() if key in allowed})
+
+    def delete_long_term_memory(self, memory_id: str, **scope_kwargs: Any) -> dict[str, Any]:
+        self._require_memory_scope(memory_id, str(MemoryScope.LONG_TERM), self._memory_scope_kwargs(scope_kwargs))
         return self.memory.delete(memory_id)
 
     def compress_long_term_memories(self, *, force: bool = False, limit: int = 400, **scope_kwargs: Any) -> dict[str, Any]:
-        scope = self._resolve_memory_scope(scope_kwargs)
+        access_scope = self._memory_scope_kwargs(scope_kwargs)
+        scope = self._resolve_memory_scope(access_scope)
+        self._assert_namespace_permission(
+            access_scope,
+            namespace_key=scope.get("namespace_key"),
+            resolved_scope=scope,
+            resource_type="memory",
+            resource_scope=str(MemoryScope.LONG_TERM),
+            permission="write",
+            action_label="compress long-term memories",
+        )
         items = self.list_long_term_memories(
             include_generated=False,
             include_inactive=False,
             limit=limit,
-            **scope_kwargs,
+            **access_scope,
         )["results"]
         compression = self.memory.compress_domain_records(
             "long_term",
@@ -157,8 +186,8 @@ class AgentStoreAPI:
         result["compression"] = dict(result.get("memory_overflow_warning") or {"triggered": False})
         return result
 
-    def get_short_term_memory(self, memory_id: str) -> dict[str, Any]:
-        return self._require_memory_scope(memory_id, str(MemoryScope.SESSION))
+    def get_short_term_memory(self, memory_id: str, **scope_kwargs: Any) -> dict[str, Any]:
+        return self._require_memory_scope(memory_id, str(MemoryScope.SESSION), self._memory_scope_kwargs(scope_kwargs))
 
     def list_short_term_memories(
         self,
@@ -204,22 +233,51 @@ class AgentStoreAPI:
         return {"results": items[:limit], "count": len(items[:limit]), "query": query}
 
     def update_short_term_memory(self, memory_id: str, **kwargs: Any) -> dict[str, Any]:
-        record = self._require_memory_scope(memory_id, str(MemoryScope.SESSION))
+        record = self._require_memory_scope(memory_id, str(MemoryScope.SESSION), self._memory_scope_kwargs(kwargs))
         result = self.memory.update(memory_id, **kwargs)
         result["compression"] = dict(result.get("memory_overflow_warning") or {"triggered": False, "session_id": result.get("session_id") or record.get("session_id")})
         return result
 
-    def delete_short_term_memory(self, memory_id: str) -> dict[str, Any]:
-        self._require_memory_scope(memory_id, str(MemoryScope.SESSION))
+    def supersede_short_term_memory(self, memory_id: str, **kwargs: Any) -> dict[str, Any]:
+        record = self._require_memory_scope(memory_id, str(MemoryScope.SESSION), self._memory_scope_kwargs(kwargs))
+        allowed = {"text", "metadata", "importance", "confidence", "tier", "summary_l0", "summary_l1", "source", "reason_code", "audit_payload"}
+        result = self.memory.supersede_memory(memory_id, **{key: value for key, value in kwargs.items() if key in allowed})
+        result["compression"] = dict(result.get("memory_overflow_warning") or {"triggered": False, "session_id": result.get("session_id") or record.get("session_id")})
+        return result
+
+    def history_short_term_memory(self, memory_id: str, **scope_kwargs: Any) -> list[dict[str, Any]]:
+        self._require_memory_scope(memory_id, str(MemoryScope.SESSION), self._memory_scope_kwargs(scope_kwargs))
+        return self.memory.history(memory_id)
+
+    def link_short_term_memory(self, memory_id: str, target_memory_ids: str | list[str], **kwargs: Any) -> dict[str, Any]:
+        access_scope = self._memory_scope_kwargs(kwargs)
+        self._require_memory_scope(memory_id, str(MemoryScope.SESSION), access_scope)
+        for target_id in ([target_memory_ids] if isinstance(target_memory_ids, str) else list(target_memory_ids)):
+            self._require_memory_scope(target_id, str(MemoryScope.SESSION), access_scope)
+        allowed = {"link_type", "weight", "confidence", "metadata", "reason_code", "emit_event"}
+        return self.memory.link_memory(memory_id, target_memory_ids, **{key: value for key, value in kwargs.items() if key in allowed})
+
+    def delete_short_term_memory(self, memory_id: str, **scope_kwargs: Any) -> dict[str, Any]:
+        self._require_memory_scope(memory_id, str(MemoryScope.SESSION), self._memory_scope_kwargs(scope_kwargs))
         return self.memory.delete(memory_id)
 
     def compress_short_term_memories(self, *, force: bool = False, limit: int = 400, **scope_kwargs: Any) -> dict[str, Any]:
-        scope = self._resolve_memory_scope(scope_kwargs)
+        access_scope = self._memory_scope_kwargs(scope_kwargs)
+        scope = self._resolve_memory_scope(access_scope)
+        self._assert_namespace_permission(
+            access_scope,
+            namespace_key=scope.get("namespace_key"),
+            resolved_scope=scope,
+            resource_type="memory",
+            resource_scope=str(MemoryScope.SESSION),
+            permission="write",
+            action_label="compress short-term memories",
+        )
         items = self.list_short_term_memories(
             include_generated=False,
             include_inactive=False,
             limit=limit,
-            **scope_kwargs,
+            **access_scope,
         )["results"]
         compression = self.memory.compress_domain_records(
             "short_term",
@@ -251,6 +309,7 @@ class AgentStoreAPI:
         global_scope: bool = False,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        access_scope = self._access_scope_kwargs(kwargs)
         metadata = dict(kwargs.pop("metadata", {}) or {})
         scope = self.memory._resolve_scope(
             user_id=kwargs.pop("user_id", None),
@@ -269,6 +328,15 @@ class AgentStoreAPI:
         archive_id = kwargs.pop("archive_unit_id", make_id("arch"))
         source_type = str(kwargs.pop("source_type", "manual"))
         archive_domain = str(kwargs.pop("domain", "manual"))
+        self._assert_namespace_permission(
+            access_scope,
+            namespace_key=scope.get("namespace_key"),
+            resolved_scope=scope,
+            resource_type="archive",
+            resource_scope=archive_domain,
+            permission="write",
+            action_label="create archive memory",
+        )
         session_id = kwargs.pop("session_id", None)
         source_id = kwargs.pop("source_id", archive_id)
         now = utcnow_iso()
@@ -438,6 +506,15 @@ class AgentStoreAPI:
 
     def update_archive_memory(self, archive_unit_id: str, **kwargs: Any) -> dict[str, Any]:
         archive = self.get_archive_memory(archive_unit_id)
+        access_scope = self._access_scope_kwargs(kwargs)
+        self._assert_resource_permission(
+            archive,
+            access_scope,
+            resource_type="archive",
+            resource_scope=str(archive.get("domain") or "archive"),
+            permission="write",
+            action_label="update archive memory",
+        )
         metadata = merge_metadata(archive.get("metadata"), kwargs.pop("metadata", None))
         global_scope = bool(kwargs.pop("global_scope", archive.get("namespace_key") == "global" and not archive.get("owner_agent_id")))
         scope = self.memory._resolve_scope(
@@ -526,8 +603,17 @@ class AgentStoreAPI:
         )
         return self.get_archive_memory(archive_unit_id)
 
-    def delete_archive_memory(self, archive_unit_id: str) -> dict[str, Any]:
+    def delete_archive_memory(self, archive_unit_id: str, **scope_kwargs: Any) -> dict[str, Any]:
         archive = self.get_archive_memory(archive_unit_id)
+        access_scope = self._access_scope_kwargs(scope_kwargs)
+        self._assert_resource_permission(
+            archive,
+            access_scope,
+            resource_type="archive",
+            resource_scope=str(archive.get("domain") or "archive"),
+            permission="write",
+            action_label="delete archive memory",
+        )
         for summary in archive.get("summaries", []):
             self.memory.db.execute("DELETE FROM archive_summary_index WHERE record_id = ?", (summary["id"],))
             self.memory.db.execute("DELETE FROM semantic_index_cache WHERE record_id = ?", (summary["id"],))
@@ -555,7 +641,17 @@ class AgentStoreAPI:
         limit: int = 400,
         **scope_kwargs: Any,
     ) -> dict[str, Any]:
+        access_scope = self._access_scope_kwargs(scope_kwargs)
         scope = self._resolve_archive_scope(scope_kwargs)
+        self._assert_namespace_permission(
+            access_scope,
+            namespace_key=scope.get("namespace_key"),
+            resolved_scope=scope,
+            resource_type="archive",
+            resource_scope="archive",
+            permission="write",
+            action_label="compress archive memories",
+        )
         items = self.list_archive_memories(
             include_global=include_global,
             include_generated=False,
@@ -668,6 +764,15 @@ class AgentStoreAPI:
 
     def update_knowledge_document(self, document_id: str, **kwargs: Any) -> dict[str, Any]:
         document = self.get_knowledge_document(document_id)
+        access_scope = self._access_scope_kwargs(kwargs)
+        self._assert_resource_permission(
+            document,
+            access_scope,
+            resource_type="knowledge",
+            resource_scope="document",
+            permission="write",
+            action_label="update knowledge document",
+        )
         global_scope = bool(kwargs.pop("global_scope", document.get("namespace_key") == "global" and not document.get("owner_agent_id")))
         scope = self.memory._resolve_scope(
             user_id=kwargs.pop("user_id", document.get("user_id")),
@@ -682,11 +787,12 @@ class AgentStoreAPI:
         status = str(kwargs.pop("status", document.get("status", "active")))
         metadata = merge_metadata(document.get("metadata"), kwargs.pop("metadata", None))
         kb_namespace = kwargs.pop("kb_namespace", document.get("kb_namespace") or (scope.get("namespace_key") or "default"))
+        raw_store_policy = kwargs.pop("raw_store_policy", kwargs.pop("knowledge_raw_store_policy", document.get("storage_policy")))
         now = utcnow_iso()
         self.memory.db.execute(
             """
             UPDATE documents
-            SET title = ?, user_id = ?, owner_agent_id = ?, kb_namespace = ?, source_subject_type = ?, source_subject_id = ?, namespace_key = ?, status = ?, metadata = ?, updated_at = ?
+            SET title = ?, user_id = ?, owner_agent_id = ?, kb_namespace = ?, source_subject_type = ?, source_subject_id = ?, namespace_key = ?, status = ?, storage_policy = ?, metadata = ?, updated_at = ?
             WHERE id = ?
             """,
             (
@@ -698,17 +804,35 @@ class AgentStoreAPI:
                 scope.get("subject_id"),
                 scope.get("namespace_key"),
                 status,
+                raw_store_policy,
                 json_dumps(merge_metadata(metadata, self.memory._scope_metadata(scope))),
                 now,
                 document_id,
             ),
         )
         if text is not None:
-            self._replace_document_chunks(document, text=text, title=title, scope=scope, metadata=metadata, now=now)
+            self._replace_document_chunks(
+                document,
+                text=text,
+                title=title,
+                scope=scope,
+                metadata=metadata,
+                now=now,
+                raw_store_policy=raw_store_policy,
+            )
         return self.get_knowledge_document(document_id)
 
-    def delete_knowledge_document(self, document_id: str) -> dict[str, Any]:
+    def delete_knowledge_document(self, document_id: str, **scope_kwargs: Any) -> dict[str, Any]:
         document = self.get_knowledge_document(document_id)
+        access_scope = self._access_scope_kwargs(scope_kwargs)
+        self._assert_resource_permission(
+            document,
+            access_scope,
+            resource_type="knowledge",
+            resource_scope="document",
+            permission="write",
+            action_label="delete knowledge document",
+        )
         chunk_ids = [chunk["id"] for chunk in document.get("chunks", [])]
         for chunk_id in chunk_ids:
             self.memory.db.execute("DELETE FROM knowledge_chunk_index WHERE record_id = ?", (chunk_id,))
@@ -870,7 +994,18 @@ class AgentStoreAPI:
         budget_chars: int | None = None,
         max_sentences: int = 8,
         max_highlights: int = 12,
+        **scope_kwargs: Any,
     ) -> dict[str, Any]:
+        skill = self.get_skill_content(skill_id)
+        access_scope = self._access_scope_kwargs(scope_kwargs)
+        self._assert_resource_permission(
+            skill,
+            access_scope,
+            resource_type="skill",
+            resource_scope="skill",
+            permission="write",
+            action_label="refresh skill execution context",
+        )
         return self.memory.refresh_skill_execution_context(
             skill_id,
             path_prefix=path_prefix,
@@ -881,6 +1016,15 @@ class AgentStoreAPI:
 
     def update_skill(self, skill_id: str, **kwargs: Any) -> dict[str, Any]:
         skill = self.get_skill_content(skill_id)
+        access_scope = self._access_scope_kwargs(kwargs)
+        self._assert_resource_permission(
+            skill,
+            access_scope,
+            resource_type="skill",
+            resource_scope="skill",
+            permission="write",
+            action_label="update skill",
+        )
         name = str(kwargs.pop("name", skill["name"]))
         description = str(kwargs.pop("description", skill["description"]))
         status = str(kwargs.pop("status", skill.get("status", "active")))
@@ -989,8 +1133,17 @@ class AgentStoreAPI:
             )
         return self.get_skill_content(skill_id)
 
-    def delete_skill(self, skill_id: str) -> dict[str, Any]:
+    def delete_skill(self, skill_id: str, **scope_kwargs: Any) -> dict[str, Any]:
         skill = self.get_skill_content(skill_id)
+        access_scope = self._access_scope_kwargs(scope_kwargs)
+        self._assert_resource_permission(
+            skill,
+            access_scope,
+            resource_type="skill",
+            resource_scope="skill",
+            permission="write",
+            action_label="delete skill",
+        )
         current_snapshot = skill.get("current_snapshot")
         if current_snapshot and current_snapshot.get("id"):
             self.memory._delete_skill_snapshot(current_snapshot["id"])
@@ -1107,6 +1260,7 @@ class AgentStoreAPI:
     def _memory_scope_kwargs(self, scope_kwargs: dict[str, Any]) -> dict[str, Any]:
         allowed = {
             "user_id",
+            "agent_id",
             "owner_agent_id",
             "subject_type",
             "subject_id",
@@ -1120,6 +1274,103 @@ class AgentStoreAPI:
         }
         return {key: value for key, value in scope_kwargs.items() if key in allowed}
 
+    def _access_scope_kwargs(self, scope_kwargs: dict[str, Any]) -> dict[str, Any]:
+        allowed = {
+            "user_id",
+            "agent_id",
+            "owner_agent_id",
+            "subject_type",
+            "subject_id",
+            "source_subject_type",
+            "source_subject_id",
+            "interaction_type",
+            "platform_id",
+            "workspace_id",
+            "team_id",
+            "project_id",
+            "namespace_key",
+        }
+        return {key: value for key, value in scope_kwargs.items() if key in allowed}
+
+    def _requester_scope(
+        self,
+        scope_kwargs: dict[str, Any],
+        *,
+        resolved_scope: dict[str, Any] | None = None,
+        namespace_key: str | None = None,
+    ) -> dict[str, Any]:
+        scope = dict(resolved_scope or {})
+        actor_agent_id = scope_kwargs.get("agent_id") or scope_kwargs.get("owner_agent_id") or scope.get("owner_agent_id") or scope.get("agent_id")
+        actor_user_id = scope_kwargs.get("user_id", scope.get("user_id"))
+        if actor_user_id is None and actor_agent_id is None:
+            return self.memory._request_access_scope()
+        return self.memory._request_access_scope(
+            user_id=actor_user_id,
+            agent_id=actor_agent_id,
+            owner_agent_id=actor_agent_id,
+            subject_type=scope.get("subject_type") or scope_kwargs.get("subject_type") or scope_kwargs.get("source_subject_type"),
+            subject_id=scope.get("subject_id") or scope_kwargs.get("subject_id") or scope_kwargs.get("source_subject_id"),
+            interaction_type=scope.get("interaction_type") or scope_kwargs.get("interaction_type"),
+            platform_id=scope.get("platform_id") or scope_kwargs.get("platform_id"),
+            workspace_id=scope.get("workspace_id") or scope_kwargs.get("workspace_id"),
+            team_id=scope.get("team_id") or scope_kwargs.get("team_id"),
+            project_id=scope.get("project_id") or scope_kwargs.get("project_id"),
+            namespace_key=namespace_key or scope.get("namespace_key") or scope_kwargs.get("namespace_key"),
+        )
+
+    def _normalize_acl_resource(
+        self,
+        resource: dict[str, Any],
+        *,
+        resource_scope: str | None = None,
+    ) -> dict[str, Any]:
+        normalized = dict(resource)
+        if normalized.get("subject_type") is None and normalized.get("source_subject_type") is not None:
+            normalized["subject_type"] = normalized.get("source_subject_type")
+        if normalized.get("subject_id") is None and normalized.get("source_subject_id") is not None:
+            normalized["subject_id"] = normalized.get("source_subject_id")
+        if resource_scope is not None:
+            normalized["resource_scope"] = resource_scope
+        return normalized
+
+    def _assert_namespace_permission(
+        self,
+        scope_kwargs: dict[str, Any],
+        *,
+        namespace_key: str | None,
+        resolved_scope: dict[str, Any] | None = None,
+        resource_type: str,
+        resource_scope: str,
+        permission: str = "write",
+        action_label: str | None = None,
+    ) -> None:
+        self.memory._assert_namespace_permission(
+            namespace_key=namespace_key,
+            resource_type=resource_type,
+            resource_scope=resource_scope,
+            requester_scope=self._requester_scope(scope_kwargs, resolved_scope=resolved_scope, namespace_key=namespace_key),
+            permission=permission,
+            action_label=action_label,
+        )
+
+    def _assert_resource_permission(
+        self,
+        resource: dict[str, Any],
+        scope_kwargs: dict[str, Any],
+        *,
+        resource_type: str,
+        resource_scope: str | None = None,
+        permission: str = "write",
+        action_label: str | None = None,
+    ) -> None:
+        self.memory._assert_resource_permission(
+            self._normalize_acl_resource(resource, resource_scope=resource_scope),
+            resource_type=resource_type,
+            requester_scope=self._requester_scope(scope_kwargs),
+            permission=permission,
+            action_label=action_label,
+        )
+
     def _memory_compression_records(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return [
             {
@@ -1131,8 +1382,13 @@ class AgentStoreAPI:
             if str(item.get("summary") or item.get("text") or "").strip()
         ]
 
-    def _require_memory_scope(self, memory_id: str, memory_scope: str) -> dict[str, Any]:
-        memory = self.memory.get(memory_id)
+    def _require_memory_scope(
+        self,
+        memory_id: str,
+        memory_scope: str,
+        scope_kwargs: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        memory = self.memory.get(memory_id, **dict(scope_kwargs or {}))
         if memory is None:
             raise ValueError(f"Memory `{memory_id}` does not exist.")
         if memory.get("scope") != memory_scope:
@@ -1292,6 +1548,7 @@ class AgentStoreAPI:
         scope: dict[str, Any],
         metadata: dict[str, Any] | None,
         now: str,
+        raw_store_policy: str | None = None,
     ) -> None:
         document_id = document["id"]
         source_id = document["source_id"]
@@ -1305,16 +1562,29 @@ class AgentStoreAPI:
             self.memory.graph_store.delete_reference(chunk["id"])
         self.memory.db.execute("DELETE FROM citations WHERE document_id = ?", (document_id,))
         self.memory.db.execute("DELETE FROM document_chunks WHERE document_id = ?", (document_id,))
-        stored = self.memory.object_store.put_text(
-            text,
-            object_type="knowledge",
-            suffix=".txt",
-            prefix=self.memory._object_store_prefix(scope, "knowledge"),
+        payload = self.memory._store_document_payload(
+            document_id=document_id,
+            text=text,
+            scope=scope,
+            metadata=dict(metadata or {}),
+            raw_store_policy=raw_store_policy or document.get("storage_policy"),
         )
-        object_row = self.memory._persist_object(
-            stored,
-            mime_type="text/plain",
-            metadata={"document_id": document_id, **self.memory._scope_metadata(scope), **dict(metadata or {})},
+        object_row = payload.get("object_row")
+        self.memory.db.execute(
+            """
+            UPDATE documents
+            SET inline_text = ?, inline_excerpt = ?, storage_policy = ?, storage_ref = ?, payload_bytes = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                payload.get("inline_text"),
+                payload.get("inline_excerpt"),
+                payload.get("storage_policy"),
+                payload.get("storage_ref"),
+                payload.get("payload_bytes"),
+                now,
+                document_id,
+            ),
         )
         version_count = int(
             self.memory.db.fetch_one("SELECT COUNT(*) AS count FROM document_versions WHERE document_id = ?", (document_id,)).get("count", 0)
@@ -1329,9 +1599,9 @@ class AgentStoreAPI:
                 version_id,
                 document_id,
                 f"v{version_count + 1}",
-                object_row["id"],
-                object_row["checksum"],
-                object_row["size_bytes"],
+                object_row["id"] if object_row is not None else None,
+                object_row["checksum"] if object_row is not None else make_uuid7(),
+                payload.get("payload_bytes"),
                 json_dumps(metadata or {}),
                 now,
             ),

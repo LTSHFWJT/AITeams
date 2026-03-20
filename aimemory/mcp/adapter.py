@@ -80,6 +80,55 @@ class AIMemoryMCPAdapter:
             "threshold": {"type": "number", "default": 0.0},
             "include_generated": {"type": "boolean", "default": True},
         }
+        memory_history = {
+            "memory_id": {"type": "string"},
+        }
+        memory_supersede = {
+            "memory_id": {"type": "string"},
+            "text": {"type": "string"},
+            "importance": {"type": "number"},
+            "metadata": {"type": "object"},
+            "source": {"type": "string"},
+            "reason_code": {"type": "string"},
+            "audit_payload": {"type": "object"},
+        }
+        memory_link = {
+            "memory_id": {"type": "string"},
+            "target_memory_ids": {"type": "array", "items": {"type": "string"}},
+            "link_type": {"type": "string", "default": "related"},
+            "weight": {"type": "number", "default": 1.0},
+            "confidence": {"type": "number", "default": 0.5},
+            "metadata": {"type": "object"},
+            "reason_code": {"type": "string"},
+        }
+        acl_grant = {
+            "namespace_key": {"type": "string"},
+            "resource_type": {"type": "string", "default": "all"},
+            "resource_scope": {"type": "string", "default": "all"},
+            "principal_type": {"type": "string"},
+            "principal_id": {"type": "string"},
+            "permission": {"type": "string", "default": "read"},
+            "metadata": {"type": "object"},
+        }
+        acl_list = {
+            "namespace_key": {"type": "string"},
+            "resource_type": {"type": "string"},
+            "resource_scope": {"type": "string"},
+            "principal_type": {"type": "string"},
+            "principal_id": {"type": "string"},
+            "permission": {"type": "string"},
+            "limit": {"type": "integer", "default": 100},
+            "offset": {"type": "integer", "default": 0},
+        }
+        acl_revoke = {
+            "rule_id": {"type": "string"},
+            "namespace_key": {"type": "string"},
+            "resource_type": {"type": "string"},
+            "resource_scope": {"type": "string"},
+            "principal_type": {"type": "string"},
+            "principal_id": {"type": "string"},
+            "permission": {"type": "string"},
+        }
         compression_input = {
             "session_id": {"type": "string"},
             "force": {"type": "boolean", "default": False},
@@ -173,6 +222,120 @@ class AIMemoryMCPAdapter:
             "max_highlights": {"type": "integer", "default": 12},
             "metadata": {"type": "object"},
         }
+        recall_plan = {
+            "query": {"type": "string"},
+            "preferred_scope": {"type": "string"},
+            "limit": {"type": "integer", "default": 10},
+            "auxiliary_limit": {"type": "integer"},
+            "domains": {"type": "array", "items": {"type": "string"}},
+        }
+        context_build = {
+            "query": {"type": "string"},
+            "include_domains": {"type": "array", "items": {"type": "string"}},
+            "target_agent_id": {"type": "string"},
+            "budget_chars": {"type": "integer", "default": 1200},
+            "limit": {"type": "integer", "default": 12},
+            "threshold": {"type": "number", "default": 0.0},
+            "use_platform_llm": {"type": "boolean", "default": True},
+            "metadata": {"type": "object"},
+        }
+        handoff_build = {
+            "target_agent_id": {"type": "string"},
+            "source_run_id": {"type": "string"},
+            "source_session_id": {"type": "string"},
+            "budget_chars": {"type": "integer", "default": 1200},
+            "visibility": {"type": "string", "default": "target_agent"},
+            "use_platform_llm": {"type": "boolean", "default": True},
+            "metadata": {"type": "object"},
+        }
+        reflection_session = {
+            "session_id": {"type": "string"},
+            "run_id": {"type": "string"},
+            "mode": {"type": "string", "default": "derived+invariant"},
+            "budget_chars": {"type": "integer", "default": 1200},
+            "use_platform_llm": {"type": "boolean", "default": True},
+            "metadata": {"type": "object"},
+        }
+        context_search = {
+            "query": {"type": "string"},
+            "artifact_type": {"type": "string"},
+            "session_id": {"type": "string"},
+            "run_id": {"type": "string"},
+            "limit": {"type": "integer", "default": 10},
+            "threshold": {"type": "number", "default": 0.0},
+        }
+        handoff_search = {
+            "query": {"type": "string"},
+            "source_run_id": {"type": "string"},
+            "source_session_id": {"type": "string"},
+            "target_agent_id": {"type": "string"},
+            "limit": {"type": "integer", "default": 10},
+            "threshold": {"type": "number", "default": 0.0},
+        }
+        reflection_search = {
+            "query": {"type": "string"},
+            "session_id": {"type": "string"},
+            "run_id": {"type": "string"},
+            "reflection_type": {"type": "string"},
+            "limit": {"type": "integer", "default": 10},
+            "threshold": {"type": "number", "default": 0.0},
+        }
+        platform_event_turn_end = {
+            "session_id": {"type": "string"},
+            "turn_id": {"type": "string"},
+            "run_id": {"type": "string"},
+            "query": {"type": "string"},
+            "auto_recall": {"type": "boolean", "default": True},
+            "auto_context": {"type": "boolean", "default": False},
+            "auto_compress": {"type": "boolean", "default": True},
+            "target_agent_id": {"type": "string"},
+            "include_domains": {"type": "array", "items": {"type": "string"}},
+            "budget_chars": {"type": "integer", "default": 600},
+            "use_platform_llm": {"type": "boolean", "default": True},
+            "metadata": {"type": "object"},
+        }
+        platform_event_agent_end = {
+            "session_id": {"type": "string"},
+            "run_id": {"type": "string"},
+            "query": {"type": "string"},
+            "mode": {"type": "string", "default": "derived+invariant"},
+            "auto_recall": {"type": "boolean", "default": True},
+            "auto_context": {"type": "boolean", "default": True},
+            "auto_reflect": {"type": "boolean", "default": True},
+            "auto_compress": {"type": "boolean", "default": True},
+            "target_agent_id": {"type": "string"},
+            "include_domains": {"type": "array", "items": {"type": "string"}},
+            "budget_chars": {"type": "integer", "default": 1200},
+            "use_platform_llm": {"type": "boolean", "default": True},
+            "metadata": {"type": "object"},
+        }
+        platform_event_handoff = {
+            "source_session_id": {"type": "string"},
+            "source_run_id": {"type": "string"},
+            "run_id": {"type": "string"},
+            "source_agent_id": {"type": "string"},
+            "target_agent_id": {"type": "string"},
+            "query": {"type": "string"},
+            "include_context": {"type": "boolean", "default": False},
+            "include_domains": {"type": "array", "items": {"type": "string"}},
+            "visibility": {"type": "string", "default": "target_agent"},
+            "budget_chars": {"type": "integer", "default": 1200},
+            "use_platform_llm": {"type": "boolean", "default": True},
+            "metadata": {"type": "object"},
+        }
+        platform_event_session_close = {
+            "session_id": {"type": "string"},
+            "run_id": {"type": "string"},
+            "mode": {"type": "string", "default": "derived+invariant"},
+            "auto_compress": {"type": "boolean", "default": True},
+            "auto_reflect": {"type": "boolean", "default": True},
+            "prune_snapshots": {"type": "boolean", "default": True},
+            "keep_recent": {"type": "integer"},
+            "auto_archive": {"type": "boolean", "default": False},
+            "budget_chars": {"type": "integer", "default": 1200},
+            "use_platform_llm": {"type": "boolean", "default": True},
+            "metadata": {"type": "object"},
+        }
         return [
             self._tool("aimemory_manifest", "返回 AIMemory 的能力、存储布局与 LiteLLM 兼容配置。"),
             self._tool(
@@ -186,11 +349,24 @@ class AIMemoryMCPAdapter:
                 },
                 required=["query"],
             ),
+            self._tool("recall_plan", "为本次查询生成 recall plan 与域选择建议。", recall_plan, required=["query"]),
             self._tool("text_compress", "使用本地纯算法压缩长文本。", text_compress, required=["text"]),
+            self._tool("context_build", "构建给 agent 使用的最小必要上下文包。", context_build, required=["query"]),
+            self._tool("handoff_build", "构建 agent-to-agent handoff pack。", handoff_build, required=["target_agent_id"]),
+            self._tool("reflection_session", "对会话做反思蒸馏并落盘。", reflection_session, required=["session_id"]),
+            self._tool("context_search", "检索已保存的上下文压缩产物。", context_search, required=["query"]),
+            self._tool("handoff_search", "检索 handoff pack。", handoff_search, required=["query"]),
+            self._tool("reflection_search", "检索 reflection 记忆。", reflection_search, required=["query"]),
+            self._tool("acl_grant", "授予指定 namespace / 资源范围的 ACL 规则。", acl_grant, required=["principal_type", "principal_id"]),
+            self._tool("acl_list", "列出当前 scope 下的 ACL 规则。", acl_list),
+            self._tool("acl_revoke", "撤销 ACL 规则。可按 rule_id 或组合条件删除。", acl_revoke),
             self._tool("long_term_memory_add", "写入指定 agent 与交互主体之间的长期记忆。", memory_write, required=["text"]),
             self._tool("long_term_memory_get", "获取一条长期记忆。", {"memory_id": {"type": "string"}}, required=["memory_id"]),
             self._tool("long_term_memory_list", "列出指定 agent 与主体之间的完整长期记忆。", memory_list),
             self._tool("long_term_memory_search", "按关键字或短查询快速检索长期记忆。", memory_search, required=["query"]),
+            self._tool("long_term_memory_history", "查看长期记忆的审计历史与版本演化。", memory_history, required=["memory_id"]),
+            self._tool("long_term_memory_supersede", "创建一条替代旧版本的新长期记忆，并维护版本链。", memory_supersede, required=["memory_id", "text"]),
+            self._tool("long_term_memory_link", "显式建立长期记忆之间的关系。", memory_link, required=["memory_id", "target_memory_ids"]),
             self._tool(
                 "long_term_memory_update",
                 "更新长期记忆内容、权重或元数据。",
@@ -203,6 +379,9 @@ class AIMemoryMCPAdapter:
             self._tool("short_term_memory_get", "获取一条短期记忆。", {"memory_id": {"type": "string"}}, required=["memory_id"]),
             self._tool("short_term_memory_list", "列出指定 agent 与主体之间的完整短期记忆。", memory_list),
             self._tool("short_term_memory_search", "按关键字快速检索短期记忆。", memory_search, required=["query"]),
+            self._tool("short_term_memory_history", "查看短期记忆的审计历史与版本演化。", memory_history, required=["memory_id"]),
+            self._tool("short_term_memory_supersede", "创建一条替代旧版本的新短期记忆，并维护版本链。", memory_supersede, required=["memory_id", "text"]),
+            self._tool("short_term_memory_link", "显式建立短期记忆之间的关系。", memory_link, required=["memory_id", "target_memory_ids"]),
             self._tool(
                 "short_term_memory_update",
                 "更新短期记忆内容、权重或元数据。",
@@ -328,26 +507,46 @@ class AIMemoryMCPAdapter:
                 },
                 required=["session_id"],
             ),
+            self._tool("platform_event_turn_end", "处理平台的 turn_end 事件，并可自动 recall/context/compress。", platform_event_turn_end, required=["session_id"]),
+            self._tool("platform_event_agent_end", "处理 agent_end 事件，并可自动 reflect/context/compress。", platform_event_agent_end),
+            self._tool("platform_event_handoff", "处理 handoff 事件并自动生成 handoff pack。", platform_event_handoff, required=["target_agent_id"]),
+            self._tool("platform_event_session_close", "处理 session_close 事件并自动 reflect/compress/prune。", platform_event_session_close, required=["session_id"]),
         ]
 
     def _handlers(self, payload: dict[str, Any]) -> dict[str, Callable[[], Any]]:
         return {
             "aimemory_manifest": lambda: self.manifest(),
             "recall_query": lambda: self.memory.api.recall.query(**payload),
+            "recall_plan": lambda: self.memory.api.recall.plan(**payload),
             "text_compress": lambda: self.memory.api.recall.compress_text(**payload),
+            "context_build": lambda: self.memory.api.context.build(**payload),
+            "handoff_build": lambda: self.memory.api.handoff.build(payload["target_agent_id"], **{key: value for key, value in payload.items() if key != "target_agent_id"}),
+            "reflection_session": lambda: self.memory.api.reflection.session(payload["session_id"], **{key: value for key, value in payload.items() if key != "session_id"}),
+            "context_search": lambda: self.memory.api.context.search(**payload),
+            "handoff_search": lambda: self.memory.api.handoff.search(**payload),
+            "reflection_search": lambda: self.memory.api.reflection.search(**payload),
+            "acl_grant": lambda: self.memory.api.acl.grant(**payload),
+            "acl_list": lambda: self.memory.api.acl.list(**payload),
+            "acl_revoke": lambda: self.memory.api.acl.revoke(**payload),
             "long_term_memory_add": lambda: self.memory.api.long_term.add(**payload),
-            "long_term_memory_get": lambda: self.memory.api.long_term.get(payload["memory_id"]),
+            "long_term_memory_get": lambda: self.memory.api.long_term.get(payload["memory_id"], **{key: value for key, value in payload.items() if key != "memory_id"}),
             "long_term_memory_list": lambda: self.memory.api.long_term.list(**payload),
             "long_term_memory_search": lambda: self.memory.api.long_term.search(**payload),
+            "long_term_memory_history": lambda: self.memory.api.long_term.history(payload["memory_id"], **{key: value for key, value in payload.items() if key != "memory_id"}),
+            "long_term_memory_supersede": lambda: self.memory.api.long_term.supersede(payload["memory_id"], **{key: value for key, value in payload.items() if key != "memory_id"}),
+            "long_term_memory_link": lambda: self.memory.api.long_term.link(payload["memory_id"], payload["target_memory_ids"], **{key: value for key, value in payload.items() if key not in {"memory_id", "target_memory_ids"}}),
             "long_term_memory_update": lambda: self.memory.api.long_term.update(payload["memory_id"], **{key: value for key, value in payload.items() if key != "memory_id"}),
-            "long_term_memory_delete": lambda: self.memory.api.long_term.delete(payload["memory_id"]),
+            "long_term_memory_delete": lambda: self.memory.api.long_term.delete(payload["memory_id"], **{key: value for key, value in payload.items() if key != "memory_id"}),
             "long_term_memory_compress": lambda: self.memory.api.long_term.compress(**payload),
             "short_term_memory_add": lambda: self.memory.api.short_term.add(**payload),
-            "short_term_memory_get": lambda: self.memory.api.short_term.get(payload["memory_id"]),
+            "short_term_memory_get": lambda: self.memory.api.short_term.get(payload["memory_id"], **{key: value for key, value in payload.items() if key != "memory_id"}),
             "short_term_memory_list": lambda: self.memory.api.short_term.list(**payload),
             "short_term_memory_search": lambda: self.memory.api.short_term.search(**payload),
+            "short_term_memory_history": lambda: self.memory.api.short_term.history(payload["memory_id"], **{key: value for key, value in payload.items() if key != "memory_id"}),
+            "short_term_memory_supersede": lambda: self.memory.api.short_term.supersede(payload["memory_id"], **{key: value for key, value in payload.items() if key != "memory_id"}),
+            "short_term_memory_link": lambda: self.memory.api.short_term.link(payload["memory_id"], payload["target_memory_ids"], **{key: value for key, value in payload.items() if key not in {"memory_id", "target_memory_ids"}}),
             "short_term_memory_update": lambda: self.memory.api.short_term.update(payload["memory_id"], **{key: value for key, value in payload.items() if key != "memory_id"}),
-            "short_term_memory_delete": lambda: self.memory.api.short_term.delete(payload["memory_id"]),
+            "short_term_memory_delete": lambda: self.memory.api.short_term.delete(payload["memory_id"], **{key: value for key, value in payload.items() if key != "memory_id"}),
             "short_term_memory_compress": lambda: self.memory.api.short_term.compress(**payload),
             "archive_memory_add": lambda: self.memory.api.archive.add(**payload),
             "archive_memory_get": lambda: self.memory.api.archive.get(payload["archive_unit_id"]),
@@ -376,6 +575,10 @@ class AIMemoryMCPAdapter:
             "session_append_turn": lambda: self.memory.api.session.append(**payload),
             "session_compress": lambda: self.memory.api.session.compress(**payload),
             "session_archive": lambda: self.memory.api.session.archive(**payload),
+            "platform_event_turn_end": lambda: self.memory.events.on_turn_end(**payload),
+            "platform_event_agent_end": lambda: self.memory.events.on_agent_end(**payload),
+            "platform_event_handoff": lambda: self.memory.events.on_handoff(**payload),
+            "platform_event_session_close": lambda: self.memory.events.on_session_close(payload["session_id"], **{key: value for key, value in payload.items() if key != "session_id"}),
         }
 
     def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> Any:

@@ -53,6 +53,9 @@ class LanceDBVectorIndex:
         "interaction_snapshot",
         "execution_run",
         "execution_observation",
+        "context_artifact_index",
+        "handoff_pack_index",
+        "reflection_memory_index",
     }
     COMPETENCY_COLLECTIONS = {"knowledge_chunk_index", "skill_index", "skill_reference_index"}
 

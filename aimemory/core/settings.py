@@ -61,6 +61,32 @@ class EmbeddingLiteConfig:
 
 
 @dataclass(slots=True)
+class PlatformLLMPluginConfig:
+    name: str = ""
+    settings: dict[str, Any] = field(default_factory=dict)
+    enabled: bool = True
+
+    @classmethod
+    def from_value(cls, value: "PlatformLLMPluginConfig | dict[str, Any] | str | None") -> "PlatformLLMPluginConfig | None":
+        if value is None:
+            return None
+        if isinstance(value, cls):
+            return value
+        if isinstance(value, str):
+            return cls(name=value)
+        if isinstance(value, dict):
+            payload = dict(value)
+            settings = dict(payload.get("settings") or {})
+            for key in list(payload):
+                if key not in {"name", "settings", "enabled"}:
+                    settings[key] = payload.pop(key)
+            payload["settings"] = settings
+            filtered = {key: item for key, item in payload.items() if key in {"name", "settings", "enabled"}}
+            return cls(**filtered)
+        raise TypeError("platform_llm_plugin must be PlatformLLMPluginConfig, dict, str, or None")
+
+
+@dataclass(slots=True)
 class AIMemoryConfig:
     root_dir: str | Path = ".aimemory"
     memory_path: str | Path | None = None
@@ -74,12 +100,19 @@ class AIMemoryConfig:
     team_id: str | None = None
     project_id: str | None = None
     auto_project: bool = True
+    storage_profile: str = "speed_first"
+    bundle_payload_mode: str = "slim"
+    memory_inline_char_limit: int = 32768
+    knowledge_raw_store_policy: str = "large_only"
+    knowledge_inline_char_limit: int = 8192
+    vector_write_mode: str = "sync"
     session_ttl_seconds: int = 60 * 60 * 24
     projection_batch_size: int = 100
     lancedb_path: str | Path | None = None
     intelligence_enabled: bool = True
     providers: ProviderLiteConfig = field(default_factory=ProviderLiteConfig)
     embeddings: EmbeddingLiteConfig = field(default_factory=EmbeddingLiteConfig)
+    platform_llm_plugin: PlatformLLMPluginConfig | None = None
     memory_policy: MemoryPolicy = field(default_factory=MemoryPolicy)
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -99,6 +132,8 @@ class AIMemoryConfig:
                 embedding_keys = {item.name for item in fields(EmbeddingLiteConfig)}
                 filtered = {key: item for key, item in payload["embeddings"].items() if key in embedding_keys}
                 payload["embeddings"] = EmbeddingLiteConfig(**filtered)
+            if "platform_llm_plugin" in payload:
+                payload["platform_llm_plugin"] = PlatformLLMPluginConfig.from_value(payload["platform_llm_plugin"])
             if "memory_policy" in payload and isinstance(payload["memory_policy"], dict):
                 policy_keys = {item.name for item in fields(MemoryPolicy)}
                 filtered = {key: item for key, item in payload["memory_policy"].items() if key in policy_keys}
