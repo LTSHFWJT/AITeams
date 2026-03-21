@@ -1,38 +1,28 @@
-from aimemory.adapters.platform import (
-    AIMemoryPlatformEventAdapter,
-    NullPlatformEventAdapter,
-    PlatformEventAdapter,
-    PlatformLLMAdapter,
-    create_platform_llm_plugin,
-    get_platform_llm_plugin,
-    list_platform_llm_plugins,
-    register_platform_llm_plugin,
-    unregister_platform_llm_plugin,
-)
-from aimemory.core.facade import AIMemory, AsyncAIMemory
-from aimemory.core.scope import CollaborationScope
-from aimemory.core.scoped import ScopedAIMemory
-from aimemory.core.settings import AIMemoryConfig, EmbeddingLiteConfig, PlatformLLMPluginConfig, ProviderLiteConfig
-from aimemory.mcp.adapter import AIMemoryMCPAdapter
+from aimemory.api import AIMemory, MemoryDB, ScopedAIMemory, ScopedMemoryDB
+from aimemory.config import MemoryConfig
+from aimemory.plugins import Extractor, RetrievalGate, Reranker
+from aimemory.scope import Scope
+from aimemory.types import HistoryEntry, MemoryDraft, MemoryRecord, SearchHit, SearchQuery, SearchResult
+from aimemory.vector.embeddings import Embedder, HashEmbedder
 
 __all__ = [
     "AIMemory",
-    "AIMemoryConfig",
-    "AIMemoryPlatformEventAdapter",
-    "AIMemoryMCPAdapter",
-    "AsyncAIMemory",
-    "CollaborationScope",
+    "Embedder",
+    "Extractor",
+    "HashEmbedder",
+    "HistoryEntry",
+    "MemoryDraft",
+    "MemoryConfig",
+    "MemoryDB",
+    "MemoryRecord",
+    "RetrievalGate",
+    "Reranker",
+    "Scope",
     "ScopedAIMemory",
-    "EmbeddingLiteConfig",
-    "NullPlatformEventAdapter",
-    "PlatformEventAdapter",
-    "PlatformLLMAdapter",
-    "PlatformLLMPluginConfig",
-    "ProviderLiteConfig",
-    "create_platform_llm_plugin",
-    "get_platform_llm_plugin",
-    "list_platform_llm_plugins",
-    "register_platform_llm_plugin",
-    "unregister_platform_llm_plugin",
+    "ScopedMemoryDB",
+    "SearchHit",
+    "SearchQuery",
+    "SearchResult",
 ]
-__version__ = "0.4.0"
+
+__version__ = "1.0.0"
