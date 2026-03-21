@@ -3,14 +3,26 @@ from __future__ import annotations
 import sqlite3
 import threading
 import time
+import re
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable
 
 from aimemory.catalog.schema import SCHEMA_STATEMENTS
 from aimemory.ids import make_id
+from aimemory.outbox import OUTBOX_REBUILD_VECTOR, OUTBOX_UPSERT_VECTOR
 from aimemory.scope import Scope
 from aimemory.serialization import json_dumps, json_loads
+from aimemory.state import (
+    HEAD_STATE_ACTIVE,
+    HEAD_STATE_ARCHIVED,
+    HEAD_STATE_DELETED,
+    can_transition_head_state,
+    derive_version_state,
+)
+
+
+FTS_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]+")
 
 
 class SQLiteCatalog:
@@ -211,14 +223,26 @@ class SQLiteCatalog:
         self._conn.execute(
             """
             UPDATE memory_heads
-            SET current_version_id = ?, tier = ?, importance = ?, confidence = ?, updated_at = ?
+            SET current_version_id = ?, state = ?, tier = ?, importance = ?, confidence = ?, updated_at = ?
             WHERE head_id = ?
             """,
-            (new_version_id, tier, importance, confidence, now, head_id),
+            (new_version_id, HEAD_STATE_ACTIVE, tier, importance, confidence, now, head_id),
         )
 
     def touch_head(self, head_id: str, now: int) -> None:
         self._conn.execute("UPDATE memory_heads SET updated_at = ? WHERE head_id = ?", (now, head_id))
+
+    def transition_head_state(self, head_id: str, *, target_state: str, now: int) -> dict[str, Any]:
+        current = self.get_head(head_id)
+        if current is None:
+            raise ValueError(f"Unknown head: {head_id}")
+        if not can_transition_head_state(current["state"], target_state):
+            raise ValueError(f"Invalid state transition: {current['state']} -> {target_state}")
+        self._conn.execute(
+            "UPDATE memory_heads SET state = ?, updated_at = ? WHERE head_id = ?",
+            (target_state, now, head_id),
+        )
+        return self.get_head(head_id)
 
     def create_chunks(
         self,
@@ -408,20 +432,20 @@ class SQLiteCatalog:
             SELECT c.chunk_id, c.scope_key
             FROM memory_chunks c
             JOIN memory_heads h ON h.head_id = c.head_id
-            WHERE h.state = 'active'
+            WHERE h.state = ?
               AND c.version_id = h.current_version_id
               AND c.embedding_state != 'ready'
               AND NOT EXISTS (
                     SELECT 1
                     FROM outbox_jobs o
                     WHERE o.entity_id = c.chunk_id
-                      AND o.op_type = 'upsert_vector'
+                      AND o.op_type IN (?, ?)
                       AND o.status IN ('pending', 'running', 'failed')
               )
             ORDER BY c.created_at ASC
             LIMIT ?
             """,
-            (limit,),
+            (HEAD_STATE_ACTIVE, OUTBOX_UPSERT_VECTOR, OUTBOX_REBUILD_VECTOR, limit),
         ).fetchall()
         return [dict(row) for row in rows]
 
@@ -482,26 +506,106 @@ class SQLiteCatalog:
         ).fetchone()
         return self._row_to_record(row)
 
-    def list_heads(self, scope_key: str, *, state: str = "active", limit: int = 100) -> list[dict[str, Any]]:
+    def list_heads(self, scope_key: str, *, state: str | None = "active", limit: int = 100) -> list[dict[str, Any]]:
+        params: list[Any] = [scope_key]
+        where = ["h.scope_key = ?"]
+        if isinstance(state, (list, tuple, set, frozenset)):
+            states = [str(item) for item in state]
+            if states:
+                where.append(f"h.state IN ({','.join('?' for _ in states)})")
+                params.extend(states)
+        elif state is not None:
+            where.append("h.state = ?")
+            params.append(state)
+        params.append(limit)
         rows = self._conn.execute(
-            """
+            f"""
             SELECT h.*, v.version_id, v.text, v.abstract, v.overview, v.checksum
             FROM memory_heads h
             JOIN memory_versions v ON v.version_id = h.current_version_id
-            WHERE h.scope_key = ? AND h.state = ?
+            WHERE {' AND '.join(where)}
             ORDER BY h.updated_at DESC
             LIMIT ?
             """,
-            (scope_key, state, limit),
+            params,
         ).fetchall()
         return [self._row_to_record(row) for row in rows]
 
+    def export_bundle(self, head_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+        if not head_ids:
+            return {"heads": [], "versions": [], "chunks": [], "events": [], "links": []}
+        placeholders = ",".join("?" for _ in head_ids)
+        heads = self._conn.execute(
+            f"""
+            SELECT *
+            FROM memory_heads
+            WHERE head_id IN ({placeholders})
+            ORDER BY created_at ASC
+            """,
+            head_ids,
+        ).fetchall()
+        versions = self._conn.execute(
+            f"""
+            SELECT *
+            FROM memory_versions
+            WHERE head_id IN ({placeholders})
+            ORDER BY head_id ASC, version_no ASC
+            """,
+            head_ids,
+        ).fetchall()
+        chunks = self._conn.execute(
+            f"""
+            SELECT *
+            FROM memory_chunks
+            WHERE head_id IN ({placeholders})
+            ORDER BY head_id ASC, version_id ASC, chunk_no ASC
+            """,
+            head_ids,
+        ).fetchall()
+        events = self._conn.execute(
+            f"""
+            SELECT *
+            FROM history_events
+            WHERE head_id IN ({placeholders})
+            ORDER BY created_at ASC
+            """,
+            head_ids,
+        ).fetchall()
+        links = self._conn.execute(
+            f"""
+            SELECT *
+            FROM memory_links
+            WHERE src_head_id IN ({placeholders}) OR dst_head_id IN ({placeholders})
+            ORDER BY created_at ASC
+            """,
+            [*head_ids, *head_ids],
+        ).fetchall()
+        head_state_by_id = {row["head_id"]: row["state"] for row in heads}
+        current_version_by_head = {row["head_id"]: row["current_version_id"] for row in heads}
+        return {
+            "heads": [self._head_row_to_export(row) for row in heads],
+            "versions": [
+                self._version_row_to_export(
+                    row,
+                    head_state=head_state_by_id.get(row["head_id"], HEAD_STATE_ACTIVE),
+                    current_version_id=current_version_by_head.get(row["head_id"], row["version_id"]),
+                )
+                for row in versions
+            ],
+            "chunks": [self._chunk_row_to_export(row) for row in chunks],
+            "events": [self._event_row_to_export(row) for row in events],
+            "links": [self._link_row_to_export(row) for row in links],
+        }
+
     def search_lexical(self, scope_key: str, query: str, limit: int) -> list[dict[str, Any]]:
+        match_query = self._fts_query(query)
+        if not match_query:
+            return []
         rows = self._conn.execute(
             """
             SELECT c.chunk_id, c.head_id, c.version_id, c.text AS chunk_text,
                    v.abstract, v.overview, h.kind, h.layer, h.tier, h.importance, h.confidence,
-                   h.access_count, h.updated_at, h.last_accessed_at, h.metadata_json,
+                   h.access_count, h.created_at, h.updated_at, h.last_accessed_at, h.metadata_json,
                    v.valid_from, v.valid_to, bm25(memory_chunks_fts) AS rank
             FROM memory_chunks_fts
             JOIN memory_chunks c ON c.chunk_pk = memory_chunks_fts.rowid
@@ -511,7 +615,7 @@ class SQLiteCatalog:
             ORDER BY rank
             LIMIT ?
             """,
-            (query, scope_key, limit),
+            (match_query, scope_key, limit),
         ).fetchall()
         return [
             {
@@ -527,6 +631,7 @@ class SQLiteCatalog:
                 "importance": float(row["importance"]),
                 "confidence": float(row["confidence"]),
                 "access_count": int(row["access_count"]),
+                "created_at": int(row["created_at"]),
                 "updated_at": int(row["updated_at"]),
                 "last_accessed_at": row["last_accessed_at"],
                 "valid_from": int(row["valid_from"]),
@@ -538,14 +643,21 @@ class SQLiteCatalog:
         ]
 
     def soft_delete(self, head_id: str, now: int) -> dict[str, Any]:
-        self._conn.execute("UPDATE memory_heads SET state = 'deleted', updated_at = ? WHERE head_id = ?", (now, head_id))
-        return self.get_head(head_id)
+        return self.transition_head_state(head_id, target_state=HEAD_STATE_DELETED, now=now)
+
+    def archive(self, head_id: str, now: int) -> dict[str, Any]:
+        return self.transition_head_state(head_id, target_state=HEAD_STATE_ARCHIVED, now=now)
 
     def restore(self, head_id: str, now: int) -> dict[str, Any]:
-        self._conn.execute("UPDATE memory_heads SET state = 'active', updated_at = ? WHERE head_id = ?", (now, head_id))
-        return self.get_head(head_id)
+        return self.transition_head_state(head_id, target_state=HEAD_STATE_ACTIVE, now=now)
+
+    def restore_archive(self, head_id: str, now: int) -> dict[str, Any]:
+        return self.transition_head_state(head_id, target_state=HEAD_STATE_ACTIVE, now=now)
 
     def get_history(self, head_id: str) -> dict[str, Any]:
+        head = self.get_head(head_id)
+        if head is None:
+            return {"versions": [], "events": [], "head_state": None}
         versions = self._conn.execute(
             """
             SELECT version_id, version_no, text, abstract, overview, checksum, change_type, valid_from, valid_to,
@@ -579,6 +691,12 @@ class SQLiteCatalog:
                     "valid_to": row["valid_to"],
                     "source_type": row["source_type"],
                     "source_ref": row["source_ref"],
+                    "state": derive_version_state(
+                        head_state=head["state"],
+                        current_version_id=head["version_id"],
+                        version_id=row["version_id"],
+                        valid_to=row["valid_to"],
+                    ),
                     "created_at": row["created_at"],
                     "metadata": json_loads(row["metadata_json"], {}),
                 }
@@ -592,6 +710,7 @@ class SQLiteCatalog:
                 }
                 for row in events
             ],
+            "head_state": head["state"],
         }
 
     def apply_access_updates(self, updates: dict[str, int], now: int) -> None:
@@ -604,6 +723,145 @@ class SQLiteCatalog:
                 """,
                 (delta, now, now, now, head_id),
             )
+
+    def import_head(self, row: dict[str, Any]) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO memory_heads (
+                head_id, scope_key, tenant_id, workspace_id, project_id, user_id, agent_id, session_id, run_id,
+                namespace, visibility, kind, layer, tier, state, fact_key, current_version_id, importance,
+                confidence, access_count, last_accessed_at, created_at, updated_at, metadata_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row["head_id"],
+                row["scope_key"],
+                row.get("tenant_id") or "local",
+                row.get("workspace_id"),
+                row.get("project_id"),
+                row.get("user_id"),
+                row.get("agent_id"),
+                row.get("session_id"),
+                row.get("run_id"),
+                row.get("namespace") or "default",
+                row.get("visibility") or "private",
+                row["kind"],
+                row["layer"],
+                row["tier"],
+                row["state"],
+                row.get("fact_key"),
+                row["current_version_id"],
+                float(row["importance"]),
+                float(row["confidence"]),
+                int(row.get("access_count", 0)),
+                row.get("last_accessed_at"),
+                int(row["created_at"]),
+                int(row["updated_at"]),
+                json_dumps(row.get("metadata") or {}),
+            ),
+        )
+
+    def import_version(self, row: dict[str, Any]) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO memory_versions (
+                version_id, head_id, version_no, text, abstract, overview, checksum, change_type,
+                valid_from, valid_to, source_type, source_ref, embedding_model, chunk_strategy, created_by,
+                created_at, metadata_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row["version_id"],
+                row["head_id"],
+                int(row["version_no"]),
+                row["text"],
+                row["abstract"],
+                row["overview"],
+                row["checksum"],
+                row["change_type"],
+                int(row["valid_from"]),
+                row.get("valid_to"),
+                row.get("source_type"),
+                row.get("source_ref"),
+                row.get("embedding_model"),
+                row.get("chunk_strategy"),
+                row.get("created_by"),
+                int(row["created_at"]),
+                json_dumps(row.get("metadata") or {}),
+            ),
+        )
+
+    def import_chunk(self, row: dict[str, Any]) -> None:
+        cursor = self._conn.execute(
+            """
+            INSERT INTO memory_chunks (
+                chunk_id, head_id, version_id, scope_key, chunk_no, text, token_count,
+                char_start, char_end, embedding_state, created_at, updated_at, metadata_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row["chunk_id"],
+                row["head_id"],
+                row["version_id"],
+                row["scope_key"],
+                int(row["chunk_no"]),
+                row["text"],
+                int(row.get("token_count", 0)),
+                int(row.get("char_start", 0)),
+                int(row.get("char_end", 0)),
+                row.get("embedding_state") or "pending",
+                int(row["created_at"]),
+                int(row["updated_at"]),
+                json_dumps(row.get("metadata") or {}),
+            ),
+        )
+        self._conn.execute(
+            "INSERT INTO memory_chunks_fts(rowid, text, scope_key, head_id, version_id) VALUES (?, ?, ?, ?, ?)",
+            (
+                cursor.lastrowid,
+                row["text"],
+                row["scope_key"],
+                row["head_id"],
+                row["version_id"],
+            ),
+        )
+
+    def import_history_event(self, row: dict[str, Any]) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO history_events(event_id, scope_key, head_id, version_id, event_type, payload_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row["event_id"],
+                row["scope_key"],
+                row.get("head_id"),
+                row.get("version_id"),
+                row["event_type"],
+                json_dumps(row.get("payload") or {}),
+                int(row["created_at"]),
+            ),
+        )
+
+    def import_link(self, row: dict[str, Any]) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO memory_links(link_id, src_head_id, dst_head_id, relation_type, weight, created_at, metadata_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row["link_id"],
+                row["src_head_id"],
+                row["dst_head_id"],
+                row["relation_type"],
+                float(row.get("weight", 1.0)),
+                int(row["created_at"]),
+                json_dumps(row.get("metadata") or {}),
+            ),
+        )
 
     def count_pending_jobs(self) -> int:
         row = self._conn.execute(
@@ -628,6 +886,72 @@ class SQLiteCatalog:
         return result
 
     @staticmethod
+    def _head_row_to_export(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        data["importance"] = float(data["importance"])
+        data["confidence"] = float(data["confidence"])
+        data["access_count"] = int(data["access_count"])
+        data["created_at"] = int(data["created_at"])
+        data["updated_at"] = int(data["updated_at"])
+        data["metadata"] = json_loads(data.pop("metadata_json"), {})
+        return data
+
+    @staticmethod
+    def _fts_query(text: str) -> str:
+        tokens = FTS_TOKEN_RE.findall(text or "")
+        if not tokens:
+            return ""
+        return " AND ".join(f'"{token}"' for token in tokens)
+
+    @staticmethod
+    def _version_row_to_export(
+        row: sqlite3.Row,
+        *,
+        head_state: str,
+        current_version_id: str,
+    ) -> dict[str, Any]:
+        data = dict(row)
+        data["version_no"] = int(data["version_no"])
+        data["valid_from"] = int(data["valid_from"])
+        data["created_at"] = int(data["created_at"])
+        data["state"] = derive_version_state(
+            head_state=head_state,
+            current_version_id=current_version_id,
+            version_id=data["version_id"],
+            valid_to=data.get("valid_to"),
+        )
+        data["metadata"] = json_loads(data.pop("metadata_json"), {})
+        return data
+
+    @staticmethod
+    def _chunk_row_to_export(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        data["chunk_no"] = int(data["chunk_no"])
+        data["token_count"] = int(data["token_count"])
+        data["char_start"] = int(data["char_start"])
+        data["char_end"] = int(data["char_end"])
+        data["created_at"] = int(data["created_at"])
+        data["updated_at"] = int(data["updated_at"])
+        data["metadata"] = json_loads(data.pop("metadata_json"), {})
+        data.pop("chunk_pk", None)
+        return data
+
+    @staticmethod
+    def _event_row_to_export(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        data["created_at"] = int(data["created_at"])
+        data["payload"] = json_loads(data.pop("payload_json"), {})
+        return data
+
+    @staticmethod
+    def _link_row_to_export(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        data["weight"] = float(data["weight"])
+        data["created_at"] = int(data["created_at"])
+        data["metadata"] = json_loads(data.pop("metadata_json"), {})
+        return data
+
+    @staticmethod
     def _row_to_record(row: sqlite3.Row | None) -> dict[str, Any] | None:
         if row is None:
             return None
@@ -648,6 +972,7 @@ class SQLiteCatalog:
             "layer": row["layer"],
             "tier": row["tier"],
             "state": row["state"],
+            "current_version_id": row["current_version_id"],
             "text": row["text"],
             "abstract": row["abstract"],
             "overview": row["overview"],

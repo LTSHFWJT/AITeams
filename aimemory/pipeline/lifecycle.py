@@ -7,6 +7,7 @@ import time
 
 
 VERSIONED_KINDS = {"profile", "preference", "entity"}
+PROCEDURE_VERSION_MODES = {"append_only", "supersede_by_fact_key"}
 SKIP_PATTERNS = [
     re.compile(r"^(hi|hello|hey|thanks|ok|okay|yes|no)\b", re.IGNORECASE),
     re.compile(r"^/"),
@@ -41,10 +42,24 @@ def compute_fingerprint(scope_key: str, kind: str, checksum: str) -> str:
 
 
 def derive_fact_key(kind: str, text: str) -> str | None:
-    if kind not in VERSIONED_KINDS:
+    if kind not in VERSIONED_KINDS and kind != "procedure":
         return None
     normalized = normalize_text(summarize_text(text.lower(), limit=96))
     return hashlib.sha1(f"{kind}:{normalized}".encode("utf-8")).hexdigest()
+
+
+def uses_version_chain(kind: str, *, procedure_version_mode: str) -> bool:
+    if kind in VERSIONED_KINDS:
+        return True
+    if kind == "procedure":
+        return procedure_version_mode == "supersede_by_fact_key"
+    return False
+
+
+def confidence_multiplier(confidence: float, *, floor: float) -> float:
+    bounded_floor = max(0.0, min(1.0, floor))
+    bounded_confidence = clamp_unit(confidence)
+    return bounded_floor + ((1.0 - bounded_floor) * bounded_confidence)
 
 
 def split_text(text: str, *, chunk_size: int, chunk_overlap: int) -> list[dict[str, int | str]]:

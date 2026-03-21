@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from aimemory.catalog.sqlite_store import SQLiteCatalog
 from aimemory.hotstore.lmdb_store import LMDBHotStore
+from aimemory.outbox import OUTBOX_REBUILD_VECTOR
 from aimemory.pipeline.lifecycle import now_ms
 from aimemory.pipeline.maintenance import MaintenanceCoordinator
 
@@ -27,7 +28,7 @@ class RecoveryCoordinator:
                 self.catalog.enqueue_job(
                     entity_type="chunk",
                     entity_id=chunk["chunk_id"],
-                    op_type="upsert_vector",
+                    op_type=OUTBOX_REBUILD_VECTOR,
                     payload={"chunk_id": chunk["chunk_id"], "scope_key": chunk["scope_key"]},
                     now=now,
                 )
