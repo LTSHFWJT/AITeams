@@ -4,3 +4,9 @@ __pycache__/
 *.egg-info/
 data/*.db
 data/aimemory/
+selfdoc/
+edict/
+ms-agent/
+agentscope/
+langgraph/
+crewAI/
