@@ -1,53 +1,53 @@
-# AI Teams
+# AITeams
 
-一个基于 `FastAPI + SQLite + aimemory` 的多智能体协同平台最小实现。
+一个按 `selfdoc/python-agent-collab-platform-design.md` 重构的 Python Agent 协同平台。
 
-当前版本重点完成：
+当前版本聚焦于 V1 核心闭环：
 
-- 平台层独立 SQLite 存储：Provider、Agent、协作会话、协作消息
-- `aimemory` 作为 Agent 记忆库，而不是平台自身存储
-- AI API 接入模块：支持自定义 URL / API Key / headers / extra config
-- 主流 AI API 适配：
-  - OpenAI
-  - Azure OpenAI
-  - Anthropic
-  - Google Gemini
-  - DeepSeek
-  - OpenRouter
-  - Ollama
-  - Custom OpenAI-compatible
-  - Mock provider（本地验证）
-- 前后端一体：FastAPI 提供 API 和静态前端页面
+- `Blueprint` 配置与模板化
+- `TaskRelease -> Run -> Step -> Checkpoint -> Artifact -> Approval` 元数据闭环
+- 基于 `asyncio` 的本地编排运行时
+- `aimemory` 作为底层记忆库，通过 `MemoryAdapter` 接入
+- 本地工作区与 Artifact 输出
+- 轻量控制台，支持 Blueprint 编辑、任务发布、Run 查看与审批恢复
 
-## 目录
+## 架构
 
-- `aiteams/`: 平台代码
-- `aimemory/`: Agent 记忆存储库
-- `data/platform.db`: 平台 SQLite
-- `data/aimemory/aimemory.db`: aimemory SQLite
+`aiteams/` 现已按运行时重构为以下主干：
+
+- `app/`: 配置与入口
+- `api/`: HTTP 控制面
+- `domain/`: Blueprint/Flow/Agent 领域模型
+- `runtime/`: 编译器与执行引擎
+- `agent/`: Agent Kernel
+- `memory/`: `aimemory` 适配层
+- `storage/`: SQLite 元数据存储
+- `workspace/`: 本地工作区与 Artifact 管理
+
+`aimemory/` 未被改动，仍只负责记忆存储与检索。
 
 ## 启动
-
-当前实现不依赖第三方 Web 框架，直接运行即可：
 
 ```powershell
 .\.venv\Scripts\python.exe -m aiteams
 ```
 
-打开：
+默认地址：
 
 ```text
 http://127.0.0.1:8000
 ```
 
-## 开发验证
+## 控制面能力
+
+- 载入内置模板并编辑 YAML/JSON Blueprint
+- 校验并保存 Blueprint
+- 发布任务并自动执行 Run
+- 查看 Step、Event、Artifact、Workspace 文件
+- 对等待审批的 Run 进行批准并恢复执行
+
+## 测试
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests
 ```
-
-## 说明
-
-- Provider API Key 目前直接存 SQLite，适合本地开发和内网原型，不适合生产密钥治理。
-- 前端可直接用 `Mock Provider` 先跑通平台闭环，再切换到真实模型。
-- Agent 协作记录存在平台 SQLite；每个 Agent 的 brief、回答与长期记忆写入 `aimemory`。

@@ -2,8 +2,7 @@ __pycache__/
 *.pyc
 .venv/
 *.egg-info/
-data/*.db
-data/aimemory/
+data/
 selfdoc/
 edict/
 ms-agent/

@@ -1,380 +1,232 @@
-const state = {
-  presets: [],
+﻿const state = {
+  summary: {},
+  storage: null,
+  providerTypes: [],
+  recentBuilds: [],
+  recentRuns: [],
   providers: [],
-  agents: [],
-  skills: [],
-  sessions: [],
-  knowledgeDocuments: [],
-  providerPage: { items: [], count: 0, limit: 10, offset: 0 },
-  agentPage: { items: [], count: 0, limit: 10, offset: 0 },
-  providerFilters: { name: "", provider_type: "", model: "" },
-  agentFilters: { name: "", role: "", provider_id: "", model: "" },
-  activePage: "home",
-  activeAgentModule: "providers",
-  activeKnowledgeModule: "skills",
-  activeSessionId: null,
-  activeSkillId: null,
-  activeKnowledgeId: null,
+  providerPage: {
+    items: [],
+    total: 0,
+    limit: 10,
+    offset: 0,
+    query: "",
+    providerType: "",
+  },
+  plugins: [],
+  agentTemplates: [],
+  teamTemplates: [],
+  builds: [],
+  blueprints: [],
+  runs: [],
+  approvals: [],
+  activePage: "overview",
+  activeNavSection: "overview",
   editingProviderId: null,
-  editingAgentId: null,
-  editingSkillId: null,
-  editingKnowledgeId: null,
-  taskAgentsLoaded: false,
+  editingPluginId: null,
+  editingAgentTemplateId: null,
+  editingTeamTemplateId: null,
+  selectedTeamTemplateId: null,
+  selectedBuildId: null,
+  selectedBlueprintId: null,
+  selectedRunId: null,
+  providerEditor: {
+    models: [],
+    savedModels: [],
+    editingModelIndex: null,
+  },
+  teamEditor: {
+    spec: null,
+    selectedNodeId: null,
+    linkFromNodeId: null,
+    drag: null,
+    validation: null,
+    preview: null,
+  },
 };
 
-const pageButtons = Array.from(document.querySelectorAll("[data-page-target]"));
+const PAGE_SECTIONS = {
+  overview: "overview",
+  providers: "resources",
+  plugins: "resources",
+  "agent-templates": "resources",
+  "team-templates": "orchestration",
+  builds: "delivery",
+  runtime: "delivery",
+  approvals: "delivery",
+  blueprints: "delivery",
+};
+
+const SECTION_DEFAULT_PAGE = {
+  overview: "overview",
+  resources: "providers",
+  orchestration: "team-templates",
+  delivery: "builds",
+};
+
+const MODEL_TYPE_LABELS = {
+  chat: "\u804a\u5929",
+  embedding: "\u5d4c\u5165",
+  rerank: "\u91cd\u6392",
+};
+
+const topNavButtons = Array.from(document.querySelectorAll("[data-nav-section]"));
+const navButtons = Array.from(document.querySelectorAll("[data-page-target]"));
+const subMenuPanels = Array.from(document.querySelectorAll("[data-nav-panel]"));
 const pageViews = Array.from(document.querySelectorAll("[data-page]"));
-const agentModuleButtons = Array.from(document.querySelectorAll("[data-agent-module-target]"));
-const agentModuleViews = Array.from(document.querySelectorAll("[data-agent-module]"));
-const knowledgeModuleButtons = Array.from(document.querySelectorAll("[data-knowledge-module-target]"));
-const knowledgeModuleViews = Array.from(document.querySelectorAll("[data-knowledge-module]"));
+
+const summaryCards = document.querySelector("#summary-cards");
+const storageBanner = document.querySelector("#storage-banner");
+const providerTypeGrid = document.querySelector("#provider-type-grid");
+const overviewBuilds = document.querySelector("#overview-builds");
+const overviewRuns = document.querySelector("#overview-runs");
 
 const providerForm = document.querySelector("#provider-form");
-const agentForm = document.querySelector("#agent-form");
-const runForm = document.querySelector("#run-form");
-const skillForm = document.querySelector("#skill-form");
-const skillSearchForm = document.querySelector("#skill-search-form");
-const knowledgeForm = document.querySelector("#knowledge-form");
-const knowledgeSearchForm = document.querySelector("#knowledge-search-form");
-
-const providerTypeSelect = document.querySelector("#provider-type");
+const providerKey = document.querySelector("#provider-key");
+const providerName = document.querySelector("#provider-name");
+const providerType = document.querySelector("#provider-type");
+const providerBaseUrl = document.querySelector("#provider-base-url");
+const providerApiKey = document.querySelector("#provider-api-key");
+const providerPageSize = document.querySelector("#provider-page-size");
+const providerOpenCreate = document.querySelector("#provider-open-create");
 const providerList = document.querySelector("#provider-list");
-const providerListSummary = document.querySelector("#provider-list-summary");
-const providerPageSizeSelect = document.querySelector("#provider-page-size");
-const providerPagination = document.querySelector("#provider-pagination");
-const providerFilterForm = document.querySelector("#provider-filter-form");
-const providerFilterTypeSelect = document.querySelector("#provider-filter-type");
-const providerFilterResetBtn = document.querySelector("#provider-filter-reset");
-const providerTestBtn = document.querySelector("#provider-test-btn");
-const providerCancelBtn = document.querySelector("#provider-cancel-btn");
-const providerFormMode = document.querySelector("#provider-form-mode");
-const providerFormResult = document.querySelector("#provider-form-result");
-const providerApiKeyHint = document.querySelector("#provider-api-key-hint");
-const providerTestResult = document.querySelector("#provider-test-result");
-const providerAdvanced = document.querySelector("#provider-advanced");
-const providerPresetHint = document.querySelector("#provider-preset-hint");
-const providerApiVersionField = document.querySelector("[data-provider-field='api_version']");
-const providerOrganizationField = document.querySelector("[data-provider-field='organization']");
-const providerSubmitButton = providerForm.querySelector("button[type='submit']");
-const legacyProviderInputs = Array.from(document.querySelectorAll("#provider-legacy-fields input, #provider-legacy-extra textarea"));
+const providerPaginationMeta = document.querySelector("#provider-pagination-meta");
+const providerResult = document.querySelector("#provider-result");
+const providerModal = document.querySelector("#provider-modal");
+const providerModalTitle = document.querySelector("#provider-modal-title");
+const providerModalCloseButtons = Array.from(document.querySelectorAll("[data-provider-modal-close]"));
+const providerCancel = document.querySelector("#provider-cancel");
+const providerModelSummary = document.querySelector("#provider-model-summary");
+const providerModelEditorModal = document.querySelector("#provider-model-editor-modal");
+const providerModelEditorTitle = document.querySelector("#provider-model-editor-title");
+const providerModelEditorModalCloseButtons = Array.from(document.querySelectorAll("[data-provider-model-editor-modal-close]"));
+const providerModelList = document.querySelector("#provider-model-list");
+const providerModelNew = document.querySelector("#provider-model-new");
+const providerModelReset = document.querySelector("#provider-model-reset");
+const providerModelFetch = document.querySelector("#provider-model-fetch");
+const providerModelEditor = document.querySelector("#provider-model-editor");
+const providerModelName = document.querySelector("#provider-model-name");
+const providerModelType = document.querySelector("#provider-model-type");
+const providerModelContextWindow = document.querySelector("#provider-model-context-window");
+const providerModelCancel = document.querySelector("#provider-model-cancel");
+const providerModelTest = document.querySelector("#provider-model-test");
+const providerModelSave = document.querySelector("#provider-model-save");
+const providerModelTestResult = document.querySelector("#provider-model-test-result");
 
-const agentProviderSelect = document.querySelector("#agent-provider");
-const leadAgentSelect = document.querySelector("#lead-agent");
-const agentList = document.querySelector("#agent-list");
-const agentListSummary = document.querySelector("#agent-list-summary");
-const agentPageSizeSelect = document.querySelector("#agent-page-size");
-const agentPagination = document.querySelector("#agent-pagination");
-const agentFilterForm = document.querySelector("#agent-filter-form");
-const agentFilterProviderSelect = document.querySelector("#agent-filter-provider");
-const agentFilterResetBtn = document.querySelector("#agent-filter-reset");
-const agentCheckboxes = document.querySelector("#agent-checkboxes");
-const agentCancelBtn = document.querySelector("#agent-cancel-btn");
-const agentFormMode = document.querySelector("#agent-form-mode");
-const agentFormResult = document.querySelector("#agent-form-result");
-const agentSubmitButton = agentForm.querySelector("button[type='submit']");
+const pluginForm = document.querySelector("#plugin-form");
+const pluginKey = document.querySelector("#plugin-key");
+const pluginName = document.querySelector("#plugin-name");
+const pluginVersion = document.querySelector("#plugin-version");
+const pluginType = document.querySelector("#plugin-type");
+const pluginWorkbenchKey = document.querySelector("#plugin-workbench-key");
+const pluginInstallPath = document.querySelector("#plugin-install-path");
+const pluginTools = document.querySelector("#plugin-tools");
+const pluginPermissions = document.querySelector("#plugin-permissions");
+const pluginDescription = document.querySelector("#plugin-description");
+const pluginList = document.querySelector("#plugin-list");
+const pluginResult = document.querySelector("#plugin-result");
 
-const sessionList = document.querySelector("#session-list");
-const sessionMeta = document.querySelector("#session-meta");
-const transcript = document.querySelector("#transcript");
-const memoryView = document.querySelector("#memory-view");
-const runError = document.querySelector("#run-error");
+const agentTemplateForm = document.querySelector("#agent-template-form");
+const agentTemplateKey = document.querySelector("#agent-template-key");
+const agentTemplateName = document.querySelector("#agent-template-name");
+const agentTemplateRole = document.querySelector("#agent-template-role");
+const agentTemplateProvider = document.querySelector("#agent-template-provider");
+const agentTemplateModel = document.querySelector("#agent-template-model");
+const agentTemplateMemoryPolicy = document.querySelector("#agent-template-memory-policy");
+const agentTemplateSkills = document.querySelector("#agent-template-skills");
+const agentTemplatePlugins = document.querySelector("#agent-template-plugins");
+const agentTemplateGoal = document.querySelector("#agent-template-goal");
+const agentTemplateInstructions = document.querySelector("#agent-template-instructions");
+const agentTemplateDescription = document.querySelector("#agent-template-description");
+const agentTemplateList = document.querySelector("#agent-template-list");
+const agentTemplateResult = document.querySelector("#agent-template-result");
 
-const skillList = document.querySelector("#skill-list");
-const skillDetail = document.querySelector("#skill-detail");
-const skillResult = document.querySelector("#skill-result");
-const skillResetBtn = document.querySelector("#skill-reset-btn");
-const skillCancelBtn = document.querySelector("#skill-cancel-btn");
-const skillFormMode = document.querySelector("#skill-form-mode");
-const skillSubmitButton = skillForm.querySelector("button[type='submit']");
-const skillImportSingleBtn = document.querySelector("#skill-import-single-btn");
-const skillImportBatchBtn = document.querySelector("#skill-import-batch-btn");
-const skillImportSingleInput = document.querySelector("#skill-import-single-input");
-const skillImportBatchInput = document.querySelector("#skill-import-batch-input");
-const skillImportSummary = document.querySelector("#skill-import-summary");
-const skillReferenceFilesInput = document.querySelector("#skill-reference-files");
-const skillTemplateFilesInput = document.querySelector("#skill-template-files");
-const skillScriptFilesInput = document.querySelector("#skill-script-files");
-const skillAssetFilesInput = document.querySelector("#skill-asset-files");
-const skillUploadSummary = document.querySelector("#skill-upload-summary");
+const teamTemplateForm = document.querySelector("#team-template-form");
+const teamTemplateKey = document.querySelector("#team-template-key");
+const teamTemplateName = document.querySelector("#team-template-name");
+const teamTemplateWorkspace = document.querySelector("#team-template-workspace");
+const teamTemplateProject = document.querySelector("#team-template-project");
+const teamTemplateDescription = document.querySelector("#team-template-description");
+const teamTemplateAgents = document.querySelector("#team-template-agents");
+const teamTemplateFlow = document.querySelector("#team-template-flow");
+const teamTemplateDod = document.querySelector("#team-template-dod");
+const teamTemplateChecks = document.querySelector("#team-template-checks");
+const teamTemplatePreview = document.querySelector("#team-template-preview");
+const teamTemplateList = document.querySelector("#team-template-list");
+const teamTemplateResult = document.querySelector("#team-template-result");
+const teamMemberList = document.querySelector("#team-member-list");
+const teamGraphStage = document.querySelector("#team-graph-stage");
+const teamGraphCanvas = document.querySelector("#team-graph-canvas");
+const teamGraphEdges = document.querySelector("#team-graph-edges");
+const teamGraphValidate = document.querySelector("#team-graph-validate");
+const teamGraphPreview = document.querySelector("#team-graph-preview");
+const teamGraphAutolayout = document.querySelector("#team-graph-autolayout");
+const teamValidationResult = document.querySelector("#team-validation-result");
+const teamLinkHint = document.querySelector("#team-link-hint");
+const teamNodeEmpty = document.querySelector("#team-node-empty");
+const teamNodeFormShell = document.querySelector("#team-node-form-shell");
+const teamNodeId = document.querySelector("#team-node-id");
+const teamNodeType = document.querySelector("#team-node-type");
+const teamNodeName = document.querySelector("#team-node-name");
+const teamNodeAgent = document.querySelector("#team-node-agent");
+const teamNodeInstruction = document.querySelector("#team-node-instruction");
+const teamNodeExpr = document.querySelector("#team-node-expr");
+const teamNodeMaxIterations = document.querySelector("#team-node-max-iterations");
+const teamNodeArtifactKind = document.querySelector("#team-node-artifact-kind");
+const teamNodeArtifactName = document.querySelector("#team-node-artifact-name");
+const teamNodeTemplate = document.querySelector("#team-node-template");
+const teamNodeSource = document.querySelector("#team-node-source");
+const teamEdgeList = document.querySelector("#team-edge-list");
+const teamNodeLink = document.querySelector("#team-node-link");
+const teamNodeDelete = document.querySelector("#team-node-delete");
 
-const knowledgeList = document.querySelector("#knowledge-list");
-const knowledgeDetail = document.querySelector("#knowledge-detail");
-const knowledgeResult = document.querySelector("#knowledge-result");
-const knowledgeResetBtn = document.querySelector("#knowledge-reset-btn");
-const knowledgeCancelBtn = document.querySelector("#knowledge-cancel-btn");
-const knowledgeFormMode = document.querySelector("#knowledge-form-mode");
-const knowledgeSubmitButton = knowledgeForm.querySelector("button[type='submit']");
+const buildForm = document.querySelector("#build-form");
+const buildTeamTemplate = document.querySelector("#build-team-template");
+const buildName = document.querySelector("#build-name");
+const buildList = document.querySelector("#build-list");
+const buildDetail = document.querySelector("#build-detail");
+const buildResult = document.querySelector("#build-result");
 
-const homeSessionList = document.querySelector("#home-session-list");
-const homeAgentList = document.querySelector("#home-agent-list");
-const homeKnowledgeList = document.querySelector("#home-knowledge-list");
+const taskForm = document.querySelector("#task-form");
+const taskBuild = document.querySelector("#task-build");
+const taskBlueprint = document.querySelector("#task-blueprint");
+const taskTitle = document.querySelector("#task-title");
+const taskApprovalMode = document.querySelector("#task-approval-mode");
+const taskPrompt = document.querySelector("#task-prompt");
+const taskResult = document.querySelector("#task-result");
+const runList = document.querySelector("#run-list");
+const runDetail = document.querySelector("#run-detail");
+const approvalList = document.querySelector("#approval-list");
+const blueprintList = document.querySelector("#blueprint-list");
+const blueprintDetail = document.querySelector("#blueprint-detail");
 
-for (const input of legacyProviderInputs) {
-  if (input.name) {
-    input.name = `legacy_${input.name}`;
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function escapeAttribute(value) {
+  return escapeHtml(value).replace(/\r?\n/g, "&#10;");
+}
+
+function providerModelTooltipText(models, fallbackModelName = "") {
+  if (Array.isArray(models) && models.length) {
+    return models
+      .map((item, index) => {
+        const typeLabel = MODEL_TYPE_LABELS[item.model_type] || item.model_type || "-";
+        const context = item.context_window ? ` / 上下文 ${item.context_window}` : "";
+        return `${index + 1}. ${item.name || "-"} / ${typeLabel}${context}`;
+      })
+      .join("\n");
   }
-  input.disabled = true;
-}
-
-function showJson(target, value) {
-  target.textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
-  target.classList.remove("hidden");
-}
-
-function hide(target) {
-  target.classList.add("hidden");
-  target.textContent = "";
-}
-
-function safeJson(text) {
-  if (!text.trim()) {
-    return {};
+  if (fallbackModelName) {
+    return `默认模型：${fallbackModelName}`;
   }
-  return JSON.parse(text);
-}
-
-function formatJson(value) {
-  if (!value || (typeof value === "object" && !Object.keys(value).length)) {
-    return "";
-  }
-  return JSON.stringify(value, null, 2);
-}
-
-function formatStructuredValue(value) {
-  if (value === null || value === undefined || value === "") {
-    return "";
-  }
-  return typeof value === "string" ? value : JSON.stringify(value, null, 2);
-}
-
-function parseStructuredText(text) {
-  const trimmed = text.trim();
-  if (!trimmed) {
-    return null;
-  }
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    return trimmed;
-  }
-}
-
-function parseCommaList(text) {
-  return text
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
-function latestSkillVersion(skill) {
-  const versions = Array.isArray(skill?.versions) ? [...skill.versions] : [];
-  versions.sort((left, right) => String(right?.created_at || "").localeCompare(String(left?.created_at || "")));
-  return versions[0] || null;
-}
-
-function skillAssetCount(skill) {
-  return Number(skill?.asset_summary?.total || skill?.assets?.length || 0);
-}
-
-function normalizeRelativePath(path) {
-  return String(path || "")
-    .replaceAll("\\", "/")
-    .replace(/^\/+/, "")
-    .replace(/\/{2,}/g, "/");
-}
-
-function fileCategoryPath(category, fileName) {
-  return `${category}/${fileName}`;
-}
-
-async function fileToBase64(file) {
-  const buffer = await file.arrayBuffer();
-  const bytes = new Uint8Array(buffer);
-  const chunkSize = 0x8000;
-  let binary = "";
-  for (let index = 0; index < bytes.length; index += chunkSize) {
-    const chunk = bytes.subarray(index, index + chunkSize);
-    binary += String.fromCharCode(...chunk);
-  }
-  return btoa(binary);
-}
-
-async function fileToAssetPayload(file, relativePath) {
-  return {
-    relative_path: normalizeRelativePath(relativePath),
-    mime_type: file.type || null,
-    content_base64: await fileToBase64(file),
-  };
-}
-
-async function buildCategoryAssetPayload(input, category) {
-  const files = Array.from(input?.files || []);
-  const assets = [];
-  for (const file of files) {
-    assets.push(await fileToAssetPayload(file, fileCategoryPath(category, file.name)));
-  }
-  return assets;
-}
-
-async function buildSkillAttachmentPayload() {
-  const groups = await Promise.all([
-    buildCategoryAssetPayload(skillReferenceFilesInput, "references"),
-    buildCategoryAssetPayload(skillTemplateFilesInput, "templates"),
-    buildCategoryAssetPayload(skillScriptFilesInput, "scripts"),
-    buildCategoryAssetPayload(skillAssetFilesInput, "assets"),
-  ]);
-  return groups.flat();
-}
-
-function selectedSkillUploadCount() {
-  return (
-    Array.from(skillReferenceFilesInput?.files || []).length +
-    Array.from(skillTemplateFilesInput?.files || []).length +
-    Array.from(skillScriptFilesInput?.files || []).length +
-    Array.from(skillAssetFilesInput?.files || []).length
-  );
-}
-
-function activeSkillRecord() {
-  return skillById(state.editingSkillId) || skillById(state.activeSkillId);
-}
-
-function updateSkillUploadSummary() {
-  const existingCount = skillAssetCount(activeSkillRecord());
-  const pendingCount = selectedSkillUploadCount();
-  if (!existingCount && !pendingCount) {
-    skillUploadSummary.textContent = "当前未选择附带文件。";
-    return;
-  }
-  if (existingCount && !pendingCount) {
-    skillUploadSummary.textContent = `当前 skill 已保存 ${existingCount} 个附带文件。`;
-    return;
-  }
-  if (!existingCount && pendingCount) {
-    skillUploadSummary.textContent = `本次将上传 ${pendingCount} 个附带文件。`;
-    return;
-  }
-  skillUploadSummary.textContent = `当前 skill 已保存 ${existingCount} 个附带文件，本次将追加 ${pendingCount} 个文件。`;
-}
-
-async function buildImportItemFromFiles(files, trimSegments, folderName, sourceKind) {
-  const entries = files
-    .map((file) => {
-      const rawPath = normalizeRelativePath(file.webkitRelativePath || file.name);
-      const parts = rawPath.split("/").slice(trimSegments);
-      return { file, relativePath: normalizeRelativePath(parts.join("/")) };
-    })
-    .filter((item) => item.relativePath && item.relativePath !== ".");
-  const skillEntry = entries.find((item) => item.relativePath === "SKILL.md");
-  if (!skillEntry) {
-    throw new Error(`文件夹 ${folderName} 缺少 SKILL.md`);
-  }
-  const assets = [];
-  for (const entry of entries) {
-    if (entry.relativePath === "SKILL.md") {
-      continue;
-    }
-    assets.push(await fileToAssetPayload(entry.file, entry.relativePath));
-  }
-  return {
-    folder_name: folderName,
-    source_kind: sourceKind,
-    status: "draft",
-    skill_markdown: await skillEntry.file.text(),
-    assets,
-  };
-}
-
-async function buildImportItemsFromSingleFolder(files) {
-  if (!files.length) {
-    throw new Error("请选择一个 skill 文件夹。");
-  }
-  const rootName = normalizeRelativePath(files[0].webkitRelativePath || files[0].name).split("/")[0] || "skill";
-  return [await buildImportItemFromFiles(files, 1, rootName, "single-folder-import")];
-}
-
-async function buildImportItemsFromParentFolder(files) {
-  if (!files.length) {
-    throw new Error("请选择一个父文件夹。");
-  }
-  const grouped = new Map();
-  for (const file of files) {
-    const parts = normalizeRelativePath(file.webkitRelativePath || file.name).split("/");
-    if (parts.length < 2) {
-      continue;
-    }
-    const childFolder = parts[1];
-    if (!grouped.has(childFolder)) {
-      grouped.set(childFolder, []);
-    }
-    grouped.get(childFolder).push(file);
-  }
-  const items = [];
-  for (const [folderName, childFiles] of grouped.entries()) {
-    const hasSkillFile = childFiles.some((file) => {
-      const parts = normalizeRelativePath(file.webkitRelativePath || file.name).split("/").slice(2);
-      return normalizeRelativePath(parts.join("/")) === "SKILL.md";
-    });
-    if (!hasSkillFile) {
-      continue;
-    }
-    items.push(await buildImportItemFromFiles(childFiles, 2, folderName, "batch-folder-import"));
-  }
-  if (!items.length) {
-    throw new Error("所选父文件夹下没有找到包含 SKILL.md 的 skill 子目录。");
-  }
-  return items;
-}
-
-async function submitSkillImports(items, summaryText) {
-  const result = await api("/api/skills/import", { method: "POST", body: JSON.stringify({ items }) });
-  await bootstrap();
-  if (result.items?.length) {
-    await loadSkillDetail(result.items[0].id);
-  }
-  const message = {
-    message: summaryText,
-    imported: (result.items || []).map((item) => ({ id: item.id, name: item.name })),
-    errors: result.errors || [],
-  };
-  if (skillImportSummary) {
-    skillImportSummary.textContent = `${summaryText} Imported ${(result.items || []).length} skill(s).`;
-  }
-  showJson(skillResult, message);
-  switchPage("knowledge");
-  switchKnowledgeModule("skills");
-}
-
-function uniqueById(items) {
-  const seen = new Set();
-  return items.filter((item) => {
-    const id = item?.id || item?.skill_id || item?.document_id;
-    if (!id || seen.has(id)) {
-      return false;
-    }
-    seen.add(id);
-    return true;
-  });
-}
-
-function providerById(providerId) {
-  return uniqueById([...state.providers, ...state.providerPage.items]).find((item) => item.id === providerId) || null;
-}
-
-function providerPresetByType(providerType) {
-  return state.presets.find((item) => item.provider_type === providerType) || null;
-}
-
-function agentById(agentId) {
-  return uniqueById([...state.agents, ...state.agentPage.items]).find((item) => item.id === agentId) || null;
-}
-
-function skillById(skillId) {
-  return uniqueById(state.skills).find((item) => item.id === skillId) || null;
-}
-
-function replaceById(items, nextItem) {
-  return uniqueById([nextItem, ...items.filter((item) => (item.id || item.skill_id || item.document_id) !== nextItem.id)]);
+  return "暂无模型";
 }
 
 async function api(path, options = {}) {
@@ -382,1603 +234,2307 @@ async function api(path, options = {}) {
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
     ...options,
   });
+  const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const payload = await response.json().catch(() => ({}));
     throw new Error(payload.detail || response.statusText);
   }
-  return response.json();
+  return payload;
 }
 
-function escapeHtml(value) {
-  return String(value ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
-}
-
-function buildQueryString(params) {
-  const search = new URLSearchParams();
-  for (const [key, value] of Object.entries(params || {})) {
-    if (value === null || value === undefined) {
-      continue;
-    }
-    const normalized = String(value).trim();
-    if (!normalized) {
-      continue;
-    }
-    search.set(key, normalized);
+function showResult(target, value) {
+  if (!target) {
+    return;
   }
-  return search.toString();
+  target.classList.remove("hidden");
+  target.textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+}
+
+function hideResult(target) {
+  if (!target) {
+    return;
+  }
+  target.classList.add("hidden");
+  target.textContent = "";
 }
 
 function switchPage(pageName) {
   state.activePage = pageName;
-  for (const button of pageButtons) {
+  state.activeNavSection = PAGE_SECTIONS[pageName] || "overview";
+  topNavButtons.forEach((button) => {
+    button.classList.toggle("active", button.dataset.navSection === state.activeNavSection);
+  });
+  subMenuPanels.forEach((panel) => {
+    panel.classList.toggle("active", panel.dataset.navPanel === state.activeNavSection);
+  });
+  navButtons.forEach((button) => {
     button.classList.toggle("active", button.dataset.pageTarget === pageName);
-  }
-  for (const view of pageViews) {
+  });
+  pageViews.forEach((view) => {
     view.classList.toggle("active", view.dataset.page === pageName);
-  }
-}
-
-function switchAgentModule(moduleName) {
-  state.activeAgentModule = moduleName;
-  for (const button of agentModuleButtons) {
-    button.classList.toggle("active", button.dataset.agentModuleTarget === moduleName);
-  }
-  for (const view of agentModuleViews) {
-    view.classList.toggle("active", view.dataset.agentModule === moduleName);
-  }
-}
-
-function switchKnowledgeModule(moduleName) {
-  state.activeKnowledgeModule = moduleName;
-  for (const button of knowledgeModuleButtons) {
-    button.classList.toggle("active", button.dataset.knowledgeModuleTarget === moduleName);
-  }
-  for (const view of knowledgeModuleViews) {
-    view.classList.toggle("active", view.dataset.knowledgeModule === moduleName);
-  }
-}
-
-function pageStats(meta) {
-  const count = Number(meta.count || 0);
-  const limit = Math.max(1, Number(meta.limit || 10));
-  const offset = Math.max(0, Number(meta.offset || 0));
-  const itemCount = Array.isArray(meta.items) ? meta.items.length : 0;
-  const start = count ? offset + 1 : 0;
-  const end = count ? Math.min(offset + itemCount, count) : 0;
-  const page = count ? Math.floor(offset / limit) + 1 : 1;
-  const totalPages = Math.max(1, Math.ceil(count / limit));
-  return { count, limit, offset, itemCount, start, end, page, totalPages };
-}
-
-function renderPagination(target, meta, kind) {
-  const stats = pageStats(meta);
-  const prevOffset = Math.max(0, stats.offset - stats.limit);
-  const nextOffset = stats.offset + stats.limit;
-  target.innerHTML = `
-    <div class="page-metric">${stats.count ? `Showing ${stats.start}-${stats.end} of ${stats.count}` : "No records"}</div>
-    <div class="pagination-actions">
-      <button type="button" class="ghost page-button" data-page-kind="${kind}" data-page-offset="${prevOffset}" ${stats.offset <= 0 ? "disabled" : ""}>
-        Previous
-      </button>
-      <span class="page-metric">Page ${stats.page} / ${stats.totalPages}</span>
-      <button type="button" class="ghost page-button" data-page-kind="${kind}" data-page-offset="${nextOffset}" ${stats.page >= stats.totalPages ? "disabled" : ""}>
-        Next
-      </button>
-    </div>
-  `;
-}
-
-function renderCompactCards(items, emptyText) {
-  if (!items.length) {
-    return `<div class="empty-note">${emptyText}</div>`;
-  }
-  return items
-    .map(
-      (item) => `
-        <article class="compact-card" ${item.dataset || ""}>
-          <h4>${escapeHtml(item.title)}</h4>
-          <div class="muted">${escapeHtml(item.subtitle || "")}</div>
-          <p>${escapeHtml((item.body || "").slice(0, 100))}${(item.body || "").length > 100 ? "..." : ""}</p>
-        </article>
-      `
-    )
-    .join("");
-}
-
-function renderStats() {
-  document.querySelector("#provider-count").textContent = String(state.providerPage.count || state.providers.length);
-  document.querySelector("#agent-count").textContent = String(state.agentPage.count || state.agents.length);
-  document.querySelector("#session-count").textContent = String(state.sessions.length);
-  document.querySelector("#knowledge-count").textContent = String(state.knowledgeDocuments.length + state.skills.length);
-}
-
-function renderHome() {
-  homeSessionList.innerHTML = renderCompactCards(
-    state.sessions.slice(0, 5).map((item) => ({
-      id: item.id,
-      title: item.title || "未命名任务",
-      subtitle: `${item.status} / ${item.participant_count || 0} agents`,
-      body: item.user_prompt || "",
-      dataset: `data-session-id="${item.id}" data-page-link="tasks"`,
-    })),
-    "暂无任务。"
-  );
-
-  homeAgentList.innerHTML = renderCompactCards(
-    state.agentPage.items.slice(0, 5).map((item) => ({
-      id: item.id,
-      title: item.name,
-      subtitle: `${item.role} / ${item.resolved_model}`,
-      body: item.system_prompt || "",
-      dataset: `data-agent-edit="${item.id}" data-page-link="agents"`,
-    })),
-    "暂无 Agent。"
-  );
-
-  homeKnowledgeList.innerHTML = renderCompactCards(
-    [
-      ...state.skills.slice(0, 3).map((item) => ({
-        id: item.id,
-        title: item.name,
-        subtitle: `技能 / ${item.status || "启用"}`,
-        body: item.description || "",
-        dataset: `data-skill-id="${item.id}" data-page-link="knowledge" data-knowledge-module-link="skills"`,
-      })),
-      ...state.knowledgeDocuments.slice(0, 2).map((item) => ({
-        id: item.id,
-        title: item.title,
-        subtitle: `RAG / ${(item.chunks || []).length} 个切块`,
-        body: item.metadata?.source_name || item.metadata?.namespace_key || "RAG 文档",
-        dataset: `data-knowledge-id="${item.id}" data-page-link="knowledge" data-knowledge-module-link="rag"`,
-      })),
-    ],
-    "暂无技能或 RAG 资产。"
-  );
-}
-
-function refreshProviderPresetOptions() {
-  providerTypeSelect.innerHTML = state.presets.map((item) => `<option value="${item.provider_type}">${item.label}</option>`).join("");
-}
-
-function renderProviderFilterOptions() {
-  providerFilterTypeSelect.innerHTML = [
-    `<option value="">All Types</option>`,
-    ...state.presets.map((item) => `<option value="${item.provider_type}">${item.label}</option>`),
-  ].join("");
-  providerFilterForm.elements.name.value = state.providerFilters.name || "";
-  providerFilterForm.elements.provider_type.value = state.providerFilters.provider_type || "";
-  providerFilterForm.elements.model.value = state.providerFilters.model || "";
-}
-
-function renderAgentFilterOptions() {
-  agentFilterProviderSelect.innerHTML = [
-    `<option value="">All Providers</option>`,
-    ...state.providers.map((item) => `<option value="${item.id}">${escapeHtml(item.name)}</option>`),
-  ].join("");
-  agentFilterForm.elements.name.value = state.agentFilters.name || "";
-  agentFilterForm.elements.role.value = state.agentFilters.role || "";
-  agentFilterForm.elements.provider_id.value = state.agentFilters.provider_id || "";
-  agentFilterForm.elements.model.value = state.agentFilters.model || "";
-}
-
-function providerHasAdvancedValues() {
-  return Boolean(
-    providerForm.elements.api_version.value.trim() ||
-      providerForm.elements.organization.value.trim() ||
-      providerForm.elements.extra_headers.value.trim() ||
-      providerForm.elements.extra_config.value.trim()
-  );
-}
-
-function syncProviderPresetMeta({ autoOpen = false } = {}) {
-  const preset = providerPresetByType(providerTypeSelect.value);
-  const showApiVersion = Boolean(providerForm.elements.api_version.value.trim()) || Boolean(preset?.supports_api_version);
-  const showOrganization = Boolean(providerForm.elements.organization.value.trim()) || Boolean(preset?.supports_organization);
-
-  providerApiVersionField.classList.toggle("hidden", !showApiVersion);
-  providerOrganizationField.classList.toggle("hidden", !showOrganization);
-  providerPresetHint.textContent =
-    preset?.quickstart_hint || "Most providers only need a model and API key. Keep advanced options for special cases.";
-
-  if (providerForm.elements.base_url.placeholder !== (preset?.default_base_url || "")) {
-    providerForm.elements.base_url.placeholder = preset?.default_base_url || "";
-  }
-  if (!providerForm.elements.api_version.value.trim() && preset?.default_api_version) {
-    providerForm.elements.api_version.value = preset.default_api_version;
-  }
-  if (autoOpen) {
-    providerAdvanced.open = Boolean(preset?.show_advanced_by_default) || providerHasAdvancedValues();
-  }
-}
-
-function applyPreset(providerType) {
-  const preset = providerPresetByType(providerType);
-  if (!preset) {
-    return;
-  }
-  if (!providerForm.elements.base_url.value && preset.use_default_base_url_when_blank) {
-    providerForm.elements.base_url.value = preset.default_base_url || "";
-  }
-  if (!providerForm.elements.model.value) {
-    providerForm.elements.model.value = preset.default_model || "";
-  }
-  syncProviderPresetMeta({ autoOpen: true });
-}
-
-function buildProviderPayload() {
-  return {
-    name: providerForm.elements.name.value.trim(),
-    provider_type: providerForm.elements.provider_type.value,
-    base_url: providerForm.elements.base_url.value.trim() || null,
-    api_key: providerForm.elements.api_key.value.trim() || null,
-    model: providerForm.elements.model.value.trim(),
-    api_version: providerForm.elements.api_version.value.trim() || null,
-    organization: providerForm.elements.organization.value.trim() || null,
-    extra_headers: safeJson(providerForm.elements.extra_headers.value),
-    extra_config: safeJson(providerForm.elements.extra_config.value),
-    clear_api_key: providerForm.elements.clear_api_key.checked,
-  };
-}
-
-function providerFilterPayload() {
-  return {
-    name: providerFilterForm.elements.name.value.trim(),
-    provider_type: providerFilterForm.elements.provider_type.value,
-    model: providerFilterForm.elements.model.value.trim(),
-  };
-}
-
-function agentFilterPayload() {
-  return {
-    name: agentFilterForm.elements.name.value.trim(),
-    role: agentFilterForm.elements.role.value.trim(),
-    provider_id: agentFilterForm.elements.provider_id.value,
-    model: agentFilterForm.elements.model.value.trim(),
-  };
-}
-
-function providerPageQuery({ offset = state.providerPage.offset, limit = state.providerPage.limit } = {}) {
-  return buildQueryString({ limit, offset, ...state.providerFilters });
-}
-
-function agentPageQuery({ offset = state.agentPage.offset, limit = state.agentPage.limit } = {}) {
-  return buildQueryString({ limit, offset, ...state.agentFilters });
-}
-
-function syncProviderFormMode() {
-  const editing = Boolean(state.editingProviderId);
-  providerFormMode.textContent = editing ? `Editing Provider: ${providerById(state.editingProviderId)?.name || state.editingProviderId}` : "";
-  providerFormMode.classList.toggle("hidden", !editing);
-  providerCancelBtn.classList.toggle("hidden", !editing);
-  providerApiKeyHint.classList.toggle("hidden", !editing);
-  providerSubmitButton.textContent = editing ? "Update Provider" : "Create Provider";
-}
-
-function resetProviderForm({ keepMessage = false } = {}) {
-  state.editingProviderId = null;
-  providerForm.reset();
-  if (state.presets.length) {
-    providerTypeSelect.value = state.presets[0].provider_type;
-  }
-  providerForm.elements.base_url.value = "";
-  providerForm.elements.model.value = "";
-  providerForm.elements.api_version.value = "";
-  providerForm.elements.organization.value = "";
-  providerForm.elements.extra_headers.value = "";
-  providerForm.elements.extra_config.value = "";
-  providerForm.elements.clear_api_key.checked = false;
-  providerAdvanced.open = false;
-  applyPreset(providerTypeSelect.value);
-  syncProviderFormMode();
-  hide(providerTestResult);
-  if (!keepMessage) {
-    hide(providerFormResult);
-  }
-}
-
-function populateProviderForm(providerId) {
-  const provider = providerById(providerId);
-  if (!provider) {
-    return;
-  }
-  state.editingProviderId = provider.id;
-  providerForm.elements.name.value = provider.name || "";
-  providerForm.elements.provider_type.value = provider.provider_type || "";
-  providerForm.elements.base_url.value = provider.base_url || "";
-  providerForm.elements.api_key.value = "";
-  providerForm.elements.api_version.value = provider.api_version || "";
-  providerForm.elements.organization.value = provider.organization || "";
-  providerForm.elements.model.value = provider.model || "";
-  providerForm.elements.extra_headers.value = formatJson(provider.extra_headers);
-  providerForm.elements.extra_config.value = formatJson(provider.extra_config);
-  providerForm.elements.clear_api_key.checked = false;
-  hide(providerTestResult);
-  hide(providerFormResult);
-  syncProviderPresetMeta({ autoOpen: true });
-  syncProviderFormMode();
-  switchPage("agents");
-  switchAgentModule("providers");
-}
-
-function syncAgentFormMode() {
-  const editing = Boolean(state.editingAgentId);
-  agentFormMode.textContent = editing ? `Editing Agent: ${agentById(state.editingAgentId)?.name || state.editingAgentId}` : "";
-  agentFormMode.classList.toggle("hidden", !editing);
-  agentCancelBtn.classList.toggle("hidden", !editing);
-  agentSubmitButton.textContent = editing ? "Update Agent" : "Create Agent";
-}
-
-function resetAgentForm({ keepMessage = false } = {}) {
-  state.editingAgentId = null;
-  agentForm.reset();
-  if (state.providers.length) {
-    agentProviderSelect.value = state.providers[0].id;
-  }
-  agentForm.elements.temperature.value = "0.2";
-  syncAgentFormMode();
-  if (!keepMessage) {
-    hide(agentFormResult);
-  }
-}
-
-function populateAgentForm(agentId) {
-  const agent = agentById(agentId);
-  if (!agent) {
-    return;
-  }
-  state.editingAgentId = agent.id;
-  agentForm.elements.name.value = agent.name || "";
-  agentForm.elements.role.value = agent.role || "";
-  agentForm.elements.system_prompt.value = agent.system_prompt || "";
-  agentForm.elements.provider_id.value = agent.provider_id || "";
-  agentForm.elements.model_override.value = agent.model_override || "";
-  agentForm.elements.temperature.value = String(agent.temperature ?? 0.2);
-  agentForm.elements.max_tokens.value = agent.max_tokens ?? "";
-  hide(agentFormResult);
-  syncAgentFormMode();
-  switchPage("agents");
-  switchAgentModule("agents");
-}
-
-async function buildSkillPayload() {
-  const assets = await buildSkillAttachmentPayload();
-  return {
-    name: skillForm.elements.name.value.trim(),
-    description: skillForm.elements.description.value.trim(),
-    skill_markdown: skillForm.elements.skill_markdown.value.trim(),
-    workflow: parseStructuredText(skillForm.elements.workflow.value),
-    tools: parseCommaList(skillForm.elements.tools.value),
-    topics: parseCommaList(skillForm.elements.topics.value),
-    metadata: safeJson(skillForm.elements.metadata.value),
-    status: skillForm.elements.status.value,
-    assets,
-    source_kind: state.editingSkillId ? "manual-edit" : "manual-create",
-  };
-}
-
-function syncSkillFormMode() {
-  const editing = Boolean(state.editingSkillId);
-  skillFormMode.textContent = editing ? `正在编辑技能：${skillById(state.editingSkillId)?.name || state.editingSkillId}` : "";
-  skillFormMode.classList.toggle("hidden", !editing);
-  skillCancelBtn.classList.toggle("hidden", !editing);
-  skillSubmitButton.textContent = editing ? "更新技能" : "保存技能";
-}
-
-function resetSkillForm({ keepMessage = false } = {}) {
-  state.editingSkillId = null;
-  skillForm.reset();
-  skillForm.elements.status.value = "draft";
-  syncSkillFormMode();
-  updateSkillUploadSummary();
-  if (!keepMessage) {
-    hide(skillResult);
-  }
-}
-
-async function populateSkillForm(skillId) {
-  const payload = await api(`/api/skills/${skillId}`);
-  state.editingSkillId = payload.id;
-  state.skills = replaceById(state.skills, payload);
-  const latestVersion = latestSkillVersion(payload);
-  const tools = Array.from(new Set((payload.bindings || []).map((item) => item.tool_name).filter(Boolean)));
-  const topics = Array.isArray(payload.metadata?.topics) ? payload.metadata.topics : [];
-
-  skillForm.elements.name.value = payload.name || "";
-  skillForm.elements.description.value = payload.description || "";
-  skillForm.elements.status.value = payload.status || "draft";
-  skillForm.elements.skill_markdown.value = payload.skill_markdown || latestVersion?.prompt_template || "";
-  skillForm.elements.workflow.value = formatStructuredValue(latestVersion?.workflow);
-  skillForm.elements.tools.value = tools.join(", ");
-  skillForm.elements.topics.value = topics.join(", ");
-  skillForm.elements.metadata.value = formatJson(payload.metadata);
-  hide(skillResult);
-  syncSkillFormMode();
-  updateSkillUploadSummary();
-  switchPage("knowledge");
-  switchKnowledgeModule("skills");
-  renderHome();
-}
-
-function buildKnowledgePayload() {
-  return {
-    title: knowledgeForm.elements.title.value.trim(),
-    source_name: knowledgeForm.elements.source_name.value.trim() || null,
-    text: knowledgeForm.elements.text.value.trim(),
-  };
-}
-
-function syncKnowledgeFormMode() {
-  const editing = Boolean(state.editingKnowledgeId);
-  knowledgeFormMode.textContent = editing ? `正在编辑文档：${state.editingKnowledgeId}` : "";
-  knowledgeFormMode.classList.toggle("hidden", !editing);
-  knowledgeCancelBtn.classList.toggle("hidden", !editing);
-  knowledgeSubmitButton.textContent = editing ? "更新文档" : "保存文档";
-}
-
-function documentText(document) {
-  return (document.chunks || []).map((item) => item.content || "").join("\n\n");
-}
-
-function resetKnowledgeForm({ keepMessage = false } = {}) {
-  state.editingKnowledgeId = null;
-  knowledgeForm.reset();
-  syncKnowledgeFormMode();
-  if (!keepMessage) {
-    hide(knowledgeResult);
-  }
-}
-
-async function populateKnowledgeForm(documentId) {
-  const payload = await api(`/api/rag/documents/${documentId}`);
-  state.editingKnowledgeId = payload.id;
-  state.knowledgeDocuments = replaceById(state.knowledgeDocuments, payload);
-  knowledgeForm.elements.title.value = payload.title || "";
-  knowledgeForm.elements.source_name.value = payload.metadata?.source_name || "";
-  knowledgeForm.elements.text.value = documentText(payload);
-  hide(knowledgeResult);
-  syncKnowledgeFormMode();
-  switchPage("knowledge");
-  switchKnowledgeModule("rag");
-  renderHome();
-}
-
-function renderProviders() {
-  renderProviderFilterOptions();
-  providerList.innerHTML = state.providerPage.items.length
-    ? state.providerPage.items
-        .map(
-          (item) => `
-            <article class="card">
-              <div class="message-head">
-                <div>
-                  <h3>${escapeHtml(item.name)}</h3>
-                  <div class="card-meta">
-                    <span>${escapeHtml(item.provider_type)}</span>
-                    <span>${escapeHtml(item.api_key_masked || "no key")}</span>
-                    <span>${item.agent_count || 0} agents</span>
-                  </div>
-                </div>
-                <div class="actions">
-                  <button type="button" class="ghost" data-provider-edit="${item.id}">Edit</button>
-                  <button type="button" class="ghost danger" data-provider-delete="${item.id}">Delete</button>
-                </div>
-              </div>
-              <div class="chip-row">
-                <span class="chip">${escapeHtml(item.model)}</span>
-                <span class="chip" title="${escapeHtml(item.base_url || "default preset url")}">${item.base_url ? "custom endpoint" : "preset endpoint"}</span>
-              </div>
-            </article>
-          `
-        )
-        .join("")
-    : `<div class="empty-note">No providers yet.</div>`;
-
-  const providerStats = pageStats(state.providerPage);
-  providerListSummary.textContent = providerStats.count
-    ? `Showing ${providerStats.start}-${providerStats.end} of ${providerStats.count} providers`
-    : "No providers";
-  providerPageSizeSelect.value = String(state.providerPage.limit);
-  renderPagination(providerPagination, state.providerPage, "providers");
-
-  const providerOptions = state.providers
-    .map((item) => `<option value="${item.id}">${escapeHtml(item.name)} / ${escapeHtml(item.model)}</option>`)
-    .join("");
-  agentProviderSelect.innerHTML = providerOptions;
-  if (state.editingAgentId) {
-    const editingAgent = agentById(state.editingAgentId);
-    if (editingAgent) {
-      agentProviderSelect.value = editingAgent.provider_id;
-    }
-  } else if (state.providers.length) {
-    agentProviderSelect.value = state.providers[0].id;
-  }
-}
-
-function renderAgents() {
-  renderAgentFilterOptions();
-  agentList.innerHTML = state.agentPage.items.length
-    ? state.agentPage.items
-        .map(
-          (item) => `
-            <article class="card">
-              <div class="message-head">
-                <div>
-                  <h3>${escapeHtml(item.name)}</h3>
-                  <div class="card-meta">
-                    <span>${escapeHtml(item.role)}</span>
-                    <span>${escapeHtml(item.provider_name)}</span>
-                  </div>
-                </div>
-                <div class="actions">
-                  <button type="button" class="ghost" data-agent-edit="${item.id}">Edit</button>
-                  <button type="button" class="ghost danger" data-agent-delete="${item.id}">Delete</button>
-                </div>
-              </div>
-              <p>${escapeHtml((item.system_prompt || "").slice(0, 88))}${(item.system_prompt || "").length > 88 ? "..." : ""}</p>
-              <div class="chip-row">
-                <span class="chip">${escapeHtml(item.resolved_model)}</span>
-                <span class="chip">temp ${item.temperature}</span>
-                <span class="chip">${item.participant_count || 0} sessions</span>
-                <span class="chip">${item.message_count || 0} messages</span>
-              </div>
-              <div class="card-actions-row">
-                <a href="#" class="inline-link" data-memory-agent="${item.id}" data-page-link="tasks">View Memory</a>
-              </div>
-            </article>
-          `
-        )
-        .join("")
-    : `<div class="empty-note">No agents yet.</div>`;
-
-  const agentStats = pageStats(state.agentPage);
-  agentListSummary.textContent = agentStats.count ? `Showing ${agentStats.start}-${agentStats.end} of ${agentStats.count} agents` : "No agents";
-  agentPageSizeSelect.value = String(state.agentPage.limit);
-  renderPagination(agentPagination, state.agentPage, "agents");
-
-  if (state.editingAgentId) {
-    const editingAgent = agentById(state.editingAgentId);
-    if (editingAgent) {
-      agentForm.elements.provider_id.value = editingAgent.provider_id;
-    }
-  }
-
-  if (!state.taskAgentsLoaded) {
-    leadAgentSelect.innerHTML = "";
-    agentCheckboxes.innerHTML = `<div class="empty-note">Open Task Management to load the full agent list.</div>`;
-    return;
-  }
-
-  const agentOptions = state.agents.map((item) => `<option value="${item.id}">${escapeHtml(item.name)}</option>`).join("");
-  leadAgentSelect.innerHTML = agentOptions;
-  agentCheckboxes.innerHTML = state.agents.length
-    ? state.agents
-        .map(
-          (item, index) => `
-            <label class="checkbox-item">
-              <input type="checkbox" name="agent_ids" value="${item.id}" ${index === 0 ? "checked" : ""} />
-              <span>
-                <strong>${escapeHtml(item.name)}</strong><br />
-                <span class="muted">${escapeHtml(item.role)} / ${escapeHtml(item.resolved_model)}</span>
-              </span>
-            </label>
-          `
-        )
-        .join("")
-    : `<div class="empty-note">No available agents.</div>`;
-}
-
-function renderSessions() {
-  sessionList.innerHTML = state.sessions.length
-    ? state.sessions
-        .map(
-          (item) => `
-            <article class="session-card" data-session-id="${item.id}">
-              <strong>${escapeHtml(item.title || "Untitled Session")}</strong>
-              <div class="muted">${escapeHtml(item.status)} / ${item.participant_count || 0} agents / ${item.message_count || 0} messages</div>
-              <p>${escapeHtml((item.user_prompt || "").slice(0, 86))}${(item.user_prompt || "").length > 86 ? "..." : ""}</p>
-            </article>
-          `
-        )
-        .join("")
-    : `<div class="empty-note">暂无任务记录。</div>`;
-}
-
-function renderSkillList(items = state.skills, { searchMode = false } = {}) {
-  if (!items.length) {
-    skillList.innerHTML = `<div class="empty-note">${searchMode ? "没有匹配的技能。" : "暂无技能。"}</div>`;
-    return;
-  }
-  skillList.innerHTML = items
-    .map((item) => {
-      const skillId = item.id || item.skill_id;
-      const version = item.latest_version?.version || item.version || "v1";
-      const body = item.description || item.text || "";
-      const score = item.score ? `<span class="chip">score ${Number(item.score).toFixed(3)}</span>` : "";
-      const assetChip = skillAssetCount(item) ? `<span class="chip">${skillAssetCount(item)} files</span>` : "";
-      const sourceChip = item.source_kind ? `<span class="chip">${escapeHtml(item.source_kind)}</span>` : "";
-      return `
-        <article class="card" data-skill-id="${skillId}">
-          <div class="message-head">
-            <div>
-              <h3>${escapeHtml(item.name || skillId)}</h3>
-              <div class="card-meta">
-                <span>${escapeHtml(item.status || "active")}</span>
-                <span>${escapeHtml(version)}</span>
-              </div>
-            </div>
-            <div class="actions">
-              <button type="button" class="ghost" data-skill-edit="${skillId}">Edit</button>
-              <button type="button" class="ghost danger" data-skill-delete="${skillId}">删除</button>
-            </div>
-          </div>
-          <p>${escapeHtml(body.slice(0, 140))}${body.length > 140 ? "..." : ""}</p>
-          <div class="chip-row">${score}${assetChip}${sourceChip}</div>
-        </article>
-      `;
-    })
-    .join("");
-}
-
-function renderSkillDetail(payload) {
-  const versions = Array.isArray(payload.versions) ? payload.versions : [];
-  const latestVersion = latestSkillVersion(payload);
-  const tools = Array.from(new Set((payload.bindings || []).map((item) => item.tool_name).filter(Boolean)));
-  const topics = Array.isArray(payload.metadata?.topics) ? payload.metadata.topics : [];
-  const assets = Array.isArray(payload.assets) ? payload.assets : [];
-  const skillMarkdown = payload.skill_markdown || latestVersion?.prompt_template || "";
-  const versionList = versions.length
-    ? versions
-        .map(
-          (item) => `
-            <article class="memory-card">
-              <div class="message-head">
-                <strong>${escapeHtml(item.version || "version")}</strong>
-                <span class="muted">${escapeHtml(item.created_at || "")}</span>
-              </div>
-              <div class="card-meta">
-                <span>${escapeHtml(String(item.asset_summary?.total || item.assets?.length || 0))} files</span>
-              </div>
-            </article>
-          `
-        )
-        .join("")
-    : `<div class="empty-note">暂无版本记录。</div>`;
-
-  const assetList = assets.length
-    ? `
-      <div class="asset-list">
-        ${assets
-          .map(
-            (item) => `
-              <article class="asset-card">
-                <div class="message-head">
-                  <strong>${escapeHtml(item.relative_path || item.file_name || item.object_id || "file")}</strong>
-                  <span class="muted">${escapeHtml(item.mime_type || "")}</span>
-                </div>
-                <div class="card-meta">
-                  <span>${escapeHtml(item.category || "other")}</span>
-                  <span>${escapeHtml(String(item.size_bytes || 0))} bytes</span>
-                  <span>${item.is_text ? "text" : "binary"}</span>
-                </div>
-              </article>
-            `
-          )
-          .join("")}
-      </div>
-    `
-    : `<div class="empty-note">暂无附带文档。</div>`;
-
-  skillDetail.classList.remove("empty");
-  skillDetail.innerHTML = `
-    <div class="message-head">
-      <div>
-        <strong>${escapeHtml(payload.name || payload.id)}</strong>
-        <div class="muted">${escapeHtml(payload.id)}</div>
-      </div>
-      <div class="chip-row">
-        <span class="chip">${escapeHtml(payload.status || "active")}</span>
-        <span class="chip">${versions.length} versions</span>
-        <span class="chip">${skillAssetCount(payload)} files</span>
-        ${payload.folder_name ? `<span class="chip">${escapeHtml(payload.folder_name)}</span>` : ""}
-      </div>
-    </div>
-    <div class="detail-body">${escapeHtml(payload.description || "")}</div>
-    <div class="chip-row">
-      ${tools.map((tool) => `<span class="chip">${escapeHtml(tool)}</span>`).join("")}
-      ${topics.map((topic) => `<span class="chip">${escapeHtml(topic)}</span>`).join("")}
-    </div>
-    ${
-      skillMarkdown || latestVersion?.workflow
-        ? `
-          <div class="list-grid">
-            ${
-              skillMarkdown
-                ? `
-            <article class="memory-card">
-              <div class="message-head">
-                <strong>SKILL.md</strong>
-              </div>
-              <pre class="detail-code">${escapeHtml(skillMarkdown)}</pre>
-            </article>
-            `
-                : ""
-            }
-            ${
-              latestVersion?.workflow
-                ? `
-            <article class="memory-card">
-              <div class="message-head">
-                <strong>Workflow</strong>
-              </div>
-              <div class="detail-body">${escapeHtml(formatStructuredValue(latestVersion.workflow) || "")}</div>
-            </article>
-            `
-                : ""
-            }
-          </div>
-        `
-        : ""
-    }
-    <article class="memory-card">
-      <div class="message-head">
-        <strong>附带文档</strong>
-        <span class="muted">${skillAssetCount(payload)} files</span>
-      </div>
-      ${assetList}
-    </article>
-    <div class="list-grid">${versionList}</div>
-  `;
-  updateSkillUploadSummary();
-}
-
-function renderKnowledgeList(items = state.knowledgeDocuments, { searchMode = false } = {}) {
-  if (!items.length) {
-    knowledgeList.innerHTML = `<div class="empty-note">${searchMode ? "没有匹配的 RAG 结果。" : "暂无 RAG 文档。"}</div>`;
-    return;
-  }
-  knowledgeList.innerHTML = items
-    .map((item) => {
-      const documentId = item.document_id || item.id;
-      const title = item.title || item.document_title || item.id;
-      const body = item.text || item.summary || (item.metadata ? JSON.stringify(item.metadata) : "");
-      const isSearchResult = Boolean(item.document_id);
-      return `
-        <article class="card" data-knowledge-id="${documentId}">
-          <div class="message-head">
-            <div>
-              <h3>${escapeHtml(title)}</h3>
-              <div class="card-meta">
-                <span>${isSearchResult ? "检索命中" : "RAG 文档"}</span>
-                ${item.score ? `<span>score ${Number(item.score).toFixed(3)}</span>` : ""}
-              </div>
-            </div>
-            <div class="actions">
-              <button type="button" class="ghost" data-knowledge-edit="${documentId}">Edit</button>
-              <button type="button" class="ghost danger" data-knowledge-delete="${documentId}">删除</button>
-            </div>
-          </div>
-          <p>${escapeHtml(body.slice(0, 160))}${body.length > 160 ? "..." : ""}</p>
-          <div class="chip-row">
-            ${item.document_id ? `<span class="chip">${escapeHtml(item.document_id)}</span>` : ""}
-            ${item.metadata?.source_name ? `<span class="chip">${escapeHtml(item.metadata.source_name)}</span>` : ""}
-            ${item.chunks ? `<span class="chip">${item.chunks.length} 个切块</span>` : ""}
-          </div>
-        </article>
-      `;
-    })
-    .join("");
-}
-
-function renderKnowledgeDetail(payload) {
-  const chunkList = (payload.chunks || [])
-    .map(
-      (chunk) => `
-        <article class="memory-card">
-          <div class="message-head">
-            <strong>Chunk ${chunk.chunk_index + 1}</strong>
-            <span class="muted">${chunk.tokens || chunk.content?.length || 0}</span>
-          </div>
-          <div class="detail-body">${escapeHtml(chunk.content || "")}</div>
-        </article>
-      `
-    )
-    .join("");
-
-  knowledgeDetail.classList.remove("empty");
-  knowledgeDetail.innerHTML = `
-    <div class="message-head">
-      <div>
-        <strong>${escapeHtml(payload.title || payload.id)}</strong>
-        <div class="muted">${escapeHtml(payload.id)}</div>
-      </div>
-      <div class="chip-row">
-        <span class="chip">${(payload.chunks || []).length} 个切块</span>
-        <span class="chip">${escapeHtml(payload.status || "active")}</span>
-        ${payload.metadata?.source_name ? `<span class="chip">${escapeHtml(payload.metadata.source_name)}</span>` : ""}
-      </div>
-    </div>
-    <div class="detail-body">${escapeHtml(JSON.stringify(payload.metadata || {}, null, 2))}</div>
-    <div class="list-grid">${chunkList || '<div class="empty-note">暂无可展示切块。</div>'}</div>
-  `;
-}
-
-async function loadSession(sessionId) {
-  const payload = await api(`/api/sessions/${sessionId}`);
-  state.activeSessionId = sessionId;
-
-  sessionMeta.classList.remove("empty");
-  sessionMeta.innerHTML = `
-    <strong>${escapeHtml(payload.session.title || "未命名任务")}</strong>
-    <div class="chip-row">
-      <span class="chip">${escapeHtml(payload.session.status)}</span>
-      <span class="chip">${escapeHtml(payload.session.strategy)}</span>
-      <span class="chip">rounds ${payload.session.rounds}</span>
-      <span class="chip">lead ${escapeHtml(payload.session.lead_agent_name || "n/a")}</span>
-    </div>
-    <p>${escapeHtml(payload.session.final_summary || "暂无最终总结。")}</p>
-  `;
-
-  transcript.innerHTML = payload.messages
-    .map(
-      (message) => `
-        <article class="message-card">
-          <div class="message-head">
-            <div>
-              <div class="message-role">${escapeHtml(message.role)}</div>
-              <strong>${escapeHtml(message.agent_name || "User")}</strong>
-            </div>
-            <div class="muted">Round ${message.round_index}</div>
-          </div>
-          <div class="message-body">${escapeHtml(message.content)}</div>
-          ${
-            message.references?.length
-              ? `<details><summary class="memory-link">查看召回记忆</summary>${message.references
-                  .map(
-                    (ref) => `
-                      <div class="memory-card">
-                        <strong>${escapeHtml(ref.memory_id || "memory")}</strong>
-                        <div class="muted">score ${Number(ref.score || 0).toFixed(3)}</div>
-                        <div class="message-body">${escapeHtml(ref.summary || "")}</div>
-                      </div>
-                    `
-                  )
-                  .join("")}</details>`
-              : ""
-          }
-        </article>
-      `
-    )
-    .join("");
-
-  memoryView.innerHTML = payload.participants
-    .map(
-      (item) => `
-        <div class="memory-card">
-          <strong>${escapeHtml(item.agent_name)}</strong>
-          <div class="muted">${escapeHtml(item.agent_role)}</div>
-          <a href="#" class="memory-link" data-memory-agent="${item.agent_id}" data-page-link="tasks">加载 Agent 记忆</a>
-        </div>
-      `
-    )
-    .join("");
-}
-
-async function loadAgentMemory(agentId, query = "") {
-  const params = new URLSearchParams();
-  params.set("limit", "8");
-  if (query) {
-    params.set("query", query);
-  }
-  const payload = await api(`/api/agents/${agentId}/memory?${params.toString()}`);
-  memoryView.innerHTML = `
-    <div class="memory-card">
-      <strong>${escapeHtml(payload.agent.name)} 的记忆</strong>
-      <div class="muted">${payload.results.length} records</div>
-    </div>
-    ${payload.results
-      .map(
-        (item) => `
-          <article class="memory-card">
-            <div class="message-head">
-              <strong>${escapeHtml(item.memory_type || item.scope || "memory")}</strong>
-              <span class="muted">${item.score ? Number(item.score).toFixed(3) : ""}</span>
-            </div>
-            <div class="message-body">${escapeHtml(item.text || item.summary || "")}</div>
-          </article>
-        `
-      )
-      .join("")}
-  `;
-}
-
-async function loadSkillDetail(skillId) {
-  const payload = await api(`/api/skills/${skillId}`);
-  state.activeSkillId = skillId;
-  state.skills = replaceById(state.skills, payload);
-  renderSkillDetail(payload);
-  renderHome();
-}
-
-async function loadKnowledgeDocument(documentId) {
-  const payload = await api(`/api/rag/documents/${documentId}`);
-  state.activeKnowledgeId = documentId;
-  state.knowledgeDocuments = replaceById(state.knowledgeDocuments, payload);
-  renderKnowledgeDetail(payload);
-  renderHome();
-}
-
-async function loadSkillsIndex() {
-  const payload = await api("/api/skills?limit=50");
-  state.skills = payload.items || [];
-  renderSkillList();
-}
-
-async function loadKnowledgeIndex() {
-  const payload = await api("/api/rag/documents?limit=50");
-  state.knowledgeDocuments = payload.items || [];
-  renderKnowledgeList();
-}
-
-async function loadProviderPage({ offset = state.providerPage.offset, limit = state.providerPage.limit } = {}) {
-  const payload = await api(`/api/providers?${providerPageQuery({ offset, limit })}`);
-  if (payload.count > 0 && offset >= payload.count) {
-    const lastOffset = Math.max(0, Math.floor((payload.count - 1) / limit) * limit);
-    return loadProviderPage({ offset: lastOffset, limit });
-  }
-  state.providerPage = {
-    items: payload.items || [],
-    count: payload.count || 0,
-    limit: payload.limit || limit,
-    offset: payload.offset || 0,
-  };
-  renderProviders();
-  renderStats();
-}
-
-async function loadAgentPage({ offset = state.agentPage.offset, limit = state.agentPage.limit } = {}) {
-  const payload = await api(`/api/agents?${agentPageQuery({ offset, limit })}`);
-  if (payload.count > 0 && offset >= payload.count) {
-    const lastOffset = Math.max(0, Math.floor((payload.count - 1) / limit) * limit);
-    return loadAgentPage({ offset: lastOffset, limit });
-  }
-  state.agentPage = {
-    items: payload.items || [],
-    count: payload.count || 0,
-    limit: payload.limit || limit,
-    offset: payload.offset || 0,
-  };
-  renderAgents();
-  renderStats();
-  renderHome();
-}
-
-async function ensureTaskAgentsLoaded(force = false) {
-  if (state.taskAgentsLoaded && !force) {
-    return;
-  }
-  const payload = await api("/api/agents?all=1");
-  state.agents = payload.items || [];
-  state.taskAgentsLoaded = true;
-  renderAgents();
-}
-
-async function bootstrap() {
-  const taskAgentsPromise = state.taskAgentsLoaded || state.activePage === "tasks" ? api("/api/agents?all=1") : Promise.resolve(null);
-  const providerPageQueryString = providerPageQuery();
-  const agentPageQueryString = agentPageQuery();
-  const [catalog, providers, taskAgents, providerPage, agentPage, sessions, skills, rag] = await Promise.all([
-    api("/api/catalog/providers"),
-    api("/api/providers?all=1"),
-    taskAgentsPromise,
-    api(`/api/providers?${providerPageQueryString}`),
-    api(`/api/agents?${agentPageQueryString}`),
-    api("/api/sessions"),
-    api("/api/skills?limit=50"),
-    api("/api/rag/documents?limit=50"),
-  ]);
-
-  state.presets = catalog.items || [];
-  state.providers = providers.items || [];
-  if (taskAgents) {
-    state.agents = taskAgents.items || [];
-    state.taskAgentsLoaded = true;
-  } else if (!state.taskAgentsLoaded) {
-    state.agents = [];
-  }
-  state.providerPage = {
-    items: providerPage.items || [],
-    count: providerPage.count || 0,
-    limit: providerPage.limit || state.providerPage.limit,
-    offset: providerPage.offset || 0,
-  };
-  state.agentPage = {
-    items: agentPage.items || [],
-    count: agentPage.count || 0,
-    limit: agentPage.limit || state.agentPage.limit,
-    offset: agentPage.offset || 0,
-  };
-  state.sessions = sessions.items || [];
-  state.skills = skills.items || [];
-  state.knowledgeDocuments = rag.items || [];
-
-  refreshProviderPresetOptions();
-  renderProviders();
-  renderAgents();
-  renderSessions();
-  renderSkillList();
-  renderKnowledgeList();
-  renderStats();
-  renderHome();
-  applyPreset(providerTypeSelect.value);
-  switchAgentModule(state.activeAgentModule);
-  switchKnowledgeModule(state.activeKnowledgeModule);
-
-  if (state.editingProviderId && !providerById(state.editingProviderId)) {
-    resetProviderForm();
-  } else {
-    syncProviderFormMode();
-  }
-  if (state.editingAgentId && !agentById(state.editingAgentId)) {
-    resetAgentForm();
-  } else {
-    syncAgentFormMode();
-  }
-  if (state.editingSkillId && !skillById(state.editingSkillId)) {
-    resetSkillForm();
-  } else {
-    syncSkillFormMode();
-    updateSkillUploadSummary();
-  }
-  if (state.editingKnowledgeId && !state.knowledgeDocuments.some((item) => item.id === state.editingKnowledgeId)) {
-    resetKnowledgeForm();
-  } else {
-    syncKnowledgeFormMode();
-  }
-
-  if (state.activeSessionId && state.sessions.some((item) => item.id === state.activeSessionId)) {
-    await loadSession(state.activeSessionId);
-  }
-  if (state.activeSkillId && state.skills.some((item) => item.id === state.activeSkillId)) {
-    await loadSkillDetail(state.activeSkillId);
-  }
-  if (state.activeKnowledgeId && state.knowledgeDocuments.some((item) => item.id === state.activeKnowledgeId)) {
-    await loadKnowledgeDocument(state.activeKnowledgeId);
-  }
-}
-
-providerTypeSelect.addEventListener("change", () => {
-  providerForm.elements.base_url.value = "";
-  providerForm.elements.model.value = "";
-  providerForm.elements.api_version.value = "";
-  providerForm.elements.organization.value = "";
-  applyPreset(providerTypeSelect.value);
-});
-
-providerPageSizeSelect.addEventListener("change", async () => {
-  state.providerPage.limit = Number(providerPageSizeSelect.value || 10);
-  state.providerPage.offset = 0;
-  await loadProviderPage({ offset: 0, limit: state.providerPage.limit });
-});
-
-agentPageSizeSelect.addEventListener("change", async () => {
-  state.agentPage.limit = Number(agentPageSizeSelect.value || 10);
-  state.agentPage.offset = 0;
-  await loadAgentPage({ offset: 0, limit: state.agentPage.limit });
-});
-
-providerFilterForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  state.providerFilters = providerFilterPayload();
-  state.providerPage.offset = 0;
-  await loadProviderPage({ offset: 0, limit: state.providerPage.limit });
-});
-
-providerFilterResetBtn.addEventListener("click", async () => {
-  state.providerFilters = { name: "", provider_type: "", model: "" };
-  providerFilterForm.reset();
-  state.providerPage.offset = 0;
-  await loadProviderPage({ offset: 0, limit: state.providerPage.limit });
-});
-
-agentFilterForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  state.agentFilters = agentFilterPayload();
-  state.agentPage.offset = 0;
-  await loadAgentPage({ offset: 0, limit: state.agentPage.limit });
-});
-
-agentFilterResetBtn.addEventListener("click", async () => {
-  state.agentFilters = { name: "", role: "", provider_id: "", model: "" };
-  agentFilterForm.reset();
-  state.agentPage.offset = 0;
-  await loadAgentPage({ offset: 0, limit: state.agentPage.limit });
-});
-
-providerCancelBtn.addEventListener("click", () => {
-  resetProviderForm();
-});
-
-agentCancelBtn.addEventListener("click", () => {
-  resetAgentForm();
-});
-
-skillCancelBtn.addEventListener("click", () => {
-  resetSkillForm();
-});
-
-knowledgeCancelBtn.addEventListener("click", () => {
-  resetKnowledgeForm();
-});
-
-for (const input of [skillReferenceFilesInput, skillTemplateFilesInput, skillScriptFilesInput, skillAssetFilesInput]) {
-  input?.addEventListener("change", () => {
-    updateSkillUploadSummary();
   });
 }
 
-skillImportSingleBtn?.addEventListener("click", () => {
-  skillImportSingleInput?.click();
-});
-
-skillImportBatchBtn?.addEventListener("click", () => {
-  skillImportBatchInput?.click();
-});
-
-skillImportSingleInput?.addEventListener("change", async () => {
-  hide(skillResult);
-  try {
-    const items = await buildImportItemsFromSingleFolder(Array.from(skillImportSingleInput.files || []));
-    await submitSkillImports(items, "Single skill folder imported.");
-  } catch (error) {
-    showJson(skillResult, { error: error.message });
-  } finally {
-    skillImportSingleInput.value = "";
+function switchNavSection(sectionName) {
+  const targetPage = SECTION_DEFAULT_PAGE[sectionName] || "overview";
+  if (PAGE_SECTIONS[state.activePage] === sectionName) {
+    topNavButtons.forEach((button) => {
+      button.classList.toggle("active", button.dataset.navSection === sectionName);
+    });
+    subMenuPanels.forEach((panel) => {
+      panel.classList.toggle("active", panel.dataset.navPanel === sectionName);
+    });
+    state.activeNavSection = sectionName;
+    return;
   }
+  switchPage(targetPage);
+}
+
+function linesToList(value) {
+  return String(value || "")
+    .split("\n")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function listToLines(items) {
+  return (items || []).join("\n");
+}
+
+function safeParseJson(text, fallback) {
+  const value = String(text || "").trim();
+  if (!value) {
+    return fallback;
+  }
+  return JSON.parse(value);
+}
+
+function prettyJson(value) {
+  return JSON.stringify(value, null, 2);
+}
+
+function commaListToArray(value) {
+  return String(value || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function getMultiSelectValues(select) {
+  return Array.from(select.selectedOptions).map((option) => option.value);
+}
+
+function setMultiSelectValues(select, values) {
+  const active = new Set(values || []);
+  Array.from(select.options).forEach((option) => {
+    option.selected = active.has(option.value);
+  });
+}
+
+function cardMarkup({ title, body, meta = "", actions = "", active = false, attrs = "" }) {
+  return `
+    <article class="card ${active ? "active" : ""}" ${attrs}>
+      <h3>${escapeHtml(title)}</h3>
+      <p>${escapeHtml(body)}</p>
+      <div class="meta">${escapeHtml(meta)}</div>
+      ${actions ? `<div class="card-actions">${actions}</div>` : ""}
+    </article>
+  `;
+}
+
+function chip(label, value) {
+  return `<span class="system-chip"><strong>${escapeHtml(label)}</strong>${escapeHtml(value)}</span>`;
+}
+
+function teamSummary(spec) {
+  return {
+    agents: Array.isArray(spec?.agents) ? spec.agents : [],
+    nodes: Array.isArray(spec?.flow?.nodes) ? spec.flow.nodes : [],
+    edges: Array.isArray(spec?.flow?.edges) ? spec.flow.edges : [],
+    definitionOfDone: Array.isArray(spec?.definition_of_done) ? spec.definition_of_done : [],
+    acceptanceChecks: Array.isArray(spec?.acceptance_checks) ? spec.acceptance_checks : [],
+  };
+}
+
+function blueprintSummary(spec) {
+  return {
+    roleTemplates: Object.keys(spec?.role_templates || {}),
+    agents: Object.keys(spec?.agents || {}),
+    nodes: Array.isArray(spec?.flow?.nodes) ? spec.flow.nodes : [],
+    edges: Array.isArray(spec?.flow?.edges) ? spec.flow.edges : [],
+  };
+}
+
+function clone(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function teamEditorSpec() {
+  return state.teamEditor.spec || buildTeamTemplateSpecFromForm();
+}
+
+function setTeamEditorSpec(spec) {
+  state.teamEditor.spec = clone(spec);
+  syncTeamEditorToForm();
+  renderTeamEditor();
+}
+
+function syncTeamEditorToForm() {
+  const spec = teamEditorSpec();
+  teamTemplateAgents.value = prettyJson(spec.agents || []);
+  teamTemplateFlow.value = prettyJson(spec.flow || { nodes: [], edges: [] });
+  teamTemplateDod.value = listToLines(spec.definition_of_done || []);
+  teamTemplateChecks.value = listToLines(spec.acceptance_checks || []);
+}
+
+function ensureTeamEditorMetadata(spec) {
+  spec.metadata = spec.metadata || {};
+  spec.metadata.communication_policy = spec.metadata.communication_policy || "graph-ancestor-scoped";
+  spec.metadata.ui_layout = spec.metadata.ui_layout || {};
+  spec.metadata.ui_layout.positions = spec.metadata.ui_layout.positions || {};
+  spec.metadata.ui_layout.viewport = spec.metadata.ui_layout.viewport || { x: 0, y: 0, zoom: 1 };
+  return spec;
+}
+
+function defaultNodeConfig(type) {
+  switch (type) {
+    case "agent":
+      return { instruction: "补充节点指令", agent: teamEditorSpec().agents?.[0]?.key || "" };
+    case "condition":
+      return { expr: "review.pass == true" };
+    case "router":
+      return { expr: "" };
+    case "loop":
+      return { max_iterations: 2 };
+    case "approval":
+      return { name: "人工审批" };
+    case "artifact":
+      return { name: "artifact.md", artifact_kind: "report", template: "{{review.summary}}" };
+    default:
+      return {};
+  }
+}
+
+function createNodeId(type) {
+  const base = String(type || "node")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "") || "node";
+  const existing = new Set((teamEditorSpec().flow?.nodes || []).map((item) => item.id));
+  let index = 1;
+  let candidate = `${base}_${index}`;
+  while (existing.has(candidate) || candidate === "start") {
+    index += 1;
+    candidate = `${base}_${index}`;
+  }
+  return candidate;
+}
+
+function graphPositionFor(nodeId, index = 0) {
+  const spec = ensureTeamEditorMetadata(teamEditorSpec());
+  const positions = spec.metadata.ui_layout.positions || {};
+  if (!positions[nodeId]) {
+    positions[nodeId] = {
+      x: 120 + (index % 4) * 220,
+      y: 80 + Math.floor(index / 4) * 140,
+    };
+  }
+  return positions[nodeId];
+}
+
+function autoLayoutTeamSpec(spec) {
+  const nodes = spec.flow?.nodes || [];
+  const edges = spec.flow?.edges || [];
+  const outgoing = new Map();
+  nodes.forEach((node) => outgoing.set(node.id, []));
+  edges.forEach((edge) => {
+    const items = outgoing.get(edge.from) || [];
+    items.push(edge.to);
+    outgoing.set(edge.from, items);
+  });
+  const start = nodes.find((node) => node.type === "start")?.id || nodes[0]?.id;
+  const queue = start ? [[start, 0]] : [];
+  const visited = new Set();
+  const columns = new Map();
+  while (queue.length) {
+    const [nodeId, depth] = queue.shift();
+    if (visited.has(nodeId)) {
+      continue;
+    }
+    visited.add(nodeId);
+    const items = columns.get(depth) || [];
+    items.push(nodeId);
+    columns.set(depth, items);
+    (outgoing.get(nodeId) || []).forEach((target) => queue.push([target, depth + 1]));
+  }
+  nodes.forEach((node) => {
+    if (visited.has(node.id)) {
+      return;
+    }
+    const depth = columns.size;
+    const items = columns.get(depth) || [];
+    items.push(node.id);
+    columns.set(depth, items);
+  });
+  ensureTeamEditorMetadata(spec);
+  columns.forEach((items, depth) => {
+    items.forEach((nodeId, row) => {
+      spec.metadata.ui_layout.positions[nodeId] = {
+        x: 120 + depth * 220,
+        y: 80 + row * 140,
+      };
+    });
+  });
+}
+
+function setDetailPlaceholder(target, text) {
+  target.classList.add("empty");
+  target.textContent = text;
+}
+
+function populateProviderTypeOptions() {
+  const options = state.providerTypes.map((item) => `<option value="${escapeHtml(item.provider_type)}">${escapeHtml(item.label)}</option>`).join("");
+  providerType.innerHTML = options;
+  if (!providerType.value && state.providerTypes.length) {
+    providerType.value = state.providerTypes[0].provider_type;
+  }
+}
+
+function populateProviderOptions() {
+  const options = state.providers.map((item) => `<option value="${item.id}">${escapeHtml(item.name)} / ${escapeHtml(item.provider_type)}</option>`).join("");
+  agentTemplateProvider.innerHTML = options || '<option value="">暂无 Provider</option>';
+}
+
+function populatePluginOptions() {
+  agentTemplatePlugins.innerHTML =
+    state.plugins.map((item) => `<option value="${item.id}">${escapeHtml(item.name)} / ${escapeHtml(item.version)}</option>`).join("") ||
+    '<option value="">暂无插件</option>';
+}
+
+function populateTeamTemplateOptions() {
+  const options = state.teamTemplates
+    .map((item) => `<option value="${item.id}" ${item.id === state.selectedTeamTemplateId ? "selected" : ""}>${escapeHtml(item.name)}</option>`)
+    .join("");
+  buildTeamTemplate.innerHTML = options || '<option value="">暂无团队模板</option>';
+}
+
+function populateTaskOptions() {
+  const buildOptions = state.builds
+    .map((item) => `<option value="${item.id}" ${item.id === state.selectedBuildId ? "selected" : ""}>${escapeHtml(item.name)}</option>`)
+    .join("");
+  taskBuild.innerHTML = `<option value="">不使用 Build</option>${buildOptions}`;
+  taskBuild.value = state.selectedBuildId || "";
+
+  const blueprintOptions = state.blueprints
+    .map((item) => `<option value="${item.id}" ${item.id === state.selectedBlueprintId ? "selected" : ""}>${escapeHtml(item.name)}</option>`)
+    .join("");
+  taskBlueprint.innerHTML = `<option value="">不使用内部蓝图</option>${blueprintOptions}`;
+  taskBlueprint.value = state.selectedBlueprintId || "";
+}
+
+function providerPreset(type = providerType.value) {
+  return state.providerTypes.find((item) => item.provider_type === type) || null;
+}
+
+function openProviderModal() {
+  providerModal.classList.remove("hidden");
+}
+
+function closeProviderModal() {
+  closeProviderModelEditorModal();
+  providerModal.classList.add("hidden");
+}
+
+function openProviderModelEditorModal() {
+  providerModelEditorModal.classList.remove("hidden");
+}
+
+function closeProviderModelEditorModal() {
+  providerModelEditorModal.classList.add("hidden");
+  resetProviderModelEditor();
+}
+
+function resetProviderModelEditor() {
+  state.providerEditor.editingModelIndex = null;
+  providerModelName.value = "";
+  providerModelType.value = "chat";
+  providerModelContextWindow.value = "";
+  providerModelEditorTitle.textContent = "新建模型";
+  hideResult(providerModelTestResult);
+}
+
+function renderProviderModelSummary() {
+  providerModelSummary.textContent = state.providerEditor.models.length
+    ? `\u5df2\u914d\u7f6e ${state.providerEditor.models.length} \u4e2a\u6a21\u578b`
+    : "\u672a\u914d\u7f6e\u6a21\u578b";
+}
+
+function renderProviderModelList() {
+  renderProviderModelSummary();
+  providerModelList.innerHTML = state.providerEditor.models.length
+    ? state.providerEditor.models
+        .map(
+          (item, index) => `
+            <article class="provider-model-item">
+              <div class="provider-model-item-main">
+                <strong>${escapeHtml(item.name)}</strong>
+                <span>${escapeHtml(MODEL_TYPE_LABELS[item.model_type] || item.model_type)} / context=${escapeHtml(item.context_window || "-")}</span>
+              </div>
+              <div class="provider-model-item-actions">
+                <button type="button" class="ghost" data-provider-model-edit="${index}">\u7f16\u8f91</button>
+                <button type="button" class="ghost" data-provider-model-remove="${index}">\u5220\u9664</button>
+              </div>
+            </article>
+          `,
+        )
+        .join("")
+    : '<div class="detail empty compact-detail">\u6682\u65e0\u6a21\u578b\uff0c\u5148\u65b0\u5efa\u6216\u83b7\u53d6\u3002</div>';
+}
+
+function startProviderModelEditor(index = null) {
+  state.providerEditor.editingModelIndex = index;
+  const model = index === null ? { name: "", model_type: "chat", context_window: "" } : state.providerEditor.models[index];
+  providerModelName.value = model?.name || "";
+  providerModelType.value = model?.model_type || "chat";
+  providerModelContextWindow.value = model?.context_window || "";
+  providerModelEditorTitle.textContent = index === null ? "新建模型" : "编辑模型";
+  openProviderModelEditorModal();
+  hideResult(providerModelTestResult);
+}
+
+function readProviderModelEditor() {
+  const contextWindow = providerModelContextWindow.value.trim();
+  return {
+    name: providerModelName.value.trim(),
+    model_type: providerModelType.value,
+    ...(contextWindow ? { context_window: Number(contextWindow) } : {}),
+  };
+}
+
+function resetProviderForm() {
+  state.editingProviderId = null;
+  providerKey.value = "";
+  providerName.value = "";
+  providerBaseUrl.value = "";
+  providerApiKey.value = "";
+  state.providerEditor = {
+    models: [],
+    savedModels: [],
+    editingModelIndex: null,
+  };
+  if (state.providerTypes.length) {
+    providerType.value = state.providerTypes[0].provider_type;
+  }
+  const preset = providerPreset();
+  if (preset?.default_base_url && preset.use_default_base_url_when_blank) {
+    providerBaseUrl.value = preset.default_base_url;
+  }
+  providerModalTitle.textContent = "\u65b0\u589e\u6a21\u578b\u63d0\u4f9b\u65b9";
+  renderProviderModelList();
+  resetProviderModelEditor();
+}
+
+function resetPluginForm() {
+  state.editingPluginId = null;
+  pluginKey.value = "";
+  pluginName.value = "";
+  pluginVersion.value = "v1";
+  pluginType.value = "toolset";
+  pluginWorkbenchKey.value = "";
+  pluginInstallPath.value = "";
+  pluginTools.value = "";
+  pluginPermissions.value = "";
+  pluginDescription.value = "";
+}
+
+function resetAgentTemplateForm() {
+  state.editingAgentTemplateId = null;
+  agentTemplateKey.value = "";
+  agentTemplateName.value = "";
+  agentTemplateRole.value = "";
+  agentTemplateModel.value = "";
+  agentTemplateSkills.value = "";
+  agentTemplateGoal.value = "";
+  agentTemplateInstructions.value = "";
+  agentTemplateDescription.value = "";
+  agentTemplateMemoryPolicy.value = "agent_private";
+  if (state.providers.length) {
+    agentTemplateProvider.value = state.providers[0].id;
+  }
+  setMultiSelectValues(agentTemplatePlugins, []);
+}
+
+function defaultTeamAgents() {
+  return prettyJson([
+    {
+      key: "planner",
+      name: "规划负责人",
+      agent_template_ref: state.agentTemplates[0]?.id || "agt_strategy_planner",
+    },
+  ]);
+}
+
+function defaultTeamFlow() {
+  return prettyJson({
+    nodes: [
+      { id: "start", type: "start" },
+      { id: "plan", type: "agent", agent: "planner", instruction: "输出规划结果。" },
+      { id: "end", type: "end" },
+    ],
+    edges: [
+      { from: "start", to: "plan" },
+      { from: "plan", to: "end" },
+    ],
+  });
+}
+
+function resetTeamTemplateForm() {
+  state.editingTeamTemplateId = null;
+  state.selectedTeamTemplateId = null;
+  teamTemplateKey.value = "";
+  teamTemplateName.value = "";
+  teamTemplateWorkspace.value = "local-workspace";
+  teamTemplateProject.value = "default-project";
+  teamTemplateDescription.value = "";
+  teamTemplateAgents.value = defaultTeamAgents();
+  teamTemplateFlow.value = defaultTeamFlow();
+  teamTemplateDod.value = "";
+  teamTemplateChecks.value = "";
+  const spec = ensureTeamEditorMetadata(buildTeamTemplateSpecFromForm());
+  autoLayoutTeamSpec(spec);
+  state.teamEditor = {
+    spec,
+    selectedNodeId: spec.flow?.nodes?.find((item) => item.type === "start")?.id || null,
+    linkFromNodeId: null,
+    drag: null,
+    validation: null,
+    preview: null,
+  };
+  syncTeamEditorToForm();
+  renderTeamEditor();
+}
+
+function fillProviderForm(provider) {
+  state.editingProviderId = provider.id;
+  const config = provider.config_json || {};
+  providerKey.value = provider.key || "";
+  providerName.value = provider.name || "";
+  providerType.value = provider.provider_type || "";
+  providerBaseUrl.value = config.base_url || "";
+  providerApiKey.value = "";
+  state.providerEditor = {
+    models: clone(config.models || []),
+    savedModels: clone(config.models || []),
+    editingModelIndex: null,
+  };
+  providerModalTitle.textContent = "\u7f16\u8f91\u6a21\u578b\u63d0\u4f9b\u65b9";
+  renderProviderModelList();
+  resetProviderModelEditor();
+  openProviderModal();
+}
+
+function fillPluginForm(plugin) {
+  state.editingPluginId = plugin.id;
+  const manifest = plugin.manifest_json || {};
+  pluginKey.value = plugin.key || "";
+  pluginName.value = plugin.name || "";
+  pluginVersion.value = plugin.version || "v1";
+  pluginType.value = plugin.plugin_type || "toolset";
+  pluginWorkbenchKey.value = manifest.workbench_key || "";
+  pluginInstallPath.value = plugin.install_path || "";
+  pluginTools.value = (manifest.tools || []).join(", ");
+  pluginPermissions.value = (manifest.permissions || []).join(", ");
+  pluginDescription.value = plugin.description || "";
+}
+
+function fillAgentTemplateForm(template) {
+  state.editingAgentTemplateId = template.id;
+  const spec = template.spec_json || {};
+  agentTemplateKey.value = template.key || "";
+  agentTemplateName.value = template.name || "";
+  agentTemplateRole.value = template.role || "";
+  agentTemplateProvider.value = spec.provider_ref || "";
+  agentTemplateModel.value = spec.model || "";
+  agentTemplateMemoryPolicy.value = spec.memory_policy || "agent_private";
+  agentTemplateSkills.value = (spec.skills || []).join(", ");
+  agentTemplateGoal.value = spec.goal || "";
+  agentTemplateInstructions.value = spec.instructions || "";
+  agentTemplateDescription.value = template.description || "";
+  setMultiSelectValues(agentTemplatePlugins, spec.plugin_refs || []);
+}
+
+function fillTeamTemplateForm(template) {
+  state.editingTeamTemplateId = template.id;
+  state.selectedTeamTemplateId = template.id;
+  const spec = template.spec_json || {};
+  teamTemplateKey.value = template.key || "";
+  teamTemplateName.value = template.name || "";
+  teamTemplateWorkspace.value = spec.workspace_id || "local-workspace";
+  teamTemplateProject.value = spec.project_id || "default-project";
+  teamTemplateDescription.value = template.description || "";
+  teamTemplateAgents.value = prettyJson(spec.agents || []);
+  teamTemplateFlow.value = prettyJson(spec.flow || { nodes: [], edges: [] });
+  teamTemplateDod.value = listToLines(spec.definition_of_done || []);
+  teamTemplateChecks.value = listToLines(spec.acceptance_checks || []);
+  const editorSpec = ensureTeamEditorMetadata(clone(spec));
+  autoLayoutTeamSpec(editorSpec);
+  state.teamEditor = {
+    spec: editorSpec,
+    selectedNodeId: editorSpec.flow?.nodes?.[0]?.id || null,
+    linkFromNodeId: null,
+    drag: null,
+    validation: null,
+    preview: null,
+  };
+  syncTeamEditorToForm();
+  renderTeamEditor();
+}
+
+function renderOverview() {
+  const items = [
+    ["Provider", state.summary.provider_profile_count || 0],
+    ["插件", state.summary.plugin_count || 0],
+    ["Agent 模板", state.summary.agent_template_count || 0],
+    ["团队模板", state.summary.team_template_count || 0],
+    ["Build", state.summary.build_count || 0],
+    ["蓝图", state.summary.blueprint_count || 0],
+    ["Run", state.summary.run_count || 0],
+    ["待审批", state.summary.pending_approval_count || 0],
+  ];
+  summaryCards.innerHTML = items
+    .map(([label, value]) => `<div class="stat-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`)
+    .join("");
+
+  if (storageBanner) {
+    storageBanner.innerHTML = state.storage
+    ? [chip("元数据库", state.storage.metadata_driver || "sqlite"), chip("日志模式", state.storage.journal_mode || "wal"), chip("路径", state.storage.metadata_path || "")].join("")
+      : "";
+  }
+
+  providerTypeGrid.innerHTML = state.providerTypes
+    .map(
+      (item) => `
+        <article class="rule-card">
+          <h3>${escapeHtml(item.label)}</h3>
+          <p>${escapeHtml(item.protocol || item.provider_type)}</p>
+        </article>
+      `,
+    )
+    .join("");
+
+  overviewBuilds.innerHTML = state.recentBuilds.length
+    ? state.recentBuilds
+        .map((item) =>
+          cardMarkup({
+            title: item.name,
+            body: item.description || item.key,
+            meta: `team=${item.key} / blueprint=${item.blueprint_id || "-"}`,
+            actions: `<button type="button" class="ghost" data-build-open="${item.id}">查看</button>`,
+          }),
+        )
+        .join("")
+    : cardMarkup({ title: "暂无 Build", body: "先构建团队模板。", meta: "" });
+
+  overviewRuns.innerHTML = state.recentRuns.length
+    ? state.recentRuns
+        .map((item) =>
+          cardMarkup({
+            title: item.summary || item.id,
+            body: `状态：${item.status}`,
+            meta: `run=${item.id}`,
+            actions: `<button type="button" class="ghost" data-run-open="${item.id}">查看</button>`,
+          }),
+        )
+        .join("")
+    : cardMarkup({ title: "暂无 Run", body: "启动任务后显示。", meta: "" });
+}
+
+function renderProviderPagination() {
+  const { total, limit, offset } = state.providerPage;
+  if (!total) {
+    providerPaginationMeta.innerHTML = "";
+    return;
+  }
+  const page = Math.floor(offset / limit) + 1;
+  const pageCount = Math.max(1, Math.ceil(total / limit));
+  const prevOffset = Math.max(0, offset - limit);
+  const nextOffset = offset + limit < total ? offset + limit : offset;
+  providerPaginationMeta.innerHTML = `
+    <span class="page-status">\u7b2c ${page} / ${pageCount} \u9875\uff0c\u5171 ${total} \u6761</span>
+    <button type="button" class="ghost" data-provider-page="${prevOffset}" ${offset === 0 ? "disabled" : ""}>\u4e0a\u4e00\u9875</button>
+    <button type="button" class="ghost" data-provider-page="${nextOffset}" ${offset + limit >= total ? "disabled" : ""}>\u4e0b\u4e00\u9875</button>
+  `;
+}
+
+function renderProviders() {
+  providerList.innerHTML = state.providerPage.items.length
+    ? state.providerPage.items
+        .map((item) => {
+          const config = item.config_json || {};
+          const preset = item.preset || providerPreset(item.provider_type) || {};
+          const models = Array.isArray(config.models) ? config.models : [];
+          const modelTooltip = providerModelTooltipText(models, item.default_chat_model_name || config.model || "");
+          return `
+            <article class="provider-row">
+              <div class="provider-main">
+                <strong title="${escapeHtml(item.key || item.id)}">${escapeHtml(item.name)}</strong>
+              </div>
+              <div class="provider-cell">
+                <strong title="${escapeHtml(item.provider_type)}">${escapeHtml(preset.label || item.provider_type)}</strong>
+              </div>
+              <div class="provider-cell provider-model-cell">
+                <strong title="${escapeAttribute(modelTooltip)}">${escapeHtml(item.model_count || 0)} \u4e2a\u6a21\u578b</strong>
+              </div>
+              <div class="provider-cell">
+                <strong title="${item.has_secret ? "\u5df2\u4fdd\u5b58\u5bc6\u94a5" : "\u672a\u4fdd\u5b58\u5bc6\u94a5"}">${escapeHtml(config.base_url || "-")}</strong>
+              </div>
+              <div class="provider-row-actions">
+                <button type="button" data-provider-edit="${item.id}">\u7f16\u8f91</button>
+                <button type="button" class="ghost warn" data-provider-delete="${item.id}">\u5220\u9664</button>
+              </div>
+            </article>
+          `;
+        })
+        .join("")
+    : '<div class="detail empty compact-detail">\u6682\u65e0\u7b26\u5408\u6761\u4ef6\u7684\u6a21\u578b\u63d0\u4f9b\u65b9\u3002</div>';
+  renderProviderPagination();
+}
+
+function renderPlugins() {
+  pluginList.innerHTML = state.plugins.length
+    ? state.plugins
+        .map((item) => {
+          const manifest = item.manifest_json || {};
+          const runtime = item.runtime || {};
+          const descriptor = runtime.descriptor || {};
+          const runtimeState = runtime.running ? "running" : runtime.status || (item.install_path ? "idle" : "metadata_only");
+          return cardMarkup({
+            title: item.name,
+            body: item.description || item.plugin_type,
+            meta: `${item.version} / runtime=${runtimeState} / tools=${(descriptor.tools || manifest.tools || []).join(",") || "-"} / permissions=${(descriptor.permissions || manifest.permissions || []).join(",") || "-"}`,
+            actions: `
+              <button type="button" data-plugin-edit="${item.id}">编辑</button>
+              <button type="button" class="ghost" data-plugin-validate="${item.id}">校验</button>
+              <button type="button" class="ghost" data-plugin-install="${item.id}">安装</button>
+              <button type="button" class="ghost" data-plugin-load="${item.id}">加载</button>
+              <button type="button" class="ghost" data-plugin-reload="${item.id}">重载</button>
+              <button type="button" class="ghost" data-plugin-health="${item.id}">健康</button>
+            `,
+            active: item.id === state.editingPluginId,
+          });
+        })
+        .join("")
+    : cardMarkup({ title: "暂无插件", body: "先创建一个插件。", meta: "" });
+}
+
+function renderAgentTemplates() {
+  agentTemplateList.innerHTML = state.agentTemplates.length
+    ? state.agentTemplates
+        .map((item) => {
+          const spec = item.spec_json || {};
+          const provider = state.providers.find((entry) => entry.id === spec.provider_ref);
+          return cardMarkup({
+            title: item.name,
+            body: item.description || item.role,
+            meta: `${item.role} / provider=${provider?.name || spec.provider_ref || "-"} / plugins=${(spec.plugin_refs || []).length}`,
+            actions: `<button type="button" data-agent-template-edit="${item.id}">编辑</button>`,
+            active: item.id === state.editingAgentTemplateId,
+          });
+        })
+        .join("")
+    : cardMarkup({ title: "暂无 Agent 模板", body: "创建第一个角色模板。", meta: "" });
+}
+
+function buildTeamTemplateSpecFromForm() {
+  if (state.teamEditor?.spec) {
+    const spec = clone(state.teamEditor.spec);
+    spec.name = teamTemplateName.value.trim();
+    spec.workspace_id = teamTemplateWorkspace.value.trim() || "local-workspace";
+    spec.project_id = teamTemplateProject.value.trim() || "default-project";
+    spec.definition_of_done = linesToList(teamTemplateDod.value);
+    spec.acceptance_checks = linesToList(teamTemplateChecks.value);
+    return ensureTeamEditorMetadata(spec);
+  }
+  return {
+    name: teamTemplateName.value.trim(),
+    workspace_id: teamTemplateWorkspace.value.trim() || "local-workspace",
+    project_id: teamTemplateProject.value.trim() || "default-project",
+    agents: safeParseJson(teamTemplateAgents.value, []),
+    flow: safeParseJson(teamTemplateFlow.value, { nodes: [], edges: [] }),
+    definition_of_done: linesToList(teamTemplateDod.value),
+    acceptance_checks: linesToList(teamTemplateChecks.value),
+    metadata: { communication_policy: "graph-ancestor-scoped", ui_layout: { positions: {}, viewport: { x: 0, y: 0, zoom: 1 } } },
+  };
+}
+
+function renderTeamTemplatePreview(specOverride = null) {
+  let spec;
+  try {
+    spec = specOverride || buildTeamTemplateSpecFromForm();
+  } catch (error) {
+    teamTemplatePreview.innerHTML = `
+      <article class="inspector-card">
+        <h3>团队摘要</h3>
+        <p>成员或流程 JSON 暂不可解析。</p>
+      </article>
+    `;
+    return;
+  }
+  const summary = teamSummary(spec);
+  const agentLines = summary.agents.length
+    ? summary.agents
+        .map(
+          (item) => `
+            <div class="inspector-line">
+              <strong>${escapeHtml(item.name || item.key)}</strong>
+              <span>${escapeHtml(item.key)} / ${escapeHtml(item.agent_template_ref || item.agent_template_id || "-")}</span>
+            </div>
+          `,
+        )
+        .join("")
+    : `<div class="inspector-line"><strong>暂无成员</strong><span>请先添加团队成员</span></div>`;
+  const validation = state.teamEditor.validation;
+  const preview = state.teamEditor.preview;
+  teamTemplatePreview.innerHTML = `
+    <article class="inspector-card">
+      <h3>${escapeHtml(spec.name || teamTemplateName.value || "团队模板")}</h3>
+      <div class="system-banner compact">
+        ${chip("成员", summary.agents.length)}
+        ${chip("节点", summary.nodes.length)}
+        ${chip("边", summary.edges.length)}
+      </div>
+    </article>
+    <article class="inspector-card">
+      <h3>成员</h3>
+      <div class="inspector-list">${agentLines}</div>
+    </article>
+    ${
+      validation
+        ? `<article class="inspector-card">
+             <h3>校验</h3>
+             <div class="system-banner compact">
+               <span class="validation-badge ${validation.valid ? "ok" : "error"}">${validation.valid ? "通过" : `错误 ${validation.errors.length}`}</span>
+               <span class="validation-badge ${validation.warnings?.length ? "warn" : "ok"}">${validation.warnings?.length ? `警告 ${validation.warnings.length}` : "无警告"}</span>
+             </div>
+           </article>`
+        : ""
+    }
+    ${
+      preview?.preview
+        ? `<article class="inspector-card">
+             <h3>Build 预览</h3>
+             <div class="system-banner compact">
+               ${chip("角色模板", preview.preview.role_template_count || 0)}
+               ${chip("Agent", preview.preview.agent_count || 0)}
+             </div>
+           </article>`
+        : ""
+    }
+  `;
+}
+
+function mutateTeamSpec(mutator) {
+  const spec = ensureTeamEditorMetadata(teamEditorSpec());
+  mutator(spec);
+  state.teamEditor.spec = spec;
+  state.teamEditor.validation = null;
+  state.teamEditor.preview = null;
+  syncTeamEditorToForm();
+  renderTeamEditor();
+}
+
+function renderTeamEditor() {
+  if (!state.teamEditor.spec) {
+    state.teamEditor.spec = ensureTeamEditorMetadata(buildTeamTemplateSpecFromForm());
+  }
+  syncTeamEditorToForm();
+  renderTeamTemplatePreview(state.teamEditor.spec);
+  renderTeamMembers();
+  renderTeamGraph();
+  renderTeamNodeInspector();
+  renderTeamValidationPanel();
+}
+
+function renderTeamMembers() {
+  const spec = teamEditorSpec();
+  const providerOptions = state.agentTemplates
+    .map(
+      (template) =>
+        `<option value="${escapeHtml(template.id)}">${escapeHtml(template.name)} / ${escapeHtml(template.role)}</option>`,
+    )
+    .join("");
+  teamMemberList.innerHTML = (spec.agents || [])
+    .map((member, index) => {
+      const nodeUsage = (spec.flow?.nodes || []).filter((node) => node.agent === member.key).map((node) => node.id);
+      return `
+        <article class="member-card">
+          <div class="member-card-head">
+            <strong>${escapeHtml(member.name || member.key || `成员 ${index + 1}`)}</strong>
+            <button type="button" class="ghost" data-team-member-remove="${escapeHtml(member.key)}">移除</button>
+          </div>
+          <div class="form-grid two">
+            <label><span>Key</span><input data-team-member-field="key" data-member-index="${index}" value="${escapeHtml(member.key || "")}" /></label>
+            <label><span>名称</span><input data-team-member-field="name" data-member-index="${index}" value="${escapeHtml(member.name || "")}" /></label>
+          </div>
+          <label>
+            <span>Agent 模板</span>
+            <select data-team-member-field="agent_template_ref" data-member-index="${index}">
+              ${providerOptions.replace(`value="${escapeHtml(member.agent_template_ref || "")}"`, `value="${escapeHtml(member.agent_template_ref || "")}" selected`)}
+            </select>
+          </label>
+          <div class="meta">节点引用：${escapeHtml(nodeUsage.join(", ") || "未绑定")}</div>
+        </article>
+      `;
+    })
+    .join("");
+}
+
+function renderTeamGraph() {
+  const spec = ensureTeamEditorMetadata(teamEditorSpec());
+  const nodes = spec.flow?.nodes || [];
+  const positions = spec.metadata.ui_layout.positions || {};
+  let maxX = 1200;
+  let maxY = 800;
+  teamGraphCanvas.innerHTML = nodes
+    .map((node, index) => {
+      const pos = graphPositionFor(node.id, index);
+      maxX = Math.max(maxX, pos.x + 260);
+      maxY = Math.max(maxY, pos.y + 220);
+      const memberName = spec.agents?.find((item) => item.key === node.agent)?.name || node.agent || "";
+      return `
+        <article
+          class="graph-node ${escapeHtml(node.type)} ${node.id === state.teamEditor.selectedNodeId ? "selected" : ""} ${node.id === state.teamEditor.linkFromNodeId ? "linking" : ""}"
+          data-node-id="${escapeHtml(node.id)}"
+          style="left:${pos.x}px; top:${pos.y}px;"
+        >
+          <strong>${escapeHtml(node.name || node.id)}</strong>
+          <span>${escapeHtml(memberName)}</span>
+          <span class="graph-node-type">${escapeHtml(node.type)}</span>
+        </article>
+      `;
+    })
+    .join("");
+  teamGraphCanvas.style.minWidth = `${maxX}px`;
+  teamGraphCanvas.style.minHeight = `${maxY}px`;
+  teamGraphEdges.setAttribute("width", String(maxX));
+  teamGraphEdges.setAttribute("height", String(maxY));
+  teamGraphEdges.innerHTML = (spec.flow?.edges || [])
+    .map((edge) => {
+      const from = positions[edge.from];
+      const to = positions[edge.to];
+      if (!from || !to) {
+        return "";
+      }
+      const startX = from.x + 170;
+      const startY = from.y + 50;
+      const endX = to.x;
+      const endY = to.y + 50;
+      const midX = (startX + endX) / 2;
+      const midY = (startY + endY) / 2 - 8;
+      return `
+        <line class="graph-edge-line" x1="${startX}" y1="${startY}" x2="${endX}" y2="${endY}"></line>
+        ${edge.when ? `<text class="graph-edge-label" x="${midX}" y="${midY}">${escapeHtml(edge.when)}</text>` : ""}
+      `;
+    })
+    .join("");
+  teamLinkHint.classList.toggle("hidden", !state.teamEditor.linkFromNodeId);
+  teamLinkHint.textContent = state.teamEditor.linkFromNodeId
+    ? `连线模式：请选择目标节点，当前起点 ${state.teamEditor.linkFromNodeId}`
+    : "";
+}
+
+function renderTeamNodeInspector() {
+  const spec = teamEditorSpec();
+  const node = (spec.flow?.nodes || []).find((item) => item.id === state.teamEditor.selectedNodeId) || null;
+  const memberOptions =
+    spec.agents
+      .map((item) => `<option value="${escapeHtml(item.key)}">${escapeHtml(item.name || item.key)}</option>`)
+      .join("") || `<option value="">暂无成员</option>`;
+  teamNodeAgent.innerHTML = `<option value="">不绑定</option>${memberOptions}`;
+  if (!node) {
+    teamNodeEmpty.classList.remove("hidden");
+    teamNodeFormShell.classList.add("hidden");
+    teamEdgeList.innerHTML = "";
+    return;
+  }
+  teamNodeEmpty.classList.add("hidden");
+  teamNodeFormShell.classList.remove("hidden");
+  teamNodeId.value = node.id || "";
+  teamNodeType.value = node.type || "";
+  teamNodeName.value = node.name || "";
+  teamNodeAgent.value = node.agent || "";
+  teamNodeInstruction.value = node.instruction || "";
+  teamNodeExpr.value = node.expr || "";
+  teamNodeMaxIterations.value = node.max_iterations ?? "";
+  teamNodeArtifactKind.value = node.artifact_kind || "report";
+  teamNodeArtifactName.value = node.name || "";
+  teamNodeTemplate.value = node.template || "";
+  teamNodeSource.value = node.source || "";
+  const outgoing = (spec.flow?.edges || []).filter((edge) => edge.from === node.id);
+  teamEdgeList.innerHTML = outgoing.length
+    ? outgoing
+        .map(
+          (edge, index) => `
+            <article class="edge-card">
+              <div class="edge-card-head">
+                <strong>${escapeHtml(edge.from)} → ${escapeHtml(edge.to)}</strong>
+                <button type="button" class="ghost" data-team-edge-remove="${index}" data-edge-from="${escapeHtml(edge.from)}" data-edge-to="${escapeHtml(edge.to)}">删除</button>
+              </div>
+              <label><span>条件</span><input data-team-edge-when="${index}" data-edge-from="${escapeHtml(edge.from)}" data-edge-to="${escapeHtml(edge.to)}" value="${escapeHtml(edge.when || "")}" placeholder="true / false / default / expr" /></label>
+            </article>
+          `,
+        )
+        .join("")
+    : `<div class="detail empty compact-detail">暂无出边。可先点“开始连线”再选择目标节点。</div>`;
+}
+
+function renderTeamValidationPanel() {
+  const validation = state.teamEditor.validation;
+  const preview = state.teamEditor.preview;
+  if (!validation && !preview) {
+    teamValidationResult.innerHTML = `
+      <article class="inspector-card">
+        <h3>待校验</h3>
+        <p>修改画布后可直接校验或预览 Build。</p>
+      </article>
+    `;
+    return;
+  }
+  const errorLines = (validation?.errors || []).map((item) => `<div class="inspector-line"><strong>错误</strong><span>${escapeHtml(item)}</span></div>`).join("");
+  const warningLines = (validation?.warnings || []).map((item) => `<div class="inspector-line"><strong>警告</strong><span>${escapeHtml(item)}</span></div>`).join("");
+  const communicationItems = Object.entries(validation?.communication || {})
+    .slice(0, 8)
+    .map(
+      ([nodeId, item]) => `
+        <div class="inspector-line">
+          <strong>${escapeHtml(nodeId)}</strong>
+          <span>${escapeHtml((item.visible_agent_nodes || []).join(", ") || "无可见 Agent")}</span>
+        </div>
+      `,
+    )
+    .join("");
+  teamValidationResult.innerHTML = `
+    ${
+      validation
+        ? `<article class="inspector-card">
+             <h3>${validation.valid ? "图校验通过" : "图校验失败"}</h3>
+             <div class="system-banner compact">
+               <span class="validation-badge ${validation.valid ? "ok" : "error"}">${validation.valid ? "可保存" : `错误 ${validation.errors.length}`}</span>
+               <span class="validation-badge ${validation.warnings?.length ? "warn" : "ok"}">${validation.warnings?.length ? `警告 ${validation.warnings.length}` : "无警告"}</span>
+             </div>
+           </article>`
+        : ""
+    }
+    ${errorLines}
+    ${warningLines}
+    ${
+      preview?.preview
+        ? `<article class="inspector-card">
+             <h3>Build 预览</h3>
+             <div class="system-banner compact">
+               ${chip("角色模板", preview.preview.role_template_count || 0)}
+               ${chip("Agent", preview.preview.agent_count || 0)}
+               ${chip("节点", preview.preview.node_count || 0)}
+               ${chip("边", preview.preview.edge_count || 0)}
+             </div>
+           </article>`
+        : ""
+    }
+    ${
+      communicationItems
+        ? `<article class="inspector-card">
+             <h3>可见性</h3>
+             <div class="inspector-list">${communicationItems}</div>
+           </article>`
+        : ""
+    }
+  `;
+}
+
+function selectTeamNode(nodeId) {
+  state.teamEditor.selectedNodeId = nodeId;
+  renderTeamEditor();
+}
+
+function addTeamMember() {
+  mutateTeamSpec((spec) => {
+    const existing = new Set((spec.agents || []).map((item) => item.key));
+    let index = 1;
+    let key = `agent_${index}`;
+    while (existing.has(key)) {
+      index += 1;
+      key = `agent_${index}`;
+    }
+    spec.agents = spec.agents || [];
+    spec.agents.push({
+      key,
+      name: `成员 ${index}`,
+      agent_template_ref: state.agentTemplates[0]?.id || "",
+    });
+  });
+}
+
+function addGraphNode(type) {
+  mutateTeamSpec((spec) => {
+    ensureTeamEditorMetadata(spec);
+    spec.flow = spec.flow || { nodes: [], edges: [] };
+    if (type === "start" && spec.flow.nodes.some((item) => item.type === "start")) {
+      showResult(teamTemplateResult, { error: "start 节点只能有一个。" });
+      return;
+    }
+    const nodeId = createNodeId(type);
+    const node = {
+      id: nodeId,
+      type,
+      ...defaultNodeConfig(type),
+    };
+    spec.flow.nodes.push(node);
+    graphPositionFor(nodeId, spec.flow.nodes.length - 1);
+    state.teamEditor.selectedNodeId = nodeId;
+  });
+}
+
+function deleteSelectedNode() {
+  const targetId = state.teamEditor.selectedNodeId;
+  if (!targetId) {
+    return;
+  }
+  mutateTeamSpec((spec) => {
+    spec.flow.nodes = (spec.flow.nodes || []).filter((item) => item.id !== targetId);
+    spec.flow.edges = (spec.flow.edges || []).filter((item) => item.from !== targetId && item.to !== targetId);
+    delete spec.metadata?.ui_layout?.positions?.[targetId];
+    state.teamEditor.selectedNodeId = spec.flow.nodes[0]?.id || null;
+    state.teamEditor.linkFromNodeId = null;
+  });
+}
+
+function startLinkMode() {
+  if (!state.teamEditor.selectedNodeId) {
+    return;
+  }
+  state.teamEditor.linkFromNodeId = state.teamEditor.selectedNodeId;
+  renderTeamGraph();
+}
+
+function connectNodes(sourceId, targetId) {
+  if (!sourceId || !targetId || sourceId === targetId) {
+    state.teamEditor.linkFromNodeId = null;
+    renderTeamGraph();
+    return;
+  }
+  mutateTeamSpec((spec) => {
+    spec.flow.edges = spec.flow.edges || [];
+    if (!spec.flow.edges.some((edge) => edge.from === sourceId && edge.to === targetId)) {
+      spec.flow.edges.push({ from: sourceId, to: targetId });
+    }
+    state.teamEditor.linkFromNodeId = null;
+    state.teamEditor.selectedNodeId = targetId;
+  });
+}
+
+function updateMemberField(index, field, value) {
+  mutateTeamSpec((spec) => {
+    const member = spec.agents?.[index];
+    if (!member) {
+      return;
+    }
+    const oldKey = member.key;
+    member[field] = value;
+    if (field === "key" && oldKey && oldKey !== value) {
+      (spec.flow?.nodes || []).forEach((node) => {
+        if (node.agent === oldKey) {
+          node.agent = value;
+        }
+      });
+    }
+  });
+}
+
+function removeMember(memberKey) {
+  mutateTeamSpec((spec) => {
+    spec.agents = (spec.agents || []).filter((item) => item.key !== memberKey);
+    (spec.flow?.nodes || []).forEach((node) => {
+      if (node.agent === memberKey) {
+        node.agent = "";
+      }
+    });
+  });
+}
+
+function updateSelectedNode() {
+  const nodeId = state.teamEditor.selectedNodeId;
+  if (!nodeId) {
+    return;
+  }
+  mutateTeamSpec((spec) => {
+    const node = (spec.flow?.nodes || []).find((item) => item.id === nodeId);
+    if (!node) {
+      return;
+    }
+    const oldId = node.id;
+    node.id = teamNodeId.value.trim() || node.id;
+    node.name = teamNodeName.value.trim() || undefined;
+    node.agent = teamNodeAgent.value || undefined;
+    node.instruction = teamNodeInstruction.value.trim() || undefined;
+    node.expr = teamNodeExpr.value.trim() || undefined;
+    node.max_iterations = teamNodeMaxIterations.value.trim() ? Number(teamNodeMaxIterations.value.trim()) : undefined;
+    node.artifact_kind = teamNodeArtifactKind.value.trim() || "report";
+    if (node.type === "artifact") {
+      node.name = teamNodeArtifactName.value.trim() || node.name || undefined;
+    }
+    node.template = teamNodeTemplate.value.trim() || undefined;
+    node.source = teamNodeSource.value.trim() || undefined;
+    if (oldId !== node.id) {
+      (spec.flow?.edges || []).forEach((edge) => {
+        if (edge.from === oldId) {
+          edge.from = node.id;
+        }
+        if (edge.to === oldId) {
+          edge.to = node.id;
+        }
+      });
+      if (spec.metadata?.ui_layout?.positions?.[oldId]) {
+        spec.metadata.ui_layout.positions[node.id] = spec.metadata.ui_layout.positions[oldId];
+        delete spec.metadata.ui_layout.positions[oldId];
+      }
+      state.teamEditor.selectedNodeId = node.id;
+    }
+  });
+}
+
+function updateEdgeWhen(sourceId, targetId, value) {
+  mutateTeamSpec((spec) => {
+    const edge = (spec.flow?.edges || []).find((item) => item.from === sourceId && item.to === targetId);
+    if (!edge) {
+      return;
+    }
+    if (value.trim()) {
+      edge.when = value.trim();
+    } else {
+      delete edge.when;
+    }
+  });
+}
+
+function removeEdge(sourceId, targetId) {
+  mutateTeamSpec((spec) => {
+    spec.flow.edges = (spec.flow?.edges || []).filter((item) => !(item.from === sourceId && item.to === targetId));
+  });
+}
+
+async function validateTeamGraph() {
+  try {
+    const payload = await api("/api/agent-center/team-templates/graph/validate", {
+      method: "POST",
+      body: JSON.stringify({ spec: buildTeamTemplateSpecFromForm() }),
+    });
+    if (payload.normalized_spec) {
+      state.teamEditor.spec = payload.normalized_spec;
+      syncTeamEditorToForm();
+    }
+    state.teamEditor.validation = payload;
+    renderTeamEditor();
+  } catch (error) {
+    showResult(teamTemplateResult, { error: error.message });
+  }
+}
+
+async function previewTeamGraph() {
+  try {
+    const payload = await api("/api/agent-center/team-templates/graph/preview", {
+      method: "POST",
+      body: JSON.stringify({
+        team_template_id: state.editingTeamTemplateId,
+        name: teamTemplateName.value.trim() || "Preview Team",
+        spec: buildTeamTemplateSpecFromForm(),
+      }),
+    });
+    state.teamEditor.preview = payload;
+    if (!state.teamEditor.validation) {
+      state.teamEditor.validation = {
+        valid: payload.valid,
+        errors: payload.errors || [],
+        warnings: payload.warnings || [],
+        communication: {},
+      };
+    }
+    renderTeamEditor();
+  } catch (error) {
+    showResult(teamTemplateResult, { error: error.message });
+  }
+}
+
+function renderTeamTemplates() {
+  teamTemplateList.innerHTML = state.teamTemplates.length
+    ? state.teamTemplates
+        .map((item) => {
+          const summary = teamSummary(item.spec_json || {});
+          return cardMarkup({
+            title: item.name,
+            body: item.description || "团队模板",
+            meta: `agents=${summary.agents.length} / nodes=${summary.nodes.length} / edges=${summary.edges.length}`,
+            actions: `
+              <button type="button" data-team-template-edit="${item.id}">编辑</button>
+              <button type="button" class="ghost" data-team-build="${item.id}">构建</button>
+            `,
+            active: item.id === state.editingTeamTemplateId || item.id === state.selectedTeamTemplateId,
+          });
+        })
+        .join("")
+    : cardMarkup({ title: "暂无团队模板", body: "创建第一个团队模板。", meta: "" });
+}
+
+function renderBuilds() {
+  buildList.innerHTML = state.builds.length
+    ? state.builds
+        .map((item) =>
+          cardMarkup({
+            title: item.name,
+            body: item.description || item.key,
+            meta: `team=${item.key} / blueprint=${item.blueprint_id || "-"}`,
+            actions: `
+              <button type="button" data-build-open="${item.id}">查看</button>
+              <button type="button" class="ghost" data-build-use="${item.id}">用于任务</button>
+            `,
+            active: item.id === state.selectedBuildId,
+          }),
+        )
+        .join("")
+    : cardMarkup({ title: "暂无 Build", body: "先构建团队模板。", meta: "" });
+}
+
+function renderBuildDetail(build) {
+  if (!build) {
+    setDetailPlaceholder(buildDetail, "请选择一个 Build。");
+    return;
+  }
+  state.selectedBuildId = build.id;
+  buildDetail.classList.remove("empty");
+  const summary = blueprintSummary(build.spec_json || {});
+  buildDetail.textContent =
+    `Build：${build.id}\n` +
+    `名称：${build.name}\n` +
+    `团队模板：${build.key}\n` +
+    `蓝图快照：${build.blueprint_id || ""}\n` +
+    `角色模板：${summary.roleTemplates.length}\n` +
+    `Agent：${summary.agents.length}\n` +
+    `节点：${summary.nodes.length}\n` +
+    `边：${summary.edges.length}\n\n` +
+    `资源锁定\n${prettyJson(build.resource_lock_json || {})}\n\n` +
+    `BlueprintSpec\n${prettyJson(build.spec_json || {})}`;
+}
+
+function renderBlueprints() {
+  blueprintList.innerHTML = state.blueprints.length
+    ? state.blueprints
+        .map((item) => {
+          const summary = blueprintSummary(item.spec_json || {});
+          return cardMarkup({
+            title: item.name,
+            body: item.description || "内部蓝图快照",
+            meta: `roles=${summary.roleTemplates.length} / agents=${summary.agents.length} / nodes=${summary.nodes.length}`,
+            actions: `
+              <button type="button" data-blueprint-open="${item.id}">查看</button>
+              <button type="button" class="ghost" data-blueprint-use="${item.id}">用于任务</button>
+            `,
+            active: item.id === state.selectedBlueprintId,
+          });
+        })
+        .join("")
+    : cardMarkup({ title: "暂无蓝图", body: "Build 后会生成蓝图快照。", meta: "" });
+}
+
+function renderBlueprintDetail(blueprint) {
+  if (!blueprint) {
+    setDetailPlaceholder(blueprintDetail, "请选择一个蓝图。");
+    return;
+  }
+  state.selectedBlueprintId = blueprint.id;
+  blueprintDetail.classList.remove("empty");
+  const summary = blueprintSummary(blueprint.spec_json || {});
+  blueprintDetail.textContent =
+    `Blueprint：${blueprint.id}\n` +
+    `名称：${blueprint.name}\n` +
+    `说明：${blueprint.description || ""}\n` +
+    `角色模板：${summary.roleTemplates.length}\n` +
+    `Agent：${summary.agents.length}\n` +
+    `节点：${summary.nodes.length}\n` +
+    `边：${summary.edges.length}\n\n` +
+    prettyJson(blueprint.spec_json || {});
+}
+
+function renderRuns() {
+  runList.innerHTML = state.runs.length
+    ? state.runs
+        .map((item) =>
+          cardMarkup({
+            title: item.summary || item.id,
+            body: `状态：${item.status}`,
+            meta: `run=${item.id}`,
+            actions:
+              item.status === "waiting_approval"
+                ? `<button type="button" class="warn" data-run-resume="${item.id}">恢复</button>
+                   <button type="button" class="ghost" data-run-open="${item.id}">查看</button>`
+                : `<button type="button" class="ghost" data-run-open="${item.id}">查看</button>`,
+            active: item.id === state.selectedRunId,
+          }),
+        )
+        .join("")
+    : cardMarkup({ title: "暂无 Run", body: "启动任务后显示。", meta: "" });
+}
+
+function renderApprovals() {
+  approvalList.innerHTML = state.approvals.length
+    ? state.approvals
+        .map((item) =>
+          cardMarkup({
+            title: item.title,
+            body: item.detail || "",
+            meta: `run=${item.run_id}`,
+            actions: `
+              <button type="button" data-approval-approve="${item.id}" data-run-id="${item.run_id}">批准</button>
+              <button type="button" class="ghost" data-approval-reject="${item.id}" data-run-id="${item.run_id}">拒绝</button>
+            `,
+          }),
+        )
+        .join("")
+    : cardMarkup({ title: "暂无待审批项", body: "当前无待审批。", meta: "" });
+}
+
+function buildProviderPayloadFromForm() {
+  const selectedType = providerPreset();
+  const models = clone(state.providerEditor.models);
+  const defaultChatModel = models.find((item) => item.model_type === "chat") || models[0] || null;
+  return {
+    id: state.editingProviderId,
+    key: providerKey.value.trim(),
+    name: providerName.value.trim(),
+    provider_type: providerType.value,
+    config: {
+      base_url: providerBaseUrl.value.trim(),
+      api_version: selectedType?.default_api_version || "",
+      backend: providerType.value,
+      model: defaultChatModel?.name || selectedType?.default_model || "",
+      models,
+      temperature: 0.2,
+    },
+    ...(providerApiKey.value.trim() ? { secret: { api_key: providerApiKey.value.trim() } } : {}),
+  };
+}
+
+function buildPluginPayloadFromForm() {
+  return {
+    id: state.editingPluginId,
+    key: pluginKey.value.trim(),
+    name: pluginName.value.trim(),
+    version: pluginVersion.value.trim() || "v1",
+    plugin_type: pluginType.value.trim() || "toolset",
+    description: pluginDescription.value.trim(),
+    install_path: pluginInstallPath.value.trim() || null,
+    manifest: {
+      workbench_key: pluginWorkbenchKey.value.trim(),
+      tools: commaListToArray(pluginTools.value),
+      permissions: commaListToArray(pluginPermissions.value),
+      description: pluginDescription.value.trim(),
+    },
+  };
+}
+
+function buildAgentTemplatePayloadFromForm() {
+  return {
+    id: state.editingAgentTemplateId,
+    key: agentTemplateKey.value.trim(),
+    name: agentTemplateName.value.trim(),
+    role: agentTemplateRole.value.trim(),
+    description: agentTemplateDescription.value.trim(),
+    version: "v1",
+    spec: {
+      goal: agentTemplateGoal.value.trim(),
+      instructions: agentTemplateInstructions.value.trim(),
+      provider_ref: agentTemplateProvider.value,
+      model: agentTemplateModel.value.trim(),
+      memory_policy: agentTemplateMemoryPolicy.value,
+      plugin_refs: getMultiSelectValues(agentTemplatePlugins),
+      skills: commaListToArray(agentTemplateSkills.value),
+      delegation_mode: "none",
+      metadata: {},
+    },
+  };
+}
+
+function buildTeamTemplatePayloadFromForm() {
+  syncTeamEditorToForm();
+  return {
+    id: state.editingTeamTemplateId,
+    key: teamTemplateKey.value.trim(),
+    name: teamTemplateName.value.trim(),
+    description: teamTemplateDescription.value.trim(),
+    version: "v1",
+    spec: buildTeamTemplateSpecFromForm(),
+  };
+}
+
+async function loadControlPlane() {
+  const payload = await api("/api/control-plane");
+  state.summary = payload.summary || {};
+  state.storage = payload.storage || null;
+  state.providerTypes = payload.provider_types || [];
+  state.recentBuilds = payload.recent_builds || [];
+  state.recentRuns = payload.recent_runs || [];
+}
+
+async function loadProviders() {
+  const payload = await api("/api/agent-center/providers");
+  state.providers = payload.items || [];
+  populateProviderOptions();
+}
+
+async function loadProviderPage() {
+  const params = new URLSearchParams({
+    limit: String(state.providerPage.limit || 10),
+    offset: String(state.providerPage.offset || 0),
+  });
+  if (state.providerPage.query) {
+    params.set("query", state.providerPage.query);
+  }
+  if (state.providerPage.providerType) {
+    params.set("provider_type", state.providerPage.providerType);
+  }
+  const payload = await api(`/api/agent-center/providers?${params.toString()}`);
+  state.providerPage.items = payload.items || [];
+  state.providerPage.total = payload.total || 0;
+  state.providerPage.limit = payload.limit || state.providerPage.limit;
+  state.providerPage.offset = payload.offset || 0;
+}
+
+async function loadPlugins() {
+  const payload = await api("/api/agent-center/plugins");
+  state.plugins = payload.items || [];
+  populatePluginOptions();
+}
+
+async function loadAgentTemplates() {
+  const payload = await api("/api/agent-center/agent-templates");
+  state.agentTemplates = payload.items || [];
+}
+
+async function loadTeamTemplates() {
+  const payload = await api("/api/agent-center/team-templates");
+  state.teamTemplates = payload.items || [];
+  if (state.selectedTeamTemplateId && !state.teamTemplates.some((item) => item.id === state.selectedTeamTemplateId)) {
+    state.selectedTeamTemplateId = null;
+  }
+  if (!state.selectedTeamTemplateId && state.teamTemplates.length) {
+    state.selectedTeamTemplateId = state.teamTemplates[0].id;
+  }
+  populateTeamTemplateOptions();
+}
+
+async function loadBuilds() {
+  const payload = await api("/api/agent-center/builds");
+  state.builds = payload.items || [];
+  if (state.selectedBuildId && !state.builds.some((item) => item.id === state.selectedBuildId)) {
+    state.selectedBuildId = null;
+  }
+  if (!state.selectedBuildId && state.builds.length) {
+    state.selectedBuildId = state.builds[0].id;
+  }
+  populateTaskOptions();
+}
+
+async function loadBlueprints() {
+  const payload = await api("/api/blueprints");
+  state.blueprints = payload.items || [];
+  if (state.selectedBlueprintId && !state.blueprints.some((item) => item.id === state.selectedBlueprintId)) {
+    state.selectedBlueprintId = null;
+  }
+  if (!state.selectedBlueprintId && state.blueprints.length) {
+    state.selectedBlueprintId = state.blueprints[0].id;
+  }
+  populateTaskOptions();
+}
+
+async function loadRuns() {
+  const payload = await api("/api/runs");
+  state.runs = payload.items || [];
+  if (state.selectedRunId && !state.runs.some((item) => item.id === state.selectedRunId)) {
+    state.selectedRunId = null;
+  }
+}
+
+async function loadApprovals() {
+  const payload = await api("/api/approvals?status=pending");
+  state.approvals = payload.items || [];
+}
+
+async function loadRunDetail(runId) {
+  const payload = await api(`/api/runs/${runId}`);
+  state.selectedRunId = runId;
+  const steps = (payload.steps || [])
+    .map((item) => {
+      const visibleIds = item.output_json?.visible_output_ids || item.output_json?.details?.visible_output_ids || [];
+      return `- ${item.node_id} [${item.status}]${visibleIds.length ? ` / 可见=${visibleIds.join(",")}` : ""}`;
+    })
+    .join("\n");
+  const artifacts = (payload.artifacts || []).map((item) => `- ${item.name}: ${item.path}`).join("\n");
+  const events = (payload.events || []).slice(-12).map((item) => `- ${item.event_type}`).join("\n");
+  const files = (payload.workspace_files || []).map((item) => `- ${item.relative_path}`).join("\n");
+  runDetail.classList.remove("empty");
+  runDetail.textContent =
+    `Run：${payload.run.id}\n` +
+    `状态：${payload.run.status}\n` +
+    `摘要：${payload.run.summary || ""}\n\n` +
+    `步骤\n${steps || "- 无"}\n\n` +
+    `产物\n${artifacts || "- 无"}\n\n` +
+    `最近事件\n${events || "- 无"}\n\n` +
+    `工作区文件\n${files || "- 无"}`;
+}
+
+async function openBuild(buildId) {
+  const build = await api(`/api/agent-center/builds/${buildId}`);
+  renderBuildDetail(build);
+  renderBuilds();
+  populateTaskOptions();
+}
+
+async function openBlueprint(blueprintId) {
+  const blueprint = await api(`/api/blueprints/${blueprintId}`);
+  renderBlueprintDetail(blueprint);
+  renderBlueprints();
+  populateTaskOptions();
+}
+
+async function refreshAll() {
+  await Promise.all([
+    loadControlPlane(),
+    loadProviders(),
+    loadProviderPage(),
+    loadPlugins(),
+    loadAgentTemplates(),
+    loadTeamTemplates(),
+    loadBuilds(),
+    loadBlueprints(),
+    loadRuns(),
+    loadApprovals(),
+  ]);
+  populateProviderTypeOptions();
+  providerPageSize.value = String(state.providerPage.limit || 10);
+  populateProviderOptions();
+  populatePluginOptions();
+  populateTeamTemplateOptions();
+  populateTaskOptions();
+  renderOverview();
+  renderProviders();
+  renderPlugins();
+  renderAgentTemplates();
+  renderTeamTemplates();
+  renderTeamEditor();
+  renderBuilds();
+  renderBlueprints();
+  renderRuns();
+  renderApprovals();
+  if (state.selectedBuildId) {
+    renderBuildDetail(state.builds.find((item) => item.id === state.selectedBuildId) || null);
+  } else {
+    setDetailPlaceholder(buildDetail, "请选择一个 Build。");
+  }
+  if (state.selectedBlueprintId) {
+    renderBlueprintDetail(state.blueprints.find((item) => item.id === state.selectedBlueprintId) || null);
+  } else {
+    setDetailPlaceholder(blueprintDetail, "请选择一个蓝图。");
+  }
+  if (state.selectedRunId) {
+    await loadRunDetail(state.selectedRunId);
+  } else {
+    setDetailPlaceholder(runDetail, "请选择一个 Run。");
+  }
+}
+
+navButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    switchPage(button.dataset.pageTarget);
+  });
 });
 
-skillImportBatchInput?.addEventListener("change", async () => {
-  hide(skillResult);
-  try {
-    const items = await buildImportItemsFromParentFolder(Array.from(skillImportBatchInput.files || []));
-    await submitSkillImports(items, "Batch skill import completed.");
-  } catch (error) {
-    showJson(skillResult, { error: error.message });
-  } finally {
-    skillImportBatchInput.value = "";
-  }
+topNavButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    switchNavSection(button.dataset.navSection);
+  });
 });
+
+const refreshAllButton = document.querySelector("#refresh-all");
+if (refreshAllButton) {
+  refreshAllButton.addEventListener("click", async () => {
+  try {
+    await refreshAll();
+  } catch (error) {
+    showResult(taskResult, { error: error.message });
+  }
+  });
+}
+
+const quickBuildButton = document.querySelector("#quick-build");
+if (quickBuildButton) {
+  quickBuildButton.addEventListener("click", async () => {
+  try {
+    const targetId = state.selectedTeamTemplateId || state.teamTemplates[0]?.id;
+    if (!targetId) {
+      throw new Error("暂无可构建的团队模板。");
+    }
+    const payload = await api(`/api/agent-center/team-templates/${targetId}/build`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    state.selectedBuildId = payload.id;
+    hideResult(buildResult);
+    await refreshAll();
+    await openBuild(payload.id);
+    switchPage("builds");
+  } catch (error) {
+    showResult(buildResult, { error: error.message });
+  }
+  });
+}
 
 providerForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  hide(providerTestResult);
-  hide(providerFormResult);
   try {
-    const isEditing = Boolean(state.editingProviderId);
-    const payload = buildProviderPayload();
-    const path = isEditing ? `/api/providers/${state.editingProviderId}` : "/api/providers";
-    const method = isEditing ? "PUT" : "POST";
-    const result = await api(path, { method, body: JSON.stringify(payload) });
-    state.providerPage.offset = 0;
-    resetProviderForm({ keepMessage: true });
-    await bootstrap();
-    showJson(providerFormResult, { message: isEditing ? "Provider updated" : "Provider created", id: result.id, name: result.name });
-    switchPage("agents");
-    switchAgentModule("providers");
+    const payload = buildProviderPayloadFromForm();
+    const method = state.editingProviderId ? "PUT" : "POST";
+    const path = state.editingProviderId ? `/api/agent-center/providers/${state.editingProviderId}` : "/api/agent-center/providers";
+    const saved = await api(path, { method, body: JSON.stringify(payload) });
+    await refreshAll();
+    closeProviderModal();
+    providerResult?.classList.remove("empty");
+    showResult(providerResult, { message: "\u63d0\u4f9b\u65b9\u5df2\u4fdd\u5b58", id: saved.id });
   } catch (error) {
-    showJson(providerFormResult, { error: error.message });
+    providerResult?.classList.remove("empty");
+    showResult(providerResult, { error: error.message });
   }
 });
 
-providerTestBtn.addEventListener("click", async () => {
-  hide(providerTestResult);
-  try {
-    const payload = {
-      config: {
-        ...buildProviderPayload(),
-        id: state.editingProviderId,
-        name: providerForm.elements.name.value.trim() || "temp-provider",
-      },
-      prompt: "Reply with READY and mention which provider protocol you are using.",
-    };
-    const result = await api("/api/providers/test", { method: "POST", body: JSON.stringify(payload) });
-    showJson(providerTestResult, result);
-  } catch (error) {
-    showJson(providerTestResult, { error: error.message });
-  }
-});
-
-agentForm.addEventListener("submit", async (event) => {
+pluginForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  hide(agentFormResult);
+  hideResult(pluginResult);
   try {
-    const isEditing = Boolean(state.editingAgentId);
-    const payload = {
-      name: agentForm.elements.name.value.trim(),
-      role: agentForm.elements.role.value.trim(),
-      system_prompt: agentForm.elements.system_prompt.value.trim(),
-      provider_id: agentForm.elements.provider_id.value,
-      model_override: agentForm.elements.model_override.value.trim() || null,
-      temperature: Number(agentForm.elements.temperature.value || 0.2),
-      max_tokens: agentForm.elements.max_tokens.value ? Number(agentForm.elements.max_tokens.value) : null,
-      collaboration_style: "specialist",
-      metadata: {},
-    };
-    const path = isEditing ? `/api/agents/${state.editingAgentId}` : "/api/agents";
-    const method = isEditing ? "PUT" : "POST";
-    const result = await api(path, { method, body: JSON.stringify(payload) });
-    state.agentPage.offset = 0;
-    resetAgentForm({ keepMessage: true });
-    await bootstrap();
-    if (state.taskAgentsLoaded) {
-      await ensureTaskAgentsLoaded(true);
+    const payload = buildPluginPayloadFromForm();
+    const method = state.editingPluginId ? "PUT" : "POST";
+    const path = state.editingPluginId ? `/api/agent-center/plugins/${state.editingPluginId}` : "/api/agent-center/plugins";
+    const saved = await api(path, { method, body: JSON.stringify(payload) });
+    fillPluginForm(saved);
+    await refreshAll();
+    showResult(pluginResult, { message: "插件已保存", id: saved.id });
+  } catch (error) {
+    showResult(pluginResult, { error: error.message });
+  }
+});
+
+agentTemplateForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  hideResult(agentTemplateResult);
+  try {
+    const payload = buildAgentTemplatePayloadFromForm();
+    const method = state.editingAgentTemplateId ? "PUT" : "POST";
+    const path = state.editingAgentTemplateId
+      ? `/api/agent-center/agent-templates/${state.editingAgentTemplateId}`
+      : "/api/agent-center/agent-templates";
+    const saved = await api(path, { method, body: JSON.stringify(payload) });
+    fillAgentTemplateForm(saved);
+    await refreshAll();
+    showResult(agentTemplateResult, { message: "Agent 模板已保存", id: saved.id });
+  } catch (error) {
+    showResult(agentTemplateResult, { error: error.message });
+  }
+});
+
+teamTemplateForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  hideResult(teamTemplateResult);
+  try {
+    const payload = buildTeamTemplatePayloadFromForm();
+    const method = state.editingTeamTemplateId ? "PUT" : "POST";
+    const path = state.editingTeamTemplateId
+      ? `/api/agent-center/team-templates/${state.editingTeamTemplateId}`
+      : "/api/agent-center/team-templates";
+    const saved = await api(path, { method, body: JSON.stringify(payload) });
+    fillTeamTemplateForm(saved);
+    await refreshAll();
+    showResult(teamTemplateResult, { message: "团队模板已保存", id: saved.id });
+  } catch (error) {
+    showResult(teamTemplateResult, { error: error.message });
+  }
+});
+
+buildForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  hideResult(buildResult);
+  try {
+    if (!buildTeamTemplate.value) {
+      throw new Error("请选择团队模板。");
     }
-    showJson(agentFormResult, { message: isEditing ? "Agent updated" : "Agent created", id: result.id, name: result.name });
-    switchPage("agents");
-    switchAgentModule("agents");
+    const payload = await api("/api/agent-center/builds", {
+      method: "POST",
+      body: JSON.stringify({
+        team_template_id: buildTeamTemplate.value,
+        name: buildName.value.trim() || null,
+      }),
+    });
+    state.selectedBuildId = payload.id;
+    await refreshAll();
+    await openBuild(payload.id);
+    showResult(buildResult, { message: "Build 已生成", id: payload.id, blueprint_id: payload.blueprint_id });
   } catch (error) {
-    showJson(agentFormResult, { error: error.message });
+    showResult(buildResult, { error: error.message });
   }
 });
 
-skillForm.addEventListener("submit", async (event) => {
+taskForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  hide(skillResult);
+  hideResult(taskResult);
   try {
-    const isEditing = Boolean(state.editingSkillId);
-    const payload = await buildSkillPayload();
-    const path = isEditing ? `/api/skills/${state.editingSkillId}` : "/api/skills";
-    const method = isEditing ? "PUT" : "POST";
-    const result = await api(path, { method, body: JSON.stringify(payload) });
-    resetSkillForm({ keepMessage: true });
-    await bootstrap();
-    await loadSkillDetail(result.id);
-    showJson(skillResult, { message: isEditing ? "技能已更新" : "技能已创建", id: result.id, name: result.name });
-    switchPage("knowledge");
-    switchKnowledgeModule("skills");
-  } catch (error) {
-    showJson(skillResult, { error: error.message });
-  }
-});
-
-skillSearchForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const query = skillSearchForm.elements.query.value.trim();
-  if (!query) {
-    renderSkillList();
-    return;
-  }
-  try {
-    const payload = await api(`/api/skills/search?query=${encodeURIComponent(query)}&limit=20`);
-    renderSkillList(payload.items || [], { searchMode: true });
-    switchPage("knowledge");
-    switchKnowledgeModule("skills");
-  } catch (error) {
-    showJson(skillResult, { error: error.message });
-  }
-});
-
-skillResetBtn.addEventListener("click", async () => {
-  skillSearchForm.reset();
-  await loadSkillsIndex();
-});
-
-knowledgeForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  hide(knowledgeResult);
-  try {
-    const isEditing = Boolean(state.editingKnowledgeId);
-    const payload = buildKnowledgePayload();
-    const path = isEditing ? `/api/rag/documents/${state.editingKnowledgeId}` : "/api/rag/documents";
-    const method = isEditing ? "PUT" : "POST";
-    const result = await api(path, { method, body: JSON.stringify(payload) });
-    resetKnowledgeForm({ keepMessage: true });
-    await bootstrap();
-    await loadKnowledgeDocument(result.id);
-    showJson(knowledgeResult, { message: isEditing ? "RAG 文档已更新" : "RAG 文档已创建", id: result.id, title: result.title });
-    switchPage("knowledge");
-    switchKnowledgeModule("rag");
-  } catch (error) {
-    showJson(knowledgeResult, { error: error.message });
-  }
-});
-
-knowledgeSearchForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const query = knowledgeSearchForm.elements.query.value.trim();
-  if (!query) {
-    renderKnowledgeList();
-    return;
-  }
-  try {
-    const payload = await api(`/api/rag/search?query=${encodeURIComponent(query)}&limit=20`);
-    renderKnowledgeList(payload.items || [], { searchMode: true });
-    switchPage("knowledge");
-    switchKnowledgeModule("rag");
-  } catch (error) {
-    showJson(knowledgeResult, { error: error.message });
-  }
-});
-
-knowledgeResetBtn.addEventListener("click", async () => {
-  knowledgeSearchForm.reset();
-  await loadKnowledgeIndex();
-});
-
-runForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  hide(runError);
-  await ensureTaskAgentsLoaded();
-  const selectedAgentIds = Array.from(runForm.querySelectorAll("input[name='agent_ids']:checked")).map((item) => item.value);
-  if (!selectedAgentIds.length) {
-    showJson(runError, { error: "Select at least one agent." });
-    return;
-  }
-  try {
+    if (!taskPrompt.value.trim()) {
+      throw new Error("任务描述不能为空。");
+    }
     const payload = {
-      title: runForm.elements.title.value.trim() || null,
-      prompt: runForm.elements.prompt.value.trim(),
-      rounds: Number(runForm.elements.rounds.value || 1),
-      lead_agent_id: runForm.elements.lead_agent_id.value || selectedAgentIds[0],
-      agent_ids: selectedAgentIds,
+      title: taskTitle.value.trim() || null,
+      prompt: taskPrompt.value.trim(),
+      approval_mode: taskApprovalMode.value,
     };
-    const result = await api("/api/collaborations/run", { method: "POST", body: JSON.stringify(payload) });
-    await bootstrap();
-    await loadSession(result.session.id);
-    switchPage("tasks");
+    if (taskBuild.value) {
+      payload.build_id = taskBuild.value;
+    } else if (taskBlueprint.value) {
+      payload.blueprint_id = taskBlueprint.value;
+    } else {
+      throw new Error("请选择 Build 或内部蓝图。");
+    }
+    const runBundle = await api("/api/task-releases", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    state.selectedRunId = runBundle.run.id;
+    await refreshAll();
+    await loadRunDetail(runBundle.run.id);
+    showResult(taskResult, { message: "Run 已启动", run_id: runBundle.run.id, status: runBundle.run.status });
+    switchPage("runtime");
   } catch (error) {
-    showJson(runError, { error: error.message });
+    showResult(taskResult, { error: error.message });
   }
+});
+
+providerOpenCreate.addEventListener("click", () => {
+  resetProviderForm();
+  openProviderModal();
+});
+providerModalCloseButtons.forEach((button) => button.addEventListener("click", closeProviderModal));
+providerModelEditorModalCloseButtons.forEach((button) => button.addEventListener("click", closeProviderModelEditorModal));
+providerCancel.addEventListener("click", closeProviderModal);
+providerModelNew.addEventListener("click", () => {
+  startProviderModelEditor();
+});
+providerModelReset.addEventListener("click", () => {
+  state.providerEditor.models = [];
+  renderProviderModelList();
+  resetProviderModelEditor();
+});
+providerModelCancel.addEventListener("click", closeProviderModelEditorModal);
+providerType.addEventListener("change", () => {
+  const preset = providerPreset();
+  if (preset?.default_base_url && !providerBaseUrl.value.trim()) {
+    providerBaseUrl.value = preset.default_base_url;
+  }
+});
+providerPageSize.addEventListener("change", async () => {
+  state.providerPage.limit = Number(providerPageSize.value || 10);
+  state.providerPage.offset = 0;
+  await loadProviderPage();
+  renderProviders();
+});
+providerModelSave.addEventListener("click", () => {
+  const model = readProviderModelEditor();
+  if (!model.name) {
+    showResult(providerModelTestResult, { error: "\u6a21\u578b\u540d\u79f0\u4e0d\u80fd\u4e3a\u7a7a\u3002" });
+    return;
+  }
+  const index = state.providerEditor.editingModelIndex;
+  if (index === null) {
+    state.providerEditor.models.push(model);
+  } else {
+    state.providerEditor.models[index] = model;
+  }
+  renderProviderModelList();
+  closeProviderModelEditorModal();
+});
+providerModelFetch.addEventListener("click", async () => {
+  try {
+    const payload = await api("/api/agent-center/providers/discover-models", {
+      method: "POST",
+      body: JSON.stringify(buildProviderPayloadFromForm()),
+    });
+    state.providerEditor.models = payload.items || [];
+    state.providerEditor.savedModels = clone(state.providerEditor.models);
+    renderProviderModelList();
+    resetProviderModelEditor();
+    providerResult?.classList.remove("empty");
+    showResult(providerResult, payload);
+  } catch (error) {
+    providerResult?.classList.remove("empty");
+    showResult(providerResult, { error: error.message });
+  }
+});
+providerModelTest.addEventListener("click", async () => {
+  try {
+    const payload = await api("/api/agent-center/providers/test-model", {
+      method: "POST",
+      body: JSON.stringify({
+        provider: buildProviderPayloadFromForm(),
+        model: readProviderModelEditor(),
+      }),
+    });
+    showResult(providerModelTestResult, payload);
+  } catch (error) {
+    showResult(providerModelTestResult, { error: error.message });
+  }
+});
+document.querySelector("#plugin-reset").addEventListener("click", resetPluginForm);
+document.querySelector("#agent-template-reset").addEventListener("click", resetAgentTemplateForm);
+document.querySelector("#team-template-reset").addEventListener("click", resetTeamTemplateForm);
+document.querySelector("#team-member-add").addEventListener("click", addTeamMember);
+teamGraphValidate.addEventListener("click", validateTeamGraph);
+teamGraphPreview.addEventListener("click", previewTeamGraph);
+teamGraphAutolayout.addEventListener("click", () => {
+  mutateTeamSpec((spec) => {
+    autoLayoutTeamSpec(spec);
+  });
+});
+teamNodeLink.addEventListener("click", startLinkMode);
+teamNodeDelete.addEventListener("click", deleteSelectedNode);
+
+[teamNodeId, teamNodeName, teamNodeAgent, teamNodeInstruction, teamNodeExpr, teamNodeMaxIterations, teamNodeArtifactKind, teamNodeArtifactName, teamNodeTemplate, teamNodeSource].forEach(
+  (input) => input.addEventListener("input", updateSelectedNode),
+);
+
+teamTemplateAgents.addEventListener("input", () => {
+  try {
+    const spec = ensureTeamEditorMetadata(teamEditorSpec());
+    spec.agents = safeParseJson(teamTemplateAgents.value, []);
+    state.teamEditor.spec = spec;
+    renderTeamEditor();
+  } catch (error) {
+    renderTeamTemplatePreview();
+  }
+});
+teamTemplateFlow.addEventListener("input", () => {
+  try {
+    const spec = ensureTeamEditorMetadata(teamEditorSpec());
+    spec.flow = safeParseJson(teamTemplateFlow.value, { nodes: [], edges: [] });
+    state.teamEditor.spec = spec;
+    renderTeamEditor();
+  } catch (error) {
+    renderTeamTemplatePreview();
+  }
+});
+[teamTemplateName, teamTemplateWorkspace, teamTemplateProject, teamTemplateDod, teamTemplateChecks].forEach((input) =>
+  input.addEventListener("input", () => renderTeamEditor()),
+);
+teamTemplateDescription.addEventListener("input", () => renderTeamTemplatePreview());
+
+taskBuild.addEventListener("change", () => {
+  state.selectedBuildId = taskBuild.value || null;
+});
+
+taskBlueprint.addEventListener("change", () => {
+  state.selectedBlueprintId = taskBlueprint.value || null;
 });
 
 document.addEventListener("click", async (event) => {
-  const pageTrigger = event.target.closest("[data-page-target], [data-page-link]");
-  if (pageTrigger) {
-    const pageName = pageTrigger.dataset.pageTarget || pageTrigger.dataset.pageLink;
-    if (pageName) {
-      switchPage(pageName);
-      if (pageTrigger.dataset.knowledgeModuleLink) {
-        switchKnowledgeModule(pageTrigger.dataset.knowledgeModuleLink);
-      }
-      if (pageName === "tasks") {
-        await ensureTaskAgentsLoaded();
-      }
-    }
-  }
-
-  const agentModuleTrigger = event.target.closest("[data-agent-module-target]");
-  if (agentModuleTrigger) {
-    event.preventDefault();
-    switchPage("agents");
-    switchAgentModule(agentModuleTrigger.dataset.agentModuleTarget);
+  if (!(event.target instanceof Element)) {
     return;
   }
 
-  const knowledgeModuleTrigger = event.target.closest("[data-knowledge-module-target]");
-  if (knowledgeModuleTrigger) {
-    event.preventDefault();
-    switchPage("knowledge");
-    switchKnowledgeModule(knowledgeModuleTrigger.dataset.knowledgeModuleTarget);
-    return;
-  }
-
-  const providerPageTrigger = event.target.closest("[data-page-kind='providers']");
-  if (providerPageTrigger && !providerPageTrigger.hasAttribute("disabled")) {
-    event.preventDefault();
-    await loadProviderPage({
-      offset: Number(providerPageTrigger.dataset.pageOffset || 0),
-      limit: state.providerPage.limit,
-    });
-    return;
-  }
-
-  const agentPageTrigger = event.target.closest("[data-page-kind='agents']");
-  if (agentPageTrigger && !agentPageTrigger.hasAttribute("disabled")) {
-    event.preventDefault();
-    await loadAgentPage({
-      offset: Number(agentPageTrigger.dataset.pageOffset || 0),
-      limit: state.agentPage.limit,
-    });
-    return;
-  }
-
-  const providerEditTrigger = event.target.closest("[data-provider-edit]");
-  if (providerEditTrigger) {
-    event.preventDefault();
-    populateProviderForm(providerEditTrigger.dataset.providerEdit);
-    return;
-  }
-
-  const providerDeleteTrigger = event.target.closest("[data-provider-delete]");
-  if (providerDeleteTrigger) {
-    event.preventDefault();
-    const providerId = providerDeleteTrigger.dataset.providerDelete;
-    const provider = providerById(providerId);
-    if (!provider) {
+  const providerDelete = event.target.closest("[data-provider-delete]");
+  if (providerDelete) {
+    const providerId = providerDelete.dataset.providerDelete;
+    const provider =
+      state.providerPage.items.find((item) => item.id === providerId) || state.providers.find((item) => item.id === providerId) || null;
+    const providerNameText = provider?.name || providerId;
+    if (!window.confirm(`\u786e\u8ba4\u5220\u9664\u63d0\u4f9b\u65b9\u201c${providerNameText}\u201d\uff1f`)) {
       return;
     }
-    if (!window.confirm(`Delete provider "${provider.name}"?`)) {
-      return;
-    }
-    hide(providerFormResult);
     try {
-      await api(`/api/providers/${providerId}`, { method: "DELETE" });
-      state.providerPage.offset = 0;
+      if (state.providerPage.items.length === 1 && state.providerPage.offset > 0) {
+        state.providerPage.offset = Math.max(0, state.providerPage.offset - state.providerPage.limit);
+      }
+      await api(`/api/agent-center/providers/${providerId}`, { method: "DELETE" });
       if (state.editingProviderId === providerId) {
-        resetProviderForm({ keepMessage: true });
+        resetProviderForm();
+        closeProviderModal();
       }
-      await bootstrap();
-      showJson(providerFormResult, { message: "Provider deleted", id: providerId, name: provider.name });
-      switchPage("agents");
-      switchAgentModule("providers");
+      await refreshAll();
+      providerResult?.classList.remove("empty");
+      showResult(providerResult, { message: "\u63d0\u4f9b\u65b9\u5df2\u5220\u9664", id: providerId });
     } catch (error) {
-      showJson(providerFormResult, { error: error.message });
-      switchPage("agents");
-      switchAgentModule("providers");
+      providerResult?.classList.remove("empty");
+      showResult(providerResult, { error: error.message });
     }
     return;
   }
 
-  const agentEditTrigger = event.target.closest("[data-agent-edit]");
-  if (agentEditTrigger) {
-    event.preventDefault();
-    populateAgentForm(agentEditTrigger.dataset.agentEdit);
+  const providerEdit = event.target.closest("[data-provider-edit]");
+  if (providerEdit) {
+    const provider = state.providers.find((item) => item.id === providerEdit.dataset.providerEdit);
+    if (provider) {
+      fillProviderForm(provider);
+      switchPage("providers");
+    }
     return;
   }
 
-  const agentDeleteTrigger = event.target.closest("[data-agent-delete]");
-  if (agentDeleteTrigger) {
-    event.preventDefault();
-    const agentId = agentDeleteTrigger.dataset.agentDelete;
-    const agent = agentById(agentId);
-    if (!agent) {
-      return;
+  const providerPageButton = event.target.closest("[data-provider-page]");
+  if (providerPageButton && !providerPageButton.hasAttribute("disabled")) {
+    state.providerPage.offset = Number(providerPageButton.dataset.providerPage || 0);
+    await loadProviderPage();
+    renderProviders();
+    return;
+  }
+
+  const providerModelEdit = event.target.closest("[data-provider-model-edit]");
+  if (providerModelEdit) {
+    startProviderModelEditor(Number(providerModelEdit.dataset.providerModelEdit));
+    return;
+  }
+
+  const providerModelRemove = event.target.closest("[data-provider-model-remove]");
+  if (providerModelRemove) {
+    state.providerEditor.models.splice(Number(providerModelRemove.dataset.providerModelRemove), 1);
+    renderProviderModelList();
+    resetProviderModelEditor();
+    return;
+  }
+
+  const pluginEdit = event.target.closest("[data-plugin-edit]");
+  if (pluginEdit) {
+    const plugin = state.plugins.find((item) => item.id === pluginEdit.dataset.pluginEdit);
+    if (plugin) {
+      fillPluginForm(plugin);
+      switchPage("plugins");
     }
-    if (!window.confirm(`Delete agent "${agent.name}"?`)) {
-      return;
-    }
-    hide(agentFormResult);
+    return;
+  }
+
+  const pluginValidate = event.target.closest("[data-plugin-validate]");
+  if (pluginValidate) {
     try {
-      await api(`/api/agents/${agentId}`, { method: "DELETE" });
-      state.agentPage.offset = 0;
-      if (state.editingAgentId === agentId) {
-        resetAgentForm({ keepMessage: true });
+      const plugin = state.plugins.find((item) => item.id === pluginValidate.dataset.pluginValidate);
+      if (!plugin?.install_path) {
+        throw new Error("插件未配置安装路径。");
       }
-      await bootstrap();
-      if (state.taskAgentsLoaded) {
-        await ensureTaskAgentsLoaded(true);
-      }
-      showJson(agentFormResult, { message: "Agent deleted", id: agentId, name: agent.name });
-      switchPage("agents");
-      switchAgentModule("agents");
+      const payload = await api("/api/agent-center/plugins/validate-package", {
+        method: "POST",
+        body: JSON.stringify({ path: plugin.install_path }),
+      });
+      showResult(pluginResult, payload);
+      await refreshAll();
     } catch (error) {
-      showJson(agentFormResult, { error: error.message });
-      switchPage("agents");
-      switchAgentModule("agents");
+      showResult(pluginResult, { error: error.message });
     }
     return;
   }
 
-  const skillEditTrigger = event.target.closest("[data-skill-edit]");
-  if (skillEditTrigger) {
-    event.preventDefault();
-    await populateSkillForm(skillEditTrigger.dataset.skillEdit);
-    return;
-  }
-
-  const skillDeleteTrigger = event.target.closest("[data-skill-delete]");
-  if (skillDeleteTrigger) {
-    event.preventDefault();
-    const skillId = skillDeleteTrigger.dataset.skillDelete;
-    const skill = skillById(skillId);
-    if (!skill) {
-      return;
-    }
-    if (!window.confirm(`确认删除技能“${skill.name}”吗？`)) {
-      return;
-    }
-    hide(skillResult);
+  const pluginInstall = event.target.closest("[data-plugin-install]");
+  if (pluginInstall) {
     try {
-      await api(`/api/skills/${skillId}`, { method: "DELETE" });
-      if (state.editingSkillId === skillId) {
-        resetSkillForm({ keepMessage: true });
-      }
-      if (state.activeSkillId === skillId) {
-        state.activeSkillId = null;
-        skillDetail.classList.add("empty");
-        skillDetail.textContent = "选择一个技能查看详情。";
-      }
-      await bootstrap();
-      showJson(skillResult, { message: "技能已删除", id: skillId, name: skill.name });
-      switchPage("knowledge");
-      switchKnowledgeModule("skills");
+      const payload = await api(`/api/agent-center/plugins/${pluginInstall.dataset.pluginInstall}/install`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      showResult(pluginResult, payload);
+      await refreshAll();
     } catch (error) {
-      showJson(skillResult, { error: error.message });
-      switchPage("knowledge");
-      switchKnowledgeModule("skills");
+      showResult(pluginResult, { error: error.message });
     }
     return;
   }
 
-  const knowledgeEditTrigger = event.target.closest("[data-knowledge-edit]");
-  if (knowledgeEditTrigger) {
-    event.preventDefault();
-    await populateKnowledgeForm(knowledgeEditTrigger.dataset.knowledgeEdit);
-    return;
-  }
-
-  const knowledgeDeleteTrigger = event.target.closest("[data-knowledge-delete]");
-  if (knowledgeDeleteTrigger) {
-    event.preventDefault();
-    const documentId = knowledgeDeleteTrigger.dataset.knowledgeDelete;
-    const document = state.knowledgeDocuments.find((item) => item.id === documentId) || { id: documentId, title: documentId };
-    if (!window.confirm(`确认删除 RAG 文档“${document.title}”吗？`)) {
-      return;
-    }
-    hide(knowledgeResult);
+  const pluginLoad = event.target.closest("[data-plugin-load]");
+  if (pluginLoad) {
     try {
-      await api(`/api/rag/documents/${documentId}`, { method: "DELETE" });
-      if (state.editingKnowledgeId === documentId) {
-        resetKnowledgeForm({ keepMessage: true });
-      }
-      if (state.activeKnowledgeId === documentId) {
-        state.activeKnowledgeId = null;
-        knowledgeDetail.classList.add("empty");
-        knowledgeDetail.textContent = "选择一个 RAG 文档或检索命中查看详情。";
-      }
-      await bootstrap();
-      showJson(knowledgeResult, { message: "RAG 文档已删除", id: documentId, title: document.title });
-      switchPage("knowledge");
-      switchKnowledgeModule("rag");
+      const payload = await api(`/api/agent-center/plugins/${pluginLoad.dataset.pluginLoad}/load`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      showResult(pluginResult, payload);
+      await refreshAll();
     } catch (error) {
-      showJson(knowledgeResult, { error: error.message });
-      switchPage("knowledge");
-      switchKnowledgeModule("rag");
+      showResult(pluginResult, { error: error.message });
     }
     return;
   }
 
-  const sessionTrigger = event.target.closest("[data-session-id]");
-  if (sessionTrigger) {
-    event.preventDefault();
-    switchPage("tasks");
-    await ensureTaskAgentsLoaded();
-    await loadSession(sessionTrigger.dataset.sessionId);
+  const pluginReload = event.target.closest("[data-plugin-reload]");
+  if (pluginReload) {
+    try {
+      const payload = await api(`/api/agent-center/plugins/${pluginReload.dataset.pluginReload}/reload`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      showResult(pluginResult, payload);
+      await refreshAll();
+    } catch (error) {
+      showResult(pluginResult, { error: error.message });
+    }
     return;
   }
 
-  const memoryTrigger = event.target.closest("[data-memory-agent]");
-  if (memoryTrigger) {
-    event.preventDefault();
-    switchPage("tasks");
-    await ensureTaskAgentsLoaded();
-    await loadAgentMemory(memoryTrigger.dataset.memoryAgent);
+  const pluginHealth = event.target.closest("[data-plugin-health]");
+  if (pluginHealth) {
+    try {
+      const payload = await api(`/api/agent-center/plugins/${pluginHealth.dataset.pluginHealth}/health`);
+      showResult(pluginResult, payload);
+      await refreshAll();
+    } catch (error) {
+      showResult(pluginResult, { error: error.message });
+    }
     return;
   }
 
-  const skillTrigger = event.target.closest("[data-skill-id]");
-  if (skillTrigger) {
-    event.preventDefault();
-    switchPage("knowledge");
-    switchKnowledgeModule("skills");
-    await loadSkillDetail(skillTrigger.dataset.skillId);
+  const nodePalette = event.target.closest("[data-node-type]");
+  if (nodePalette) {
+    addGraphNode(nodePalette.dataset.nodeType);
     return;
   }
 
-  const knowledgeTrigger = event.target.closest("[data-knowledge-id]");
-  if (knowledgeTrigger) {
-    event.preventDefault();
-    switchPage("knowledge");
-    switchKnowledgeModule("rag");
-    await loadKnowledgeDocument(knowledgeTrigger.dataset.knowledgeId);
+  const memberRemove = event.target.closest("[data-team-member-remove]");
+  if (memberRemove) {
+    removeMember(memberRemove.dataset.teamMemberRemove);
+    return;
+  }
+
+  const edgeRemove = event.target.closest("[data-edge-from][data-edge-to]");
+  if (edgeRemove && edgeRemove.hasAttribute("data-team-edge-remove")) {
+    removeEdge(edgeRemove.dataset.edgeFrom, edgeRemove.dataset.edgeTo);
+    return;
+  }
+
+  const agentTemplateEdit = event.target.closest("[data-agent-template-edit]");
+  if (agentTemplateEdit) {
+    const template = state.agentTemplates.find((item) => item.id === agentTemplateEdit.dataset.agentTemplateEdit);
+    if (template) {
+      fillAgentTemplateForm(template);
+      switchPage("agent-templates");
+    }
+    return;
+  }
+
+  const teamTemplateEdit = event.target.closest("[data-team-template-edit]");
+  if (teamTemplateEdit) {
+    const template = state.teamTemplates.find((item) => item.id === teamTemplateEdit.dataset.teamTemplateEdit);
+    if (template) {
+      fillTeamTemplateForm(template);
+      switchPage("team-templates");
+    }
+    return;
+  }
+
+  const teamBuild = event.target.closest("[data-team-build]");
+  if (teamBuild) {
+    try {
+      const payload = await api(`/api/agent-center/team-templates/${teamBuild.dataset.teamBuild}/build`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      state.selectedBuildId = payload.id;
+      await refreshAll();
+      await openBuild(payload.id);
+      switchPage("builds");
+    } catch (error) {
+      showResult(buildResult, { error: error.message });
+    }
+    return;
+  }
+
+  const buildOpen = event.target.closest("[data-build-open]");
+  if (buildOpen) {
+    await openBuild(buildOpen.dataset.buildOpen);
+    switchPage("builds");
+    return;
+  }
+
+  const buildUse = event.target.closest("[data-build-use]");
+  if (buildUse) {
+    state.selectedBuildId = buildUse.dataset.buildUse;
+    populateTaskOptions();
+    switchPage("runtime");
+    return;
+  }
+
+  const blueprintOpen = event.target.closest("[data-blueprint-open]");
+  if (blueprintOpen) {
+    await openBlueprint(blueprintOpen.dataset.blueprintOpen);
+    switchPage("blueprints");
+    return;
+  }
+
+  const blueprintUse = event.target.closest("[data-blueprint-use]");
+  if (blueprintUse) {
+    state.selectedBlueprintId = blueprintUse.dataset.blueprintUse;
+    populateTaskOptions();
+    switchPage("runtime");
+    return;
+  }
+
+  const runOpen = event.target.closest("[data-run-open]");
+  if (runOpen) {
+    await loadRunDetail(runOpen.dataset.runOpen);
+    renderRuns();
+    switchPage("runtime");
+    return;
+  }
+
+  const runResume = event.target.closest("[data-run-resume]");
+  if (runResume) {
+    try {
+      const payload = await api(`/api/runs/${runResume.dataset.runResume}/resume`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      state.selectedRunId = payload.run.id;
+      await refreshAll();
+      await loadRunDetail(payload.run.id);
+      switchPage("runtime");
+    } catch (error) {
+      showResult(taskResult, { error: error.message });
+    }
+    return;
+  }
+
+  const approveButton = event.target.closest("[data-approval-approve]");
+  if (approveButton) {
+    try {
+      await api(`/api/approvals/${approveButton.dataset.approvalApprove}/resolve`, {
+        method: "POST",
+        body: JSON.stringify({ approved: true, comment: "Approved from control plane." }),
+      });
+      const payload = await api(`/api/runs/${approveButton.dataset.runId}/resume`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      state.selectedRunId = payload.run.id;
+      await refreshAll();
+      await loadRunDetail(payload.run.id);
+      switchPage("runtime");
+    } catch (error) {
+      showResult(taskResult, { error: error.message });
+    }
+    return;
+  }
+
+  const rejectButton = event.target.closest("[data-approval-reject]");
+  if (rejectButton) {
+    try {
+      await api(`/api/approvals/${rejectButton.dataset.approvalReject}/resolve`, {
+        method: "POST",
+        body: JSON.stringify({ approved: false, comment: "Rejected from control plane." }),
+      });
+      const payload = await api(`/api/runs/${rejectButton.dataset.runId}/resume`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      state.selectedRunId = payload.run.id;
+      await refreshAll();
+      await loadRunDetail(payload.run.id);
+      switchPage("runtime");
+    } catch (error) {
+      showResult(taskResult, { error: error.message });
+    }
   }
 });
 
-switchPage("home");
-switchAgentModule("providers");
-switchKnowledgeModule("skills");
-bootstrap().catch((error) => {
-  showJson(runError, { error: error.message });
+document.addEventListener("input", (event) => {
+  if (!(event.target instanceof Element)) {
+    return;
+  }
+  const memberField = event.target.closest("[data-team-member-field]");
+  if (memberField) {
+    updateMemberField(Number(memberField.dataset.memberIndex), memberField.dataset.teamMemberField, memberField.value);
+    return;
+  }
+  const edgeWhen = event.target.closest("[data-team-edge-when]");
+  if (edgeWhen) {
+    updateEdgeWhen(edgeWhen.dataset.edgeFrom, edgeWhen.dataset.edgeTo, edgeWhen.value);
+  }
 });
+
+document.addEventListener("change", (event) => {
+  if (!(event.target instanceof Element)) {
+    return;
+  }
+  const memberField = event.target.closest("[data-team-member-field]");
+  if (memberField) {
+    updateMemberField(Number(memberField.dataset.memberIndex), memberField.dataset.teamMemberField, memberField.value);
+  }
+});
+
+document.addEventListener("pointerdown", (event) => {
+  if (!(event.target instanceof Element)) {
+    return;
+  }
+  const node = event.target.closest(".graph-node");
+  if (!node) {
+    return;
+  }
+  const nodeId = node.dataset.nodeId;
+  if (state.teamEditor.linkFromNodeId) {
+    connectNodes(state.teamEditor.linkFromNodeId, nodeId);
+    return;
+  }
+  const spec = teamEditorSpec();
+  const position = spec.metadata?.ui_layout?.positions?.[nodeId];
+  if (!position) {
+    return;
+  }
+  state.teamEditor.selectedNodeId = nodeId;
+  state.teamEditor.drag = {
+    nodeId,
+    startX: event.clientX,
+    startY: event.clientY,
+    originX: position.x,
+    originY: position.y,
+  };
+  renderTeamEditor();
+});
+
+window.addEventListener("pointermove", (event) => {
+  const drag = state.teamEditor.drag;
+  if (!drag) {
+    return;
+  }
+  const spec = teamEditorSpec();
+  const positions = spec.metadata?.ui_layout?.positions || {};
+  positions[drag.nodeId] = {
+    x: Math.max(16, drag.originX + (event.clientX - drag.startX)),
+    y: Math.max(16, drag.originY + (event.clientY - drag.startY)),
+  };
+  state.teamEditor.spec = spec;
+  renderTeamGraph();
+});
+
+window.addEventListener("pointerup", () => {
+  if (!state.teamEditor.drag) {
+    return;
+  }
+  state.teamEditor.drag = null;
+  syncTeamEditorToForm();
+  renderTeamTemplatePreview();
+});
+
+(async function bootstrap() {
+  try {
+    switchPage(state.activePage);
+    await refreshAll();
+    resetProviderForm();
+    resetPluginForm();
+    resetAgentTemplateForm();
+    resetTeamTemplateForm();
+  } catch (error) {
+    showResult(taskResult, { error: error.message });
+  }
+})();

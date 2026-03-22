@@ -1,0 +1,17 @@
+RUN_CREATED = "run.created"
+RUN_PAUSED = "run.paused"
+RUN_FAILED = "run.failed"
+RUN_COMPLETED = "run.completed"
+
+STEP_STARTED = "step.started"
+STEP_COMPLETED = "step.completed"
+STEP_BLOCKED = "step.blocked"
+STEP_FAILED = "step.failed"
+
+AGENT_MESSAGE = "agent.message"
+ARTIFACT_CREATED = "artifact.created"
+APPROVAL_REQUESTED = "approval.requested"
+APPROVAL_RESOLVED = "approval.resolved"
+PLUGIN_LOADED = "plugin.loaded"
+PLUGIN_INVOKED = "plugin.invoked"
+PLUGIN_FAILED = "plugin.failed"

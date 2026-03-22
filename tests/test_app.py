@@ -1,32 +1,33 @@
 from __future__ import annotations
 
-import base64
 import json
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
-from aiteams.app import create_app
-from aiteams.config import AppSettings
+from aiteams.app import AppSettings, create_app
+from aiteams.domain.templates import approval_delivery_template, research_parallel_template, software_delivery_template
 
 
-class AITeamsAppTests(unittest.TestCase):
+class AITeamsPlatformTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tempdir = tempfile.TemporaryDirectory()
         root = Path(self._tempdir.name)
         data_dir = root / "data"
-        aimemory_root = data_dir / "aimemory"
-        data_dir.mkdir(parents=True, exist_ok=True)
-        aimemory_root.mkdir(parents=True, exist_ok=True)
+        memory_root = data_dir / "aimemory"
+        workspace_root = data_dir / "workspaces"
+        for path in (data_dir, memory_root, workspace_root):
+            path.mkdir(parents=True, exist_ok=True)
         settings = AppSettings(
             project_root=root,
             data_dir=data_dir,
-            platform_db_path=data_dir / "platform.db",
-            aimemory_root=aimemory_root,
-            aimemory_sqlite_path=aimemory_root / "aimemory.db",
+            metadata_db_path=data_dir / "platform.db",
+            memory_root=memory_root,
+            workspace_root=workspace_root,
             static_dir=Path(__file__).resolve().parents[1] / "aiteams" / "static",
         )
+        self._settings = settings
         self._app = create_app(settings)
 
     def tearDown(self) -> None:
@@ -39,660 +40,730 @@ class AITeamsAppTests(unittest.TestCase):
         parsed = json.loads(response.body.decode("utf-8")) if response.body else {}
         return response.status, parsed
 
-    def test_collaboration_persists_platform_records_and_memories(self) -> None:
-        provider_status, provider = self._request(
+    def _create_blueprint(self, spec: dict) -> dict:
+        status, payload = self._request("POST", "/api/blueprints", {"spec": spec, "raw_format": "json"})
+        self.assertEqual(status, 200)
+        return payload
+
+    def _create_plugin_package(self, *, name: str, code_tag: str) -> Path:
+        root = Path(self._tempdir.name) / name
+        backend = root / "backend"
+        backend.mkdir(parents=True, exist_ok=True)
+        (backend / "__init__.py").write_text("", encoding="utf-8")
+        (root / "plugin.yaml").write_text(
+            textwrap.dedent(
+                f"""
+                key: {name}
+                name: {name}
+                version: v1
+                plugin_type: toolset
+                entrypoint: backend.entry:EchoPlugin
+                workbench_key: {name}
+                tools:
+                  - echo
+                permissions:
+                  - readonly
+                actions:
+                  - name: echo
+                    description: echo payload
+                hot_reload: true
+                """
+            ).strip()
+            + "\n",
+            encoding="utf-8",
+        )
+        (backend / "entry.py").write_text(
+            textwrap.dedent(
+                f"""
+                class EchoPlugin:
+                    def __init__(self, *, manifest, root_path):
+                        self.manifest = manifest
+                        self.root_path = root_path
+
+                    def describe(self):
+                        return {{
+                            "key": self.manifest["key"],
+                            "tools": ["echo"],
+                            "permissions": ["readonly"],
+                            "actions": [{{"name": "echo", "description": "echo payload"}}],
+                        }}
+
+                    def health(self):
+                        return {{"status": "ok", "code_tag": "{code_tag}"}}
+
+                    def invoke(self, action, payload, context):
+                        return {{
+                            "action": action,
+                            "payload": payload,
+                            "context_node": context.get("node_id"),
+                            "code_tag": "{code_tag}",
+                        }}
+
+                    def shutdown(self):
+                        return {{"status": "bye"}}
+                """
+            ).strip()
+            + "\n",
+            encoding="utf-8",
+        )
+        return root
+
+    def _restart_app(self) -> None:
+        self._app.close()
+        self._app = create_app(self._settings)
+
+    def test_software_delivery_blueprint_completes_and_writes_artifacts_and_memory(self) -> None:
+        blueprint = self._create_blueprint(software_delivery_template())
+
+        status, bundle = self._request(
             "POST",
-            "/api/providers",
+            "/api/task-releases",
             {
-                "name": "Mock Provider",
-                "provider_type": "mock",
-                "base_url": "mock://local",
-                "api_key": "",
-                "model": "mock-model",
-                "extra_headers": {},
-                "extra_config": {},
+                "blueprint_id": blueprint["id"],
+                "title": "Refactor AiTeams",
+                "prompt": "Rebuild AiTeams as a Python multi-agent collaboration platform.",
+                "approval_mode": "auto",
             },
         )
-        self.assertEqual(provider_status, 200)
-        provider_id = provider["id"]
+        self.assertEqual(status, 200)
+        self.assertEqual(bundle["run"]["status"], "completed")
+        self.assertGreaterEqual(len(bundle["steps"]), 8)
+        self.assertEqual(len(bundle["artifacts"]), 1)
 
-        planner_status, planner = self._request(
+        plan_step = next(step for step in bundle["steps"] if step["node_id"] == "plan")
+        self.assertEqual(plan_step["output_json"]["details"]["role_template"], "strategy_planner")
+
+        run_id = bundle["run"]["id"]
+        detail_status, detail = self._request("GET", f"/api/runs/{run_id}")
+        self.assertEqual(detail_status, 200)
+        self.assertEqual(detail["run"]["status"], "completed")
+        self.assertTrue(any(item["relative_path"].startswith("artifacts/") for item in detail["workspace_files"]))
+
+        memory_status, memory = self._request(
+            "GET",
+            f"/api/memory/search?workspace_id=local-workspace&project_id=default-project&run_id={run_id}&agent_id=planner&query=delivery",
+        )
+        self.assertEqual(memory_status, 200)
+        self.assertGreaterEqual(len(memory["items"]), 1)
+
+    def test_manual_approval_can_be_resolved_and_run_resumed(self) -> None:
+        blueprint = self._create_blueprint(approval_delivery_template())
+
+        status, bundle = self._request(
             "POST",
-            "/api/agents",
+            "/api/task-releases",
             {
-                "name": "Planner",
-                "role": "planner",
-                "system_prompt": "Design execution plans with milestones.",
-                "provider_id": provider_id,
-                "temperature": 0.1,
+                "blueprint_id": blueprint["id"],
+                "prompt": "Create a plan that requires manual approval before delivery.",
+                "approval_mode": "manual",
             },
         )
-        self.assertEqual(planner_status, 200)
-        planner_id = planner["id"]
+        self.assertEqual(status, 200)
+        self.assertEqual(bundle["run"]["status"], "waiting_approval")
+        self.assertEqual(len(bundle["approvals"]), 1)
 
-        reviewer_status, reviewer = self._request(
+        approval_id = bundle["approvals"][0]["id"]
+        resolve_status, resolved = self._request(
             "POST",
-            "/api/agents",
+            f"/api/approvals/{approval_id}/resolve",
+            {"approved": True, "comment": "Continue the run."},
+        )
+        self.assertEqual(resolve_status, 200)
+        self.assertEqual(resolved["status"], "approved")
+
+        resume_status, resumed = self._request("POST", f"/api/runs/{bundle['run']['id']}/resume", {})
+        self.assertEqual(resume_status, 200)
+        self.assertEqual(resumed["run"]["status"], "completed")
+        self.assertEqual(len(resumed["artifacts"]), 1)
+
+    def test_manual_approval_rejection_marks_run_failed_after_resume(self) -> None:
+        blueprint = self._create_blueprint(approval_delivery_template())
+
+        status, bundle = self._request(
+            "POST",
+            "/api/task-releases",
             {
-                "name": "Reviewer",
-                "role": "reviewer",
-                "system_prompt": "Synthesize specialist outputs into a final answer.",
-                "provider_id": provider_id,
-                "temperature": 0.1,
+                "blueprint_id": blueprint["id"],
+                "prompt": "Create a plan that requires manual approval before delivery.",
+                "approval_mode": "manual",
             },
         )
-        self.assertEqual(reviewer_status, 200)
-        reviewer_id = reviewer["id"]
+        self.assertEqual(status, 200)
+        self.assertEqual(bundle["run"]["status"], "waiting_approval")
+        self.assertEqual(len(bundle["approvals"]), 1)
 
-        run_status, payload = self._request(
+        approval_id = bundle["approvals"][0]["id"]
+        resolve_status, resolved = self._request(
             "POST",
-            "/api/collaborations/run",
+            f"/api/approvals/{approval_id}/resolve",
+            {"approved": False, "comment": "Reject this delivery."},
+        )
+        self.assertEqual(resolve_status, 200)
+        self.assertEqual(resolved["status"], "rejected")
+
+        resume_status, resumed = self._request("POST", f"/api/runs/{bundle['run']['id']}/resume", {})
+        self.assertEqual(resume_status, 200)
+        self.assertEqual(resumed["run"]["status"], "failed")
+        self.assertEqual(resumed["approvals"][0]["status"], "rejected")
+
+    def test_parallel_blueprint_merges_branch_outputs_and_keeps_branches_isolated(self) -> None:
+        blueprint = self._create_blueprint(research_parallel_template())
+
+        status, bundle = self._request(
+            "POST",
+            "/api/task-releases",
             {
-                "title": "Launch Plan",
-                "prompt": "Create an implementation plan and risk list for a new multi-agent product.",
-                "agent_ids": [planner_id, reviewer_id],
-                "lead_agent_id": reviewer_id,
-                "rounds": 1,
+                "blueprint_id": blueprint["id"],
+                "prompt": "Evaluate a configurable multi-agent platform for complex engineering delivery.",
+                "approval_mode": "auto",
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(bundle["run"]["status"], "completed")
+
+        topic_step = next(step for step in bundle["steps"] if step["node_id"] == "topic_research")
+        synth_step = next(step for step in bundle["steps"] if step["node_id"] == "synthesize")
+        merge_step = next(step for step in bundle["steps"] if step["node_id"] == "merge")
+
+        self.assertEqual(merge_step["output_json"]["branch_count"], 2)
+        self.assertNotIn("risk_research", topic_step["output_json"]["visible_output_ids"])
+        self.assertIn("topic_research", synth_step["output_json"]["visible_output_ids"])
+        self.assertIn("risk_research", synth_step["output_json"]["visible_output_ids"])
+
+    def test_templates_endpoint_returns_builtin_blueprints_with_role_templates(self) -> None:
+        status, payload = self._request("GET", "/api/blueprints/templates")
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(len(payload["items"]), 3)
+        self.assertGreaterEqual(len(payload["items"][0]["spec"]["role_templates"]), 1)
+
+    def test_control_plane_reports_sqlite_storage(self) -> None:
+        status, payload = self._request("GET", "/api/control-plane")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["storage"]["metadata_driver"], "sqlite")
+        self.assertEqual(payload["storage"]["journal_mode"], "wal")
+        self.assertTrue(payload["storage"]["metadata_path"].endswith("platform.db"))
+
+    def test_validate_endpoint_reports_graph_scoped_compilation(self) -> None:
+        status, payload = self._request(
+            "POST",
+            "/api/blueprints/validate",
+            {"spec": research_parallel_template(), "raw_format": "json"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["compiled"]["communication_mode"], "graph-ancestor-scoped")
+        self.assertGreaterEqual(payload["compiled"]["role_template_count"], 1)
+        self.assertGreaterEqual(payload["compiled"]["agent_count"], 1)
+
+    def test_agent_center_defaults_are_seeded(self) -> None:
+        status, provider_types = self._request("GET", "/api/agent-center/provider-types")
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(len(provider_types["items"]), 1)
+        supported_modes = {item["provider_type"] for item in provider_types["items"]}
+        self.assertTrue({"openai", "azure_openai", "anthropic", "gemini", "cohere", "custom_openai", "mock"}.issubset(supported_modes))
+
+        status, providers = self._request("GET", "/api/agent-center/providers")
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(len(providers["items"]), 1)
+
+        status, plugins = self._request("GET", "/api/agent-center/plugins")
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(len(plugins["items"]), 1)
+
+        status, agent_templates = self._request("GET", "/api/agent-center/agent-templates")
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(len(agent_templates["items"]), 1)
+
+        status, team_templates = self._request("GET", "/api/agent-center/team-templates")
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(len(team_templates["items"]), 1)
+
+    def test_deleted_default_mock_provider_is_not_reseeded_after_restart(self) -> None:
+        status, providers = self._request("GET", "/api/agent-center/providers")
+        self.assertEqual(status, 200)
+        mock_provider = next((item for item in providers["items"] if item["id"] == "prov_mock_local"), None)
+        self.assertIsNotNone(mock_provider)
+
+        delete_status, deleted = self._request("DELETE", "/api/agent-center/providers/prov_mock_local")
+        self.assertEqual(delete_status, 200)
+        self.assertTrue(deleted["deleted"])
+
+        self._restart_app()
+
+        reload_status, reloaded_providers = self._request("GET", "/api/agent-center/providers")
+        self.assertEqual(reload_status, 200)
+        self.assertFalse(any(item["id"] == "prov_mock_local" for item in reloaded_providers["items"]))
+
+    def test_team_template_build_creates_blueprint_snapshot_and_run(self) -> None:
+        status, team_templates = self._request("GET", "/api/agent-center/team-templates")
+        self.assertEqual(status, 200)
+        team_template_id = team_templates["items"][0]["id"]
+
+        build_status, build = self._request(
+            "POST",
+            "/api/agent-center/builds",
+            {"team_template_id": team_template_id, "name": "software_delivery_build"},
+        )
+        self.assertEqual(build_status, 200)
+        self.assertIsNotNone(build.get("blueprint_id"))
+        self.assertGreaterEqual(len(build["resource_lock_json"].get("agent_templates", [])), 1)
+
+        blueprint_status, blueprint = self._request("GET", f"/api/blueprints/{build['blueprint_id']}")
+        self.assertEqual(blueprint_status, 200)
+        self.assertEqual(blueprint["spec_json"]["metadata"]["communication_policy"], "graph-ancestor-scoped")
+
+        run_status, bundle = self._request(
+            "POST",
+            "/api/task-releases",
+            {
+                "build_id": build["id"],
+                "title": "Build driven delivery",
+                "prompt": "Use the compiled team build to drive delivery.",
+                "approval_mode": "auto",
             },
         )
         self.assertEqual(run_status, 200)
-        self.assertEqual(payload["session"]["status"], "completed")
-        self.assertGreaterEqual(len(payload["messages"]), 3)
-        self.assertTrue(payload["session"]["final_summary"])
+        self.assertEqual(bundle["run"]["status"], "completed")
+        self.assertGreaterEqual(len(bundle["steps"]), 1)
 
-        memory_status, memories = self._request("GET", f"/api/agents/{planner_id}/memory?query=implementation%20plan&limit=5")
-        self.assertEqual(memory_status, 200)
-        self.assertGreaterEqual(len(memories["results"]), 1)
-
-    def test_knowledge_endpoints_store_and_search_documents(self) -> None:
-        create_status, created = self._request(
+    def test_custom_agent_center_resources_can_be_created_and_built(self) -> None:
+        status, provider = self._request(
             "POST",
-            "/api/knowledge",
+            "/api/agent-center/providers",
             {
-                "title": "Platform Collaboration Spec",
-                "text": "Lead Agent summarizes work, specialists provide analysis, and shared knowledge is stored in the platform knowledge base.",
+                "key": "custom_mock_provider",
+                "name": "自定义 Mock",
+                "provider_type": "mock",
+                "description": "Custom provider",
+                "config": {"model": "mock-model", "backend": "mock", "base_url": "mock://local"},
             },
         )
-        self.assertEqual(create_status, 200)
-        self.assertTrue(created["id"])
+        self.assertEqual(status, 200)
 
-        list_status, listed = self._request("GET", "/api/knowledge?limit=10")
-        self.assertEqual(list_status, 200)
-        self.assertGreaterEqual(listed["count"], 1)
-
-        search_status, searched = self._request("GET", "/api/knowledge/search?query=Lead%20Agent&limit=5")
-        self.assertEqual(search_status, 200)
-        self.assertGreaterEqual(searched["count"], 1)
-
-        detail_status, detail = self._request("GET", f"/api/knowledge/{created['id']}")
-        self.assertEqual(detail_status, 200)
-        self.assertEqual(detail["title"], "Platform Collaboration Spec")
-
-    def test_skill_and_rag_endpoints_support_crud_and_search(self) -> None:
-        skill_status, skill = self._request(
+        status, plugin = self._request(
             "POST",
-            "/api/skills",
+            "/api/agent-center/plugins",
             {
-                "name": "RAG Planner",
-                "description": "Plan retrieval augmented generation workflows.",
-                "prompt_template": "Summarize the best retrieval plan.",
-                "workflow": {"steps": ["collect", "rank", "compose"]},
-                "tools": ["web.search", "rag.lookup"],
-                "topics": ["rag", "retrieval"],
-                "status": "draft",
+                "key": "custom_docs_kit",
+                "name": "自定义文档插件",
                 "version": "v1",
+                "plugin_type": "toolset",
+                "description": "Docs toolset",
+                "manifest": {
+                    "workbench_key": "docs_custom",
+                    "tools": ["docs", "search"],
+                    "permissions": ["readonly"],
+                    "description": "Docs workbench",
+                },
             },
         )
-        self.assertEqual(skill_status, 200)
-        self.assertEqual(skill["name"], "RAG Planner")
-        self.assertEqual(skill["status"], "draft")
-        skill_id = skill["id"]
+        self.assertEqual(status, 200)
 
-        skill_list_status, skill_list = self._request("GET", "/api/skills?limit=10")
-        self.assertEqual(skill_list_status, 200)
-        self.assertGreaterEqual(skill_list["count"], 1)
-
-        skill_search_status, skill_search = self._request("GET", "/api/skills/search?query=retrieval&limit=5")
-        self.assertEqual(skill_search_status, 200)
-        self.assertGreaterEqual(skill_search["count"], 1)
-
-        skill_detail_status, skill_detail = self._request("GET", f"/api/skills/{skill_id}")
-        self.assertEqual(skill_detail_status, 200)
-        self.assertEqual(skill_detail["name"], "RAG Planner")
-        self.assertEqual(len(skill_detail.get("versions", [])), 1)
-
-        skill_update_status, updated_skill = self._request(
-            "PUT",
-            f"/api/skills/{skill_id}",
-            {
-                "name": "RAG Planner Pro",
-                "description": "Plan retrieval and synthesis workflows.",
-                "prompt_template": "Produce the final RAG plan.",
-                "workflow": "collect -> rerank -> answer",
-                "tools": ["rag.lookup", "memory.search"],
-                "topics": ["rag", "answering"],
-                "status": "active",
-                "version": "v2",
-            },
-        )
-        self.assertEqual(skill_update_status, 200)
-        self.assertEqual(updated_skill["name"], "RAG Planner Pro")
-        self.assertEqual(updated_skill["status"], "active")
-        self.assertGreaterEqual(len(updated_skill.get("versions", [])), 2)
-
-        delete_skill_status, deleted_skill = self._request("DELETE", f"/api/skills/{skill_id}")
-        self.assertEqual(delete_skill_status, 200)
-        self.assertTrue(deleted_skill["deleted"])
-
-        missing_skill_status, missing_skill = self._request("GET", f"/api/skills/{skill_id}")
-        self.assertEqual(missing_skill_status, 404)
-        self.assertIn("does not exist", missing_skill["detail"])
-
-        rag_create_status, rag_document = self._request(
+        status, agent_template = self._request(
             "POST",
-            "/api/rag/documents",
+            "/api/agent-center/agent-templates",
             {
-                "title": "Platform RAG Guide",
-                "source_name": "manual",
-                "text": "Use SQLite for metadata, aimemory for chunks, and retrieve before answering.",
+                "key": "custom_planner",
+                "name": "自定义规划师",
+                "role": "planner",
+                "description": "Custom planner",
+                "spec": {
+                    "goal": "Plan the work.",
+                    "instructions": "Return a structured plan.",
+                    "provider_ref": provider["id"],
+                    "model": "mock-plan",
+                    "memory_policy": "agent_private",
+                    "plugin_refs": [plugin["id"]],
+                    "skills": ["planning"],
+                },
             },
         )
-        self.assertEqual(rag_create_status, 200)
-        self.assertEqual(rag_document["title"], "Platform RAG Guide")
-        rag_document_id = rag_document["id"]
+        self.assertEqual(status, 200)
 
-        rag_list_status, rag_list = self._request("GET", "/api/rag/documents?limit=10")
-        self.assertEqual(rag_list_status, 200)
-        self.assertGreaterEqual(rag_list["count"], 1)
-
-        rag_search_status, rag_search = self._request("GET", "/api/rag/search?query=retrieve&limit=5")
-        self.assertEqual(rag_search_status, 200)
-        self.assertGreaterEqual(rag_search["count"], 1)
-
-        rag_detail_status, rag_detail = self._request("GET", f"/api/rag/documents/{rag_document_id}")
-        self.assertEqual(rag_detail_status, 200)
-        self.assertEqual(rag_detail["title"], "Platform RAG Guide")
-
-        rag_update_status, updated_rag = self._request(
-            "PUT",
-            f"/api/rag/documents/{rag_document_id}",
-            {
-                "title": "Platform RAG Guide v2",
-                "source_name": "playbook",
-                "text": "Use SQLite for metadata, aimemory for chunk storage, and rerank before answering.",
-            },
-        )
-        self.assertEqual(rag_update_status, 200)
-        self.assertEqual(updated_rag["title"], "Platform RAG Guide v2")
-
-        delete_rag_status, deleted_rag = self._request("DELETE", f"/api/rag/documents/{rag_document_id}")
-        self.assertEqual(delete_rag_status, 200)
-        self.assertTrue(deleted_rag["deleted"])
-
-        missing_rag_status, missing_rag = self._request("GET", f"/api/rag/documents/{rag_document_id}")
-        self.assertEqual(missing_rag_status, 404)
-        self.assertIn("does not exist", missing_rag["detail"])
-
-    def test_skill_import_endpoint_stores_skill_markdown_and_assets(self) -> None:
-        guide_b64 = base64.b64encode(b"# Guide\n\nReference content").decode("ascii")
-        script_b64 = base64.b64encode(b"print('hello')\n").decode("ascii")
-        template_b64 = base64.b64encode(b"TEMPLATE=ready\n").decode("ascii")
-
-        import_status, imported = self._request(
-            "POST",
-            "/api/skills/import",
-            {
-                "items": [
-                    {
-                        "folder_name": "rag-planner",
-                        "source_kind": "single-folder-import",
-                        "skill_markdown": "---\nname: rag-planner\ndescription: Imported planning skill.\n---\n\n# RAG Planner\n\nUse the references before answering.\n",
-                        "assets": [
-                            {
-                                "relative_path": "references/guide.md",
-                                "mime_type": "text/markdown",
-                                "content_base64": guide_b64,
-                            },
-                            {
-                                "relative_path": "scripts/run.py",
-                                "mime_type": "text/x-python",
-                                "content_base64": script_b64,
-                            },
-                        ],
-                    }
-                ]
-            },
-        )
-        self.assertEqual(import_status, 200)
-        self.assertEqual(imported["count"], 1)
-        self.assertEqual(imported["error_count"], 0)
-        created = imported["items"][0]
-        self.assertEqual(created["name"], "rag-planner")
-        self.assertEqual(created["source_kind"], "single-folder-import")
-        self.assertEqual(created["folder_name"], "rag-planner")
-        self.assertIn('name: "rag-planner"', created["skill_markdown"])
-        self.assertIn('description: "Imported planning skill."', created["skill_markdown"])
-        self.assertEqual(created["asset_summary"]["total"], 2)
-        self.assertEqual({item["relative_path"] for item in created["assets"]}, {"references/guide.md", "scripts/run.py"})
-        skill_id = created["id"]
-
-        update_status, updated = self._request(
-            "PUT",
-            f"/api/skills/{skill_id}",
-            {
-                "name": "rag-planner",
-                "description": "Imported planning skill updated.",
-                "skill_markdown": "---\nname: rag-planner\ndescription: Imported planning skill updated.\n---\n\n# RAG Planner\n\nUse the references and templates before answering.\n",
-                "status": "active",
-                "assets": [
-                    {
-                        "relative_path": "templates/prompt.txt",
-                        "mime_type": "text/plain",
-                        "content_base64": template_b64,
-                    }
+        team_spec = {
+            "workspace_id": "local-workspace",
+            "project_id": "default-project",
+            "agents": [{"key": "planner", "name": "Custom Planner", "agent_template_ref": agent_template["id"]}],
+            "flow": {
+                "nodes": [
+                    {"id": "start", "type": "start"},
+                    {"id": "plan", "type": "agent", "agent": "planner", "instruction": "Create the project plan."},
+                    {"id": "end", "type": "end"},
+                ],
+                "edges": [
+                    {"from": "start", "to": "plan"},
+                    {"from": "plan", "to": "end"},
                 ],
             },
-        )
-        self.assertEqual(update_status, 200)
-        self.assertEqual(updated["status"], "active")
-        self.assertIn('description: "Imported planning skill updated."', updated["skill_markdown"])
-        self.assertEqual(updated["asset_summary"]["total"], 3)
-        self.assertTrue(any(item["relative_path"] == "templates/prompt.txt" for item in updated["assets"]))
-
-        batch_status, batch = self._request(
+            "definition_of_done": [],
+            "acceptance_checks": [],
+            "metadata": {"communication_policy": "graph-ancestor-scoped"},
+        }
+        status, team_template = self._request(
             "POST",
-            "/api/skills/import",
+            "/api/agent-center/team-templates",
             {
-                "items": [
-                    {
-                        "folder_name": "review-skill",
-                        "skill_markdown": "---\nname: review-skill\ndescription: Review imported work.\n---\n\n# Review\n\nCheck output quality.\n",
-                    },
-                    {
-                        "folder_name": "delivery-skill",
-                        "skill_markdown": "---\nname: delivery-skill\ndescription: Deliver imported work.\n---\n\n# Deliver\n\nShip the final result.\n",
-                    },
-                ]
+                "key": "custom_team",
+                "name": "自定义团队",
+                "description": "Custom team",
+                "spec": team_spec,
             },
         )
-        self.assertEqual(batch_status, 200)
-        self.assertEqual(batch["count"], 2)
-        self.assertEqual(batch["error_count"], 0)
-        self.assertEqual({item["name"] for item in batch["items"]}, {"review-skill", "delivery-skill"})
+        self.assertEqual(status, 200)
 
-    def test_provider_and_agent_crud_endpoints(self) -> None:
-        provider_status, provider = self._request(
+        build_status, build = self._request(
             "POST",
-            "/api/providers",
-            {
-                "name": "Provider CRUD",
-                "provider_type": "mock",
-                "base_url": "mock://crud",
-                "api_key": "secret-token",
-                "model": "mock-v1",
-                "extra_headers": {"X-Test": "1"},
-                "extra_config": {"temperature": 0.3},
-            },
+            "/api/agent-center/builds",
+            {"team_template_id": team_template["id"], "name": "custom_team_build"},
         )
-        self.assertEqual(provider_status, 200)
-        provider_id = provider["id"]
-        self.assertTrue(provider["has_api_key"])
+        self.assertEqual(build_status, 200)
+        self.assertEqual(build["resource_lock_json"]["team_template"]["id"], team_template["id"])
+        self.assertEqual(build["resource_lock_json"]["agent_templates"][0]["id"], agent_template["id"])
 
-        detail_status, detail = self._request("GET", f"/api/providers/{provider_id}")
-        self.assertEqual(detail_status, 200)
-        self.assertEqual(detail["name"], "Provider CRUD")
-        self.assertEqual(detail["agent_count"], 0)
-
-        update_status, updated_provider = self._request(
-            "PUT",
-            f"/api/providers/{provider_id}",
-            {
-                "name": "Provider CRUD Updated",
-                "provider_type": "mock",
-                "base_url": "mock://crud-v2",
-                "model": "mock-v2",
-                "api_version": "v2",
-                "organization": "org-demo",
-                "extra_headers": {"X-Test": "2"},
-                "extra_config": {"temperature": 0.1},
-            },
-        )
-        self.assertEqual(update_status, 200)
-        self.assertEqual(updated_provider["name"], "Provider CRUD Updated")
-        self.assertTrue(updated_provider["has_api_key"])
-
-        agent_status, agent = self._request(
-            "POST",
-            "/api/agents",
-            {
-                "name": "Agent CRUD",
-                "role": "planner",
-                "system_prompt": "Plan work.",
-                "provider_id": provider_id,
-                "temperature": 0.2,
-            },
-        )
-        self.assertEqual(agent_status, 200)
-        agent_id = agent["id"]
-
-        agent_detail_status, agent_detail = self._request("GET", f"/api/agents/{agent_id}")
-        self.assertEqual(agent_detail_status, 200)
-        self.assertEqual(agent_detail["name"], "Agent CRUD")
-        self.assertEqual(agent_detail["provider_id"], provider_id)
-
-        agent_update_status, updated_agent = self._request(
-            "PUT",
-            f"/api/agents/{agent_id}",
-            {
-                "name": "Agent CRUD Updated",
-                "role": "reviewer",
-                "system_prompt": "Review work.",
-                "provider_id": provider_id,
-                "model_override": "mock-v2",
-                "temperature": 0.4,
-                "max_tokens": 512,
-            },
-        )
-        self.assertEqual(agent_update_status, 200)
-        self.assertEqual(updated_agent["name"], "Agent CRUD Updated")
-        self.assertEqual(updated_agent["resolved_model"], "mock-v2")
-
-        delete_agent_status, deleted_agent = self._request("DELETE", f"/api/agents/{agent_id}")
-        self.assertEqual(delete_agent_status, 200)
-        self.assertEqual(deleted_agent["id"], agent_id)
-
-        missing_agent_status, missing_agent = self._request("GET", f"/api/agents/{agent_id}")
-        self.assertEqual(missing_agent_status, 404)
-        self.assertIn("does not exist", missing_agent["detail"])
-
-        delete_provider_status, deleted_provider = self._request("DELETE", f"/api/providers/{provider_id}")
-        self.assertEqual(delete_provider_status, 200)
-        self.assertEqual(deleted_provider["id"], provider_id)
-
-        missing_provider_status, missing_provider = self._request("GET", f"/api/providers/{provider_id}")
-        self.assertEqual(missing_provider_status, 404)
-        self.assertIn("does not exist", missing_provider["detail"])
-
-    def test_provider_accepts_minimal_required_fields(self) -> None:
-        provider_status, provider = self._request(
-            "POST",
-            "/api/providers",
-            {
-                "name": "Minimal Provider",
-                "provider_type": "openai",
-                "model": "gpt-4.1-mini",
-            },
-        )
-        self.assertEqual(provider_status, 200)
-        self.assertFalse(provider["has_api_key"])
-
-        detail_status, detail = self._request("GET", f"/api/providers/{provider['id']}")
-        self.assertEqual(detail_status, 200)
-        self.assertIsNone(detail["base_url"])
-        self.assertEqual(detail["model"], "gpt-4.1-mini")
-
-    def test_provider_test_endpoint_uses_litellm_for_non_mock_provider(self) -> None:
-        provider_status, provider = self._request(
-            "POST",
-            "/api/providers",
-            {
-                "name": "LiteLLM Provider",
-                "provider_type": "openai",
-                "base_url": "https://api.openai.com/v1",
-                "api_key": "secret-token",
-                "model": "gpt-4.1-mini",
-                "organization": "org-demo",
-                "extra_headers": {"X-Test": "1"},
-                "extra_config": {"top_p": 0.9},
-            },
-        )
-        self.assertEqual(provider_status, 200)
-
-        with patch(
-            "aiteams.ai_gateway.completion",
-            return_value={
-                "choices": [{"message": {"content": "READY via LiteLLM"}}],
-                "model": "openai/gpt-4.1-mini",
-                "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
-            },
-        ) as mocked_completion:
-            test_status, payload = self._request(
+    def test_provider_list_supports_filter_and_pagination(self) -> None:
+        for name in ("Alpha Provider", "Beta Provider"):
+            status, _payload = self._request(
                 "POST",
-                "/api/providers/test",
+                "/api/agent-center/providers",
                 {
-                    "provider_id": provider["id"],
-                    "prompt": "Say READY.",
+                    "name": name,
+                    "provider_type": "mock",
+                    "config": {
+                        "base_url": "mock://local",
+                        "models": [{"name": f"{name.lower().replace(' ', '-')}-chat", "model_type": "chat"}],
+                    },
                 },
             )
+            self.assertEqual(status, 200)
 
-        self.assertEqual(test_status, 200)
-        self.assertEqual(payload["content"], "READY via LiteLLM")
-        self.assertEqual(payload["model"], "openai/gpt-4.1-mini")
+        status, payload = self._request("GET", "/api/agent-center/providers?query=alpha&provider_type=mock&limit=1&offset=0")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["limit"], 1)
+        self.assertGreaterEqual(payload["total"], 1)
+        self.assertEqual(len(payload["items"]), 1)
+        self.assertIn("Alpha", payload["items"][0]["name"])
 
-        kwargs = mocked_completion.call_args.kwargs
-        self.assertEqual(kwargs["model"], "openai/gpt-4.1-mini")
-        self.assertEqual(kwargs["api_key"], "secret-token")
-        self.assertEqual(kwargs["base_url"], "https://api.openai.com/v1")
-        self.assertEqual(kwargs["organization"], "org-demo")
-        self.assertEqual(kwargs["extra_headers"], {"X-Test": "1"})
-        self.assertEqual(kwargs["top_p"], 0.9)
-        self.assertTrue(kwargs["drop_params"])
-
-    def test_delete_guards_for_referenced_provider_and_agent(self) -> None:
-        provider_status, provider = self._request(
+    def test_provider_models_can_be_saved_discovered_and_tested(self) -> None:
+        status, provider = self._request(
             "POST",
-            "/api/providers",
+            "/api/agent-center/providers",
             {
-                "name": "Protected Provider",
+                "name": "Mock Catalog",
                 "provider_type": "mock",
-                "base_url": "mock://protected",
-                "api_key": "secret-token",
-                "model": "mock-model",
-                "extra_headers": {},
-                "extra_config": {},
+                "config": {
+                    "base_url": "mock://local",
+                    "models": [
+                        {"name": "mock-chat", "model_type": "chat", "context_window": 8192},
+                        {"name": "mock-embedding", "model_type": "embedding"},
+                        {"name": "mock-rerank", "model_type": "rerank"},
+                    ],
+                },
             },
         )
-        self.assertEqual(provider_status, 200)
-        provider_id = provider["id"]
+        self.assertEqual(status, 200)
+        self.assertEqual(provider["key"], "mock-catalog")
+        self.assertEqual(provider["config_json"]["model"], "mock-chat")
+        self.assertEqual(len(provider["config_json"]["models"]), 3)
 
-        agent_status, agent = self._request(
+        status, discovered = self._request(
             "POST",
-            "/api/agents",
+            "/api/agent-center/providers/discover-models",
             {
-                "name": "Protected Agent",
-                "role": "planner",
-                "system_prompt": "Protect task history.",
-                "provider_id": provider_id,
-                "temperature": 0.1,
+                "name": "Mock Catalog",
+                "provider_type": "mock",
+                "config": {"models": provider["config_json"]["models"]},
             },
         )
-        self.assertEqual(agent_status, 200)
-        agent_id = agent["id"]
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(len(discovered["items"]), 3)
 
-        run_status, _ = self._request(
+        status, tested = self._request(
             "POST",
-            "/api/collaborations/run",
+            "/api/agent-center/providers/test-model",
             {
-                "title": "Protected Session",
-                "prompt": "Generate a short protected answer.",
-                "agent_ids": [agent_id],
-                "lead_agent_id": agent_id,
-                "rounds": 1,
+                "provider": {
+                    "name": "Mock Catalog",
+                    "provider_type": "mock",
+                    "config": {"models": provider["config_json"]["models"]},
+                },
+                "model": {"name": "mock-chat", "model_type": "chat"},
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(tested["ok"])
+        self.assertEqual(tested["model_type"], "chat")
+
+    def test_custom_openai_provider_keeps_rerank_models(self) -> None:
+        status, provider = self._request(
+            "POST",
+            "/api/agent-center/providers",
+            {
+                "name": "Custom OpenAI Catalog",
+                "provider_type": "custom_openai",
+                "config": {
+                    "base_url": "https://example.com/v1",
+                    "models": [
+                        {"name": "custom-chat", "model_type": "chat"},
+                        {"name": "custom-embedding", "model_type": "embedding"},
+                        {"name": "custom-reranker", "model_type": "rerank"},
+                    ],
+                },
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(len(provider["config_json"]["models"]), 3)
+        self.assertEqual(
+            [item["model_type"] for item in provider["config_json"]["models"]],
+            ["chat", "embedding", "rerank"],
+        )
+        self.assertEqual(provider["model_count"], 3)
+        self.assertIn("rerank", provider["supported_model_types"])
+
+    def test_provider_can_be_deleted(self) -> None:
+        status, provider = self._request(
+            "POST",
+            "/api/agent-center/providers",
+            {
+                "name": "Delete Provider",
+                "provider_type": "mock",
+                "config": {
+                    "base_url": "mock://local",
+                    "models": [{"name": "delete-chat", "model_type": "chat"}],
+                },
+            },
+        )
+        self.assertEqual(status, 200)
+
+        delete_status, deleted = self._request("DELETE", f"/api/agent-center/providers/{provider['id']}")
+        self.assertEqual(delete_status, 200)
+        self.assertTrue(deleted["deleted"])
+        self.assertEqual(deleted["id"], provider["id"])
+
+        get_status, get_payload = self._request("GET", f"/api/agent-center/providers/{provider['id']}")
+        self.assertEqual(get_status, 404)
+        self.assertIn("detail", get_payload)
+
+    def test_team_graph_validate_and_preview_endpoints(self) -> None:
+        status, team_templates = self._request("GET", "/api/agent-center/team-templates")
+        self.assertEqual(status, 200)
+        spec = team_templates["items"][0]["spec_json"]
+
+        validate_status, validation = self._request(
+            "POST",
+            "/api/agent-center/team-templates/graph/validate",
+            {"spec": spec},
+        )
+        self.assertEqual(validate_status, 200)
+        self.assertTrue(validation["valid"])
+        self.assertGreaterEqual(validation["summary"]["node_count"], 1)
+        self.assertIn("communication_policy", validation["summary"])
+
+        preview_status, preview = self._request(
+            "POST",
+            "/api/agent-center/team-templates/graph/preview",
+            {"spec": spec, "name": "preview_team"},
+        )
+        self.assertEqual(preview_status, 200)
+        self.assertTrue(preview["valid"])
+        self.assertGreaterEqual(preview["preview"]["agent_count"], 1)
+        self.assertGreaterEqual(preview["preview"]["node_count"], 1)
+
+    def test_plugin_sandbox_load_invoke_and_reload(self) -> None:
+        package_dir = self._create_plugin_package(name="echo_plugin", code_tag="v1")
+        status, plugin = self._request(
+            "POST",
+            "/api/agent-center/plugins",
+            {
+                "key": "echo_plugin",
+                "name": "Echo Plugin",
+                "version": "v1",
+                "plugin_type": "toolset",
+                "description": "Echo plugin",
+                "install_path": str(package_dir),
+                "manifest": {"workbench_key": "echo", "tools": ["echo"], "permissions": ["readonly"]},
+            },
+        )
+        self.assertEqual(status, 200)
+
+        load_status, loaded = self._request("POST", f"/api/agent-center/plugins/{plugin['id']}/load", {})
+        self.assertEqual(load_status, 200)
+        self.assertEqual(loaded["status"], "running")
+
+        health_status, health = self._request("GET", f"/api/agent-center/plugins/{plugin['id']}/health")
+        self.assertEqual(health_status, 200)
+        self.assertEqual(health["health"]["status"], "ok")
+        self.assertEqual(health["health"]["code_tag"], "v1")
+
+        invoke_status, invoke = self._request(
+            "POST",
+            f"/api/agent-center/plugins/{plugin['id']}/invoke",
+            {"action": "echo", "payload": {"text": "hello"}, "context": {"node_id": "manual_node"}},
+        )
+        self.assertEqual(invoke_status, 200)
+        self.assertEqual(invoke["result"]["payload"]["text"], "hello")
+        self.assertEqual(invoke["result"]["code_tag"], "v1")
+
+        (package_dir / "backend" / "entry.py").write_text(
+            textwrap.dedent(
+                """
+                class EchoPlugin:
+                    def __init__(self, *, manifest, root_path):
+                        self.manifest = manifest
+                        self.root_path = root_path
+
+                    def describe(self):
+                        return {
+                            "key": self.manifest["key"],
+                            "tools": ["echo"],
+                            "permissions": ["readonly"],
+                            "actions": [{"name": "echo", "description": "echo payload"}],
+                        }
+
+                    def health(self):
+                        return {"status": "ok", "code_tag": "v2"}
+
+                    def invoke(self, action, payload, context):
+                        return {
+                            "action": action,
+                            "payload": payload,
+                            "context_node": context.get("node_id"),
+                            "code_tag": "v2",
+                        }
+
+                    def shutdown(self):
+                        return {"status": "bye"}
+                """
+            ).strip()
+            + "\n",
+            encoding="utf-8",
+        )
+
+        reload_status, reloaded = self._request("POST", f"/api/agent-center/plugins/{plugin['id']}/reload", {})
+        self.assertEqual(reload_status, 200)
+        self.assertEqual(reloaded["status"], "running")
+
+        invoke_status, invoke = self._request(
+            "POST",
+            f"/api/agent-center/plugins/{plugin['id']}/invoke",
+            {"action": "echo", "payload": {"text": "hello-again"}, "context": {"node_id": "manual_node"}},
+        )
+        self.assertEqual(invoke_status, 200)
+        self.assertEqual(invoke["result"]["payload"]["text"], "hello-again")
+        self.assertEqual(invoke["result"]["code_tag"], "v2")
+
+    def test_runtime_agent_node_can_invoke_plugin_actions(self) -> None:
+        package_dir = self._create_plugin_package(name="runtime_echo_plugin", code_tag="runtime")
+        status, plugin = self._request(
+            "POST",
+            "/api/agent-center/plugins",
+            {
+                "key": "runtime_echo_plugin",
+                "name": "Runtime Echo Plugin",
+                "version": "v1",
+                "plugin_type": "toolset",
+                "description": "Runtime echo plugin",
+                "install_path": str(package_dir),
+                "manifest": {"workbench_key": "runtime_echo", "tools": ["echo"], "permissions": ["readonly"]},
+            },
+        )
+        self.assertEqual(status, 200)
+
+        status, provider = self._request(
+            "POST",
+            "/api/agent-center/providers",
+            {
+                "key": "runtime_plugin_provider",
+                "name": "Runtime Plugin Provider",
+                "provider_type": "mock",
+                "description": "Mock provider",
+                "config": {"model": "mock-model", "backend": "mock", "base_url": "mock://local"},
+            },
+        )
+        self.assertEqual(status, 200)
+
+        status, agent_template = self._request(
+            "POST",
+            "/api/agent-center/agent-templates",
+            {
+                "key": "runtime_plugin_agent",
+                "name": "Runtime Plugin Agent",
+                "role": "developer",
+                "description": "Agent with plugin",
+                "spec": {
+                    "goal": "Invoke plugin actions.",
+                    "instructions": "Use plugins when configured.",
+                    "provider_ref": provider["id"],
+                    "model": "mock-dev",
+                    "memory_policy": "agent_private",
+                    "plugin_refs": [plugin["id"]],
+                    "skills": ["plugin"],
+                },
+            },
+        )
+        self.assertEqual(status, 200)
+
+        team_spec = {
+            "workspace_id": "local-workspace",
+            "project_id": "default-project",
+            "agents": [{"key": "worker", "name": "Worker", "agent_template_ref": agent_template["id"]}],
+            "flow": {
+                "nodes": [
+                    {"id": "start", "type": "start"},
+                    {
+                        "id": "work",
+                        "type": "agent",
+                        "agent": "worker",
+                        "instruction": "Run plugin action.",
+                        "config": {
+                            "plugin_actions": [
+                                {
+                                    "plugin_id": plugin["id"],
+                                    "action": "echo",
+                                    "payload": {"text": "runtime-call"},
+                                }
+                            ]
+                        },
+                    },
+                    {"id": "end", "type": "end"},
+                ],
+                "edges": [
+                    {"from": "start", "to": "work"},
+                    {"from": "work", "to": "end"},
+                ],
+            },
+            "definition_of_done": [],
+            "acceptance_checks": [],
+            "metadata": {"communication_policy": "graph-ancestor-scoped"},
+        }
+        status, team_template = self._request(
+            "POST",
+            "/api/agent-center/team-templates",
+            {
+                "key": "runtime_plugin_team",
+                "name": "Runtime Plugin Team",
+                "description": "Team with runtime plugin actions",
+                "spec": team_spec,
+            },
+        )
+        self.assertEqual(status, 200)
+
+        build_status, build = self._request(
+            "POST",
+            "/api/agent-center/builds",
+            {"team_template_id": team_template["id"], "name": "runtime_plugin_build"},
+        )
+        self.assertEqual(build_status, 200)
+
+        run_status, bundle = self._request(
+            "POST",
+            "/api/task-releases",
+            {
+                "build_id": build["id"],
+                "prompt": "Run plugin-integrated node.",
+                "approval_mode": "auto",
             },
         )
         self.assertEqual(run_status, 200)
-
-        delete_agent_status, delete_agent_payload = self._request("DELETE", f"/api/agents/{agent_id}")
-        self.assertEqual(delete_agent_status, 409)
-        self.assertIn("cannot be deleted", delete_agent_payload["detail"])
-
-        delete_provider_status, delete_provider_payload = self._request("DELETE", f"/api/providers/{provider_id}")
-        self.assertEqual(delete_provider_status, 409)
-        self.assertIn("cannot be deleted", delete_provider_payload["detail"])
-
-    def test_provider_and_agent_list_endpoints_support_pagination(self) -> None:
-        provider_ids: list[str] = []
-        for index in range(7):
-            status, payload = self._request(
-                "POST",
-                "/api/providers",
-                {
-                    "name": f"Provider Page {index}",
-                    "provider_type": "mock",
-                    "base_url": f"mock://provider-{index}",
-                    "api_key": "",
-                    "model": f"mock-model-{index}",
-                    "extra_headers": {},
-                    "extra_config": {},
-                },
-            )
-            self.assertEqual(status, 200)
-            provider_ids.append(payload["id"])
-
-        list_status, provider_page = self._request("GET", "/api/providers?limit=3&offset=3")
-        self.assertEqual(list_status, 200)
-        self.assertEqual(provider_page["count"], 7)
-        self.assertEqual(provider_page["limit"], 3)
-        self.assertEqual(provider_page["offset"], 3)
-        self.assertEqual(len(provider_page["items"]), 3)
-
-        agent_ids: list[str] = []
-        for index in range(5):
-            status, payload = self._request(
-                "POST",
-                "/api/agents",
-                {
-                    "name": f"Agent Page {index}",
-                    "role": "specialist",
-                    "system_prompt": f"Handle pagination case {index}.",
-                    "provider_id": provider_ids[index % len(provider_ids)],
-                    "temperature": 0.2,
-                },
-            )
-            self.assertEqual(status, 200)
-            agent_ids.append(payload["id"])
-
-        agent_list_status, agent_page = self._request("GET", "/api/agents?limit=2&offset=2")
-        self.assertEqual(agent_list_status, 200)
-        self.assertEqual(agent_page["count"], 5)
-        self.assertEqual(agent_page["limit"], 2)
-        self.assertEqual(agent_page["offset"], 2)
-        self.assertEqual(len(agent_page["items"]), 2)
-
-    def test_provider_and_agent_list_endpoints_support_filtering(self) -> None:
-        provider_payloads = [
-            {
-                "name": "Alpha Provider",
-                "provider_type": "openai",
-                "base_url": "https://api.openai.test/v1",
-                "api_key": "alpha-key",
-                "model": "gpt-4o",
-                "extra_headers": {},
-                "extra_config": {},
-            },
-            {
-                "name": "Beta Local",
-                "provider_type": "mock",
-                "base_url": "mock://beta",
-                "api_key": "",
-                "model": "local-vision",
-                "extra_headers": {},
-                "extra_config": {},
-            },
-            {
-                "name": "Gamma Provider",
-                "provider_type": "openai",
-                "base_url": "https://gateway.example/v1",
-                "api_key": "gamma-key",
-                "model": "gpt-4.1-mini",
-                "extra_headers": {},
-                "extra_config": {},
-            },
-        ]
-
-        provider_ids: dict[str, str] = {}
-        for payload in provider_payloads:
-            status, created = self._request("POST", "/api/providers", payload)
-            self.assertEqual(status, 200)
-            provider_ids[payload["name"]] = created["id"]
-
-        by_name_status, by_name_page = self._request("GET", "/api/providers?name=alpha")
-        self.assertEqual(by_name_status, 200)
-        self.assertEqual(by_name_page["count"], 1)
-        self.assertEqual(by_name_page["items"][0]["name"], "Alpha Provider")
-
-        by_type_status, by_type_page = self._request("GET", "/api/providers?provider_type=openai")
-        self.assertEqual(by_type_status, 200)
-        self.assertEqual(by_type_page["count"], 2)
-        self.assertEqual({item["name"] for item in by_type_page["items"]}, {"Alpha Provider", "Gamma Provider"})
-
-        by_model_status, by_model_page = self._request("GET", "/api/providers?model=vision")
-        self.assertEqual(by_model_status, 200)
-        self.assertEqual(by_model_page["count"], 1)
-        self.assertEqual(by_model_page["items"][0]["name"], "Beta Local")
-
-        combined_provider_status, combined_provider_page = self._request("GET", "/api/providers?provider_type=openai&model=mini")
-        self.assertEqual(combined_provider_status, 200)
-        self.assertEqual(combined_provider_page["count"], 1)
-        self.assertEqual(combined_provider_page["items"][0]["name"], "Gamma Provider")
-
-        agent_payloads = [
-            {
-                "name": "Planner Agent",
-                "role": "planner",
-                "system_prompt": "Break work into milestones and dependencies.",
-                "provider_id": provider_ids["Alpha Provider"],
-                "temperature": 0.2,
-            },
-            {
-                "name": "Reviewer Agent",
-                "role": "reviewer",
-                "system_prompt": "Check proposals for correctness and gaps.",
-                "provider_id": provider_ids["Alpha Provider"],
-                "model_override": "gpt-4o-mini",
-                "temperature": 0.2,
-            },
-            {
-                "name": "Vision Scout",
-                "role": "analyst",
-                "system_prompt": "Inspect multimodal inputs and summarize findings.",
-                "provider_id": provider_ids["Beta Local"],
-                "temperature": 0.2,
-            },
-        ]
-
-        for payload in agent_payloads:
-            status, created = self._request("POST", "/api/agents", payload)
-            self.assertEqual(status, 200)
-            self.assertEqual(created["name"], payload["name"])
-
-        agent_by_name_status, agent_by_name_page = self._request("GET", "/api/agents?name=planner")
-        self.assertEqual(agent_by_name_status, 200)
-        self.assertEqual(agent_by_name_page["count"], 1)
-        self.assertEqual(agent_by_name_page["items"][0]["name"], "Planner Agent")
-
-        agent_by_role_status, agent_by_role_page = self._request("GET", "/api/agents?role=review")
-        self.assertEqual(agent_by_role_status, 200)
-        self.assertEqual(agent_by_role_page["count"], 1)
-        self.assertEqual(agent_by_role_page["items"][0]["name"], "Reviewer Agent")
-
-        provider_filter_status, provider_filter_page = self._request(
-            "GET",
-            f"/api/agents?provider_id={provider_ids['Beta Local']}",
-        )
-        self.assertEqual(provider_filter_status, 200)
-        self.assertEqual(provider_filter_page["count"], 1)
-        self.assertEqual(provider_filter_page["items"][0]["name"], "Vision Scout")
-
-        model_filter_status, model_filter_page = self._request("GET", "/api/agents?model=4o")
-        self.assertEqual(model_filter_status, 200)
-        self.assertEqual(model_filter_page["count"], 2)
-        self.assertEqual({item["name"] for item in model_filter_page["items"]}, {"Planner Agent", "Reviewer Agent"})
-
-        combined_agent_status, combined_agent_page = self._request(
-            "GET",
-            f"/api/agents?provider_id={provider_ids['Alpha Provider']}&model=mini",
-        )
-        self.assertEqual(combined_agent_status, 200)
-        self.assertEqual(combined_agent_page["count"], 1)
-        self.assertEqual(combined_agent_page["items"][0]["name"], "Reviewer Agent")
+        self.assertEqual(bundle["run"]["status"], "completed")
+        work_step = next(step for step in bundle["steps"] if step["node_id"] == "work")
+        self.assertEqual(work_step["output_json"]["plugin_results"][0]["result"]["payload"]["text"], "runtime-call")
+        self.assertEqual(work_step["output_json"]["plugin_results"][0]["result"]["code_tag"], "runtime")

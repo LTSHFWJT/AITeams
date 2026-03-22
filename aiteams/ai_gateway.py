@@ -6,15 +6,20 @@ from typing import Any
 
 os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "true")
 
-import litellm
-from litellm import completion
+try:
+    import litellm
+    from litellm import completion
+except ModuleNotFoundError:  # pragma: no cover - optional dependency
+    litellm = None
+    completion = None
 
 from aiteams.catalog import preset_for
 from aiteams.utils import trim_text
 
 
-litellm.suppress_debug_info = True
-litellm.telemetry = False
+if litellm is not None:
+    litellm.suppress_debug_info = True
+    litellm.telemetry = False
 
 
 @dataclass(slots=True)
@@ -69,6 +74,8 @@ class AIGateway:
         temperature: float,
         max_tokens: int | None,
     ) -> ChatResult:
+        if completion is None:
+            raise ProviderRequestError("litellm is not installed. Install it or switch the agent backend to mock.")
         preset = preset_for(str(provider["provider_type"]))
         litellm_model = self._resolve_litellm_model(provider, model, preset)
         request_kwargs: dict[str, Any] = {

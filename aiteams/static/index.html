@@ -1,559 +1,544 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>AI Teams</title>
+    <title>AITeams</title>
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
-    <div class="page-shell">
-      <header class="topbar">
-        <div class="brand-block">
-          <p class="eyebrow">AI Teams / SQLite + AIMemory</p>
-          <h1>多智能体协同平台</h1>
+    <div class="scene-grid"></div>
+    <div class="scene-glow"></div>
+    <div class="scene-rings"></div>
+    <div class="shell">
+      <header class="hero compact-hero">
+        <div class="hero-copy-block">
+          <h1>AITeams</h1>
         </div>
-        <nav class="menu-bar" aria-label="主菜单">
-          <button class="menu-item active" type="button" data-page-target="home">首页</button>
-          <button class="menu-item" type="button" data-page-target="tasks">任务管理</button>
-          <button class="menu-item" type="button" data-page-target="agents">Agent管理</button>
-          <button class="menu-item" type="button" data-page-target="knowledge">知识库管理</button>
-        </nav>
+        <div class="top-menu">
+          <button type="button" class="top-nav-button active" data-nav-section="overview">总览</button>
+          <button type="button" class="top-nav-button" data-nav-section="resources">资源中心</button>
+          <button type="button" class="top-nav-button" data-nav-section="orchestration">编排中心</button>
+          <button type="button" class="top-nav-button" data-nav-section="delivery">交付中心</button>
+        </div>
       </header>
 
-      <main class="page-stack">
-        <section class="page-view active" data-page="home">
-          <section class="hero">
-            <div class="hero-copy">
-              <p class="eyebrow">Platform Overview</p>
-              <h2>平台配置、任务协作、Agent 记忆与技能 / RAG 统一入口</h2>
-              <p class="hero-text">
-                平台配置与协作记录存入 SQLite，Agent 记忆、技能与 RAG 文档由 <code>aimemory</code> 管理。
-                顶部菜单按首页、任务管理、Agent 管理、知识库管理拆分。
-              </p>
-              <div class="actions">
-                <button type="button" data-page-link="tasks">进入任务管理</button>
-                <button type="button" class="ghost" data-page-link="agents">进入 Agent 管理</button>
+      <div class="workspace-shell">
+        <nav class="nav-panel nav-panel-sub">
+          <div class="sub-menu-wrap">
+            <div class="sub-menu active" data-nav-panel="overview">
+              <button type="button" class="nav-button active" data-page-target="overview">
+                <strong>平台概览</strong>
+              </button>
+            </div>
+            <div class="sub-menu" data-nav-panel="resources">
+              <button type="button" class="nav-button" data-page-target="providers">
+                <strong>模型提供方</strong>
+              </button>
+              <button type="button" class="nav-button" data-page-target="plugins">
+                <strong>插件中心</strong>
+              </button>
+              <button type="button" class="nav-button" data-page-target="agent-templates">
+                <strong>Agent 模板</strong>
+              </button>
+            </div>
+            <div class="sub-menu" data-nav-panel="orchestration">
+              <button type="button" class="nav-button" data-page-target="team-templates">
+                <strong>团队模板</strong>
+              </button>
+            </div>
+            <div class="sub-menu" data-nav-panel="delivery">
+              <button type="button" class="nav-button" data-page-target="builds">
+                <strong>构建发布</strong>
+              </button>
+              <button type="button" class="nav-button" data-page-target="runtime">
+                <strong>任务运行</strong>
+              </button>
+              <button type="button" class="nav-button" data-page-target="approvals">
+                <strong>审批中心</strong>
+              </button>
+              <button type="button" class="nav-button" data-page-target="blueprints">
+                <strong>内部蓝图</strong>
+              </button>
+            </div>
+          </div>
+        </nav>
+
+        <main class="page-stack">
+          <section class="page-view active" data-page="overview">
+            <div class="page-head">
+              <div>
+                <h2>平台概览</h2>
               </div>
             </div>
-            <div class="hero-stats">
-              <div class="stat-card">
-                <span>Providers</span>
-                <strong id="provider-count">0</strong>
-              </div>
-              <div class="stat-card">
-                <span>Agents</span>
-                <strong id="agent-count">0</strong>
-              </div>
-              <div class="stat-card">
-                <span>Tasks</span>
-                <strong id="session-count">0</strong>
-              </div>
-              <div class="stat-card">
-                <span>知识资产</span>
-                <strong id="knowledge-count">0</strong>
-              </div>
+            <div class="page-grid overview-grid">
+              <section class="panel">
+                <div class="panel-title">
+                  <h3>核心数量</h3>
+                </div>
+                <div id="summary-cards" class="stats-grid"></div>
+              </section>
+              <section class="panel">
+                <div class="panel-title">
+                  <h3>Provider 类型</h3>
+                </div>
+                <div id="provider-type-grid" class="rule-grid"></div>
+              </section>
+              <section class="panel">
+                <div class="panel-title">
+                  <h3>最近 Build</h3>
+                </div>
+                <div id="overview-builds" class="list compact-list"></div>
+              </section>
+              <section class="panel">
+                <div class="panel-title">
+                  <h3>最近 Run</h3>
+                </div>
+                <div id="overview-runs" class="list compact-list"></div>
+              </section>
             </div>
           </section>
 
-          <section class="overview-grid">
-            <article class="panel">
-              <div class="panel-head">
-                <h3>最近任务</h3>
-                <p>查看最近发起的多 Agent 协作任务与执行状态。</p>
+          <section class="page-view" data-page="providers">
+            <div class="page-head">
+              <div>
+                <h2>模型提供方</h2>
               </div>
-              <div id="home-session-list" class="list-grid compact-list"></div>
-            </article>
+            </div>
+            <div class="page-grid provider-page-grid">
+              <section class="panel panel-wide">
+                <div class="provider-toolbar">
+                  <button id="provider-open-create" type="button">新增</button>
+                </div>
+                <div class="provider-list-head">
+                  <span>提供方</span>
+                  <span>API 模式</span>
+                  <span>模型</span>
+                  <span>Base URL</span>
+                  <span>操作</span>
+                </div>
+                <div id="provider-list" class="provider-list"></div>
+                <div class="provider-pagination">
+                  <div id="provider-pagination-meta" class="provider-pagination-meta"></div>
+                  <label class="page-size-mini">
+                    <span>每页</span>
+                    <select id="provider-page-size">
+                      <option value="10" selected>10</option>
+                      <option value="20">20</option>
+                      <option value="50">50</option>
+                    </select>
+                  </label>
+                </div>
+              </section>
+            </div>
 
-            <article class="panel">
-              <div class="panel-head">
-                <h3>核心 Agents</h3>
-                <p>查看当前已配置的 Agent 及其绑定模型。</p>
-              </div>
-              <div id="home-agent-list" class="list-grid compact-list"></div>
-            </article>
+            <div id="provider-modal" class="modal-shell hidden">
+              <div class="modal-backdrop" data-provider-modal-close></div>
+              <section class="modal-card provider-modal-card">
+                <div class="modal-head">
+                  <h3 id="provider-modal-title">新增模型提供方</h3>
+                  <button type="button" class="ghost" data-provider-modal-close>关闭</button>
+                </div>
+                <form id="provider-form" class="form provider-editor-form">
+                  <input id="provider-key" type="hidden" />
+                  <div class="form-grid two">
+                    <label><span>名称</span><input id="provider-name" placeholder="例如：OpenAI 生产环境" /></label>
+                    <label>
+                      <span>API 模式</span>
+                      <select id="provider-type"></select>
+                    </label>
+                    <label><span>API 密钥</span><input id="provider-api-key" type="password" placeholder="输入 API Key" /></label>
+                    <label><span>Base URL</span><input id="provider-base-url" placeholder="留空则按该模式默认地址" /></label>
+                  </div>
 
-            <article class="panel">
-              <div class="panel-head">
-                <h3>技能与 RAG</h3>
-                <p>查看平台内可复用的技能与检索文档资产。</p>
-              </div>
-              <div id="home-knowledge-list" class="list-grid compact-list"></div>
-            </article>
+                  <section class="provider-model-panel">
+                    <div class="provider-model-head">
+                      <h4>模型</h4>
+                      <span id="provider-model-summary" class="provider-model-summary"></span>
+                      <div class="provider-model-toolbar">
+                        <button id="provider-model-new" type="button" class="ghost">新建</button>
+                        <button id="provider-model-reset" type="button" class="ghost">重置</button>
+                        <button id="provider-model-fetch" type="button" class="ghost">获取</button>
+                      </div>
+                    </div>
+                    <div id="provider-model-list" class="provider-model-list"></div>
+                  </section>
+
+                  <div class="modal-actions">
+                    <button id="provider-cancel" type="button" class="ghost">取消</button>
+                    <button id="provider-save" type="submit">保存</button>
+                  </div>
+                </form>
+              </section>
+            </div>
+
+            <div id="provider-model-editor-modal" class="modal-shell hidden">
+              <div class="modal-backdrop" data-provider-model-editor-modal-close></div>
+              <section class="modal-card provider-model-editor-modal-card">
+                <div class="modal-head">
+                  <h3 id="provider-model-editor-title">新建模型</h3>
+                  <button type="button" class="ghost" data-provider-model-editor-modal-close>关闭</button>
+                </div>
+                <div id="provider-model-editor" class="provider-model-editor">
+                  <div class="form-grid three">
+                    <label><span>模型名称</span><input id="provider-model-name" placeholder="例如：gpt-4.1-mini" /></label>
+                    <label>
+                      <span>模型类型</span>
+                      <select id="provider-model-type">
+                        <option value="chat">聊天</option>
+                        <option value="embedding">嵌入</option>
+                        <option value="rerank">重排</option>
+                      </select>
+                    </label>
+                    <label><span>上下文窗口</span><input id="provider-model-context-window" type="number" min="1" placeholder="可选" /></label>
+                  </div>
+                  <div class="provider-model-actions">
+                    <button id="provider-model-cancel" type="button" class="ghost">取消</button>
+                    <button id="provider-model-test" type="button" class="ghost">测试模型</button>
+                    <button id="provider-model-save" type="button">保存</button>
+                  </div>
+                  <pre id="provider-model-test-result" class="result hidden"></pre>
+                </div>
+              </section>
+            </div>
           </section>
-        </section>
 
-        <section class="page-view" data-page="tasks">
-          <div class="page-header">
-            <div>
-              <p class="eyebrow">Tasks</p>
-              <h2>任务管理</h2>
+          <section class="page-view" data-page="plugins">
+            <div class="page-head">
+              <div>
+                <h2>插件中心</h2>
+              </div>
             </div>
-          </div>
-
-          <div class="task-layout">
-            <section class="panel">
-              <div class="panel-head">
-                <h3>新建任务</h3>
-                <p>指定参与 Agent、Lead Agent 与轮次，发起协作任务。</p>
-              </div>
-              <form id="run-form" class="stack">
-                <div class="two-col">
-                  <label>
-                    <span>会话标题</span>
-                    <input name="title" placeholder="例如：新产品需求拆解" />
-                  </label>
-                  <label>
-                    <span>轮次</span>
-                    <input name="rounds" type="number" min="1" max="5" value="1" />
-                  </label>
+            <div class="page-grid resource-grid">
+              <section class="panel">
+                <div class="panel-title">
+                  <h3>插件</h3>
                 </div>
-                <label>
-                  <span>用户任务</span>
-                  <textarea name="prompt" rows="6" placeholder="输入需要多个 Agent 协同处理的任务" required></textarea>
-                </label>
-                <label>
-                  <span>Lead Agent</span>
-                  <select name="lead_agent_id" id="lead-agent"></select>
-                </label>
-                <div>
-                  <span class="subhead">参与 Agent</span>
-                  <div id="agent-checkboxes" class="checkbox-grid"></div>
-                </div>
-                <div class="actions">
-                  <button type="submit">启动协作</button>
-                </div>
-              </form>
-              <pre id="run-error" class="result-box hidden"></pre>
-            </section>
-
-            <section class="panel">
-              <div class="panel-head">
-                <h3>任务列表</h3>
-                <p>左侧查看任务列表，右侧查看会话详情、消息轨迹与记忆召回。</p>
-              </div>
-              <div class="two-pane">
-                <div>
-                  <div id="session-list" class="session-list"></div>
-                </div>
-                <div class="session-detail">
-                  <div id="session-meta" class="session-meta empty">选择左侧任务查看详情。</div>
-                  <div id="transcript" class="transcript"></div>
-                  <div id="memory-view" class="memory-view"></div>
-                </div>
-              </div>
-            </section>
-          </div>
-        </section>
-
-        <section class="page-view" data-page="agents">
-          <div class="page-header">
-            <div>
-              <p class="eyebrow">Agents</p>
-              <h2>Agent管理</h2>
-            </div>
-            <p class="page-copy">管理 AI Provider 与 Agent 定义。</p>
-          </div>
-
-          <div class="module-tabs" aria-label="Agent modules">
-            <button class="module-tab active" type="button" data-agent-module-target="providers">AI Provider</button>
-            <button class="module-tab" type="button" data-agent-module-target="agents">Agents</button>
-          </div>
-
-          <div class="split-layout module-stack">
-            <section class="panel module-view active" data-agent-module="providers">
-              <div class="panel-head">
-                <h3>AI Provider</h3>
-              </div>
-              <div class="management-shell">
-                <div class="management-form-column">
-                  <div id="provider-form-mode" class="form-mode hidden"></div>
-                  <form id="provider-form" class="stack">
-                    <div class="two-col">
-                      <label>
-                        <span>名称</span>
-                        <input name="name" placeholder="OpenAI Prod" required />
-                      </label>
-                      <label>
-                        <span>类型</span>
-                        <select name="provider_type" id="provider-type"></select>
-                      </label>
-                    </div>
-                    <div class="two-col">
-                      <label>
-                        <span>Model</span>
-                        <input name="model" placeholder="gpt-4.1-mini" required />
-                      </label>
-                      <label>
-                        <span>API Key</span>
-                        <input name="api_key" type="password" placeholder="sk-..." />
-                      </label>
-                    </div>
-                    <label>
-                      <span>Base URL</span>
-                      <input name="base_url" placeholder="https://api.openai.com/v1" />
-                    </label>
-                    <div id="provider-preset-hint" class="helper-copy"></div>
-                    <div id="provider-legacy-fields" class="two-col hidden">
-                      <label>
-                        <span>API Key</span>
-                        <input name="api_key" type="password" placeholder="sk-..." />
-                      </label>
-                      <label>
-                        <span>API Version / Organization</span>
-                        <div class="inline-fields">
-                          <input name="api_version" placeholder="api version" />
-                          <input name="organization" placeholder="organization" />
-                        </div>
-                      </label>
-                    </div>
-                    <details id="provider-advanced" class="advanced-block">
-                      <summary>Advanced Options</summary>
-                      <div class="stack advanced-fields">
-                        <label class="hidden" data-provider-field="api_version">
-                          <span>API Version</span>
-                          <input name="api_version" placeholder="2024-10-21" />
-                        </label>
-                        <label class="hidden" data-provider-field="organization">
-                          <span>Organization</span>
-                          <input name="organization" placeholder="org_xxx" />
-                        </label>
-                        <label>
-                          <span>Extra Headers JSON</span>
-                          <textarea name="extra_headers" rows="3" placeholder='{"HTTP-Referer":"https://your-app"}'></textarea>
-                        </label>
-                        <label>
-                          <span>Extra Config JSON</span>
-                          <textarea name="extra_config" rows="3" placeholder='{"top_p":0.9}'></textarea>
-                        </label>
-                      </div>
-                    </details>
-                    <label class="inline-toggle" for="provider-clear-api-key">
-                      <input id="provider-clear-api-key" name="clear_api_key" type="checkbox" />
-                      <span>保存时清空已存储 API Key</span>
-                    </label>
-                    <div id="provider-api-key-hint" class="helper-copy hidden">编辑模式下留空 API Key 将沿用已存储密钥。</div>
-                    <div id="provider-legacy-extra" class="hidden">
-                      <label>
-                        <span>Extra Headers JSON</span>
-                        <textarea name="extra_headers" rows="3" placeholder='{"HTTP-Referer":"https://your-app"}'></textarea>
-                      </label>
-                      <label>
-                        <span>Extra Config JSON</span>
-                        <textarea name="extra_config" rows="3" placeholder='{"top_p":0.9}'></textarea>
-                      </label>
-                    </div>
-                    <div class="actions">
-                      <button type="submit">保存 Provider</button>
-                      <button type="button" class="ghost" id="provider-test-btn">测试当前配置</button>
-                    </div>
-                  </form>
-                  <div class="actions">
-                    <button type="button" class="ghost hidden" id="provider-cancel-btn">Cancel Edit</button>
+                <form id="plugin-form" class="form">
+                  <div class="form-grid two">
+                    <label><span>Key</span><input id="plugin-key" placeholder="research_kit" /></label>
+                    <label><span>名称</span><input id="plugin-name" placeholder="研究工具集" /></label>
+                    <label><span>版本</span><input id="plugin-version" value="v1" /></label>
+                    <label><span>类型</span><input id="plugin-type" value="toolset" /></label>
+                    <label><span>Workbench Key</span><input id="plugin-workbench-key" placeholder="research" /></label>
+                    <label><span>安装路径</span><input id="plugin-install-path" placeholder="本地插件目录" /></label>
                   </div>
-                  <pre id="provider-form-result" class="result-box hidden"></pre>
-                  <pre id="provider-test-result" class="result-box hidden"></pre>
+                  <label><span>工具</span><input id="plugin-tools" placeholder="search, docs" /></label>
+                  <label><span>权限</span><input id="plugin-permissions" placeholder="readonly, network_limited" /></label>
+                  <label><span>说明</span><textarea id="plugin-description" rows="3" placeholder="简短说明"></textarea></label>
+                  <div class="actions">
+                    <button type="submit">保存</button>
+                    <button id="plugin-reset" type="button" class="ghost">新建</button>
+                  </div>
+                </form>
+                <pre id="plugin-result" class="result hidden"></pre>
+              </section>
+              <section class="panel panel-wide">
+                <div class="panel-title">
+                  <h3>列表</h3>
                 </div>
+                <div id="plugin-list" class="list"></div>
+              </section>
+            </div>
+          </section>
 
-                <div class="management-list-column">
-                  <div class="management-list-head">
-                    <div>
-                      <h4>Provider List</h4>
-                      <p id="provider-list-summary" class="muted">Loading...</p>
-                    </div>
-                    <label class="page-size-control">
-                      <span>Per Page</span>
-                      <select id="provider-page-size">
-                        <option value="4">4</option>
-                        <option value="6">6</option>
-                        <option value="8">8</option>
-                        <option value="10" selected>10</option>
-                        <option value="12">12</option>
+          <section class="page-view" data-page="agent-templates">
+            <div class="page-head">
+              <div>
+                <h2>Agent 模板</h2>
+              </div>
+            </div>
+            <div class="page-grid resource-grid">
+              <section class="panel">
+                <div class="panel-title">
+                  <h3>模板</h3>
+                </div>
+                <form id="agent-template-form" class="form">
+                  <div class="form-grid two">
+                    <label><span>Key</span><input id="agent-template-key" placeholder="strategy_planner" /></label>
+                    <label><span>名称</span><input id="agent-template-name" placeholder="策略规划师" /></label>
+                    <label><span>角色</span><input id="agent-template-role" placeholder="planner" /></label>
+                    <label>
+                      <span>Provider</span>
+                      <select id="agent-template-provider"></select>
+                    </label>
+                    <label><span>模型</span><input id="agent-template-model" placeholder="mock-plan / gpt-4.1-mini" /></label>
+                    <label>
+                      <span>记忆策略</span>
+                      <select id="agent-template-memory-policy">
+                        <option value="agent_private">agent_private</option>
+                        <option value="project_shared">project_shared</option>
+                        <option value="agent_private_plus_project">agent_private_plus_project</option>
+                        <option value="run_retrospective">run_retrospective</option>
                       </select>
                     </label>
                   </div>
-                  <form id="provider-filter-form" class="management-filter-form">
-                    <div class="management-filter-grid">
-                      <input name="name" placeholder="Filter by name" />
-                      <select name="provider_type" id="provider-filter-type"></select>
-                      <input name="model" placeholder="Filter by model" />
-                      <div class="filter-actions">
-                        <button type="submit" class="ghost">Filter</button>
-                        <button type="button" class="ghost" id="provider-filter-reset">Reset</button>
-                      </div>
-                    </div>
-                  </form>
-                  <div id="provider-list" class="list-grid management-list"></div>
-                  <div id="provider-pagination" class="pagination-bar"></div>
-                </div>
-              </div>
-            </section>
-
-            <section class="panel module-view" data-agent-module="agents">
-              <div class="panel-head">
-                <h3>Agents</h3>
-              </div>
-              <div class="management-shell">
-                <div class="management-form-column">
-                  <div id="agent-form-mode" class="form-mode hidden"></div>
-                  <form id="agent-form" class="stack">
-                    <div class="two-col">
-                      <label>
-                        <span>名称</span>
-                        <input name="name" placeholder="Solution Architect" required />
-                      </label>
-                      <label>
-                        <span>角色</span>
-                        <input name="role" placeholder="solution_architect" required />
-                      </label>
-                    </div>
-                    <div class="two-col long-fields">
-                      <label>
-                        <span>Provider</span>
-                        <select name="provider_id" id="agent-provider"></select>
-                      </label>
-                      <label>
-                        <span>Model Override</span>
-                        <input name="model_override" placeholder="留空时使用 Provider 默认模型" />
-                      </label>
-                    </div>
-                    <div class="two-col">
-                      <label>
-                        <span>Temperature</span>
-                        <input name="temperature" type="number" step="0.1" min="0" max="2" value="0.2" />
-                      </label>
-                      <label>
-                        <span>Max Tokens</span>
-                        <input name="max_tokens" type="number" min="1" placeholder="可选" />
-                      </label>
-                    </div>
-                    <label>
-                      <span>System Prompt</span>
-                      <textarea name="system_prompt" rows="5" placeholder="定义该 Agent 的专业职责与输出标准" required></textarea>
-                    </label>
-                    <div class="actions">
-                      <button type="submit">保存 Agent</button>
-                    </div>
-                  </form>
+                  <label><span>技能</span><input id="agent-template-skills" placeholder="任务拆解, 交付规划, 风险识别" /></label>
+                  <label><span>插件</span><select id="agent-template-plugins" multiple size="6"></select></label>
+                  <label><span>目标</span><textarea id="agent-template-goal" rows="3" placeholder="描述 Agent 的工作目标"></textarea></label>
+                  <label><span>指令</span><textarea id="agent-template-instructions" rows="5" placeholder="系统指令模板"></textarea></label>
+                  <label><span>说明</span><textarea id="agent-template-description" rows="3" placeholder="简短说明"></textarea></label>
                   <div class="actions">
-                    <button type="button" class="ghost hidden" id="agent-cancel-btn">Cancel Edit</button>
+                    <button type="submit">保存</button>
+                    <button id="agent-template-reset" type="button" class="ghost">新建</button>
                   </div>
-                  <pre id="agent-form-result" class="result-box hidden"></pre>
+                </form>
+                <pre id="agent-template-result" class="result hidden"></pre>
+              </section>
+              <section class="panel panel-wide">
+                <div class="panel-title">
+                  <h3>列表</h3>
                 </div>
-
-                <div class="management-list-column">
-                  <div class="management-list-head">
-                    <div>
-                      <h4>Agent List</h4>
-                      <p id="agent-list-summary" class="muted">Loading...</p>
-                    </div>
-                    <label class="page-size-control">
-                      <span>Per Page</span>
-                      <select id="agent-page-size">
-                        <option value="4">4</option>
-                        <option value="6">6</option>
-                        <option value="8">8</option>
-                        <option value="10" selected>10</option>
-                        <option value="12">12</option>
-                      </select>
-                    </label>
-                  </div>
-                  <form id="agent-filter-form" class="management-filter-form">
-                    <div class="management-filter-grid">
-                      <input name="name" placeholder="Filter by name" />
-                      <input name="role" placeholder="Filter by role" />
-                      <select name="provider_id" id="agent-filter-provider"></select>
-                      <input name="model" placeholder="Filter by model" />
-                      <div class="filter-actions">
-                        <button type="submit" class="ghost">Filter</button>
-                        <button type="button" class="ghost" id="agent-filter-reset">Reset</button>
-                      </div>
-                    </div>
-                  </form>
-                  <div id="agent-list" class="list-grid management-list"></div>
-                  <div id="agent-pagination" class="pagination-bar"></div>
-                </div>
-              </div>
-            </section>
-          </div>
-        </section>
-
-        <section class="page-view" data-page="knowledge">
-          <div class="page-header">
-            <div>
-              <p class="eyebrow">Knowledge</p>
-              <h2>技能与 RAG 管理</h2>
+                <div id="agent-template-list" class="list"></div>
+              </section>
             </div>
-          </div>
+          </section>
 
-          <div class="module-tabs" aria-label="Knowledge modules">
-            <button class="module-tab active" type="button" data-knowledge-module-target="skills">技能管理</button>
-            <button class="module-tab" type="button" data-knowledge-module-target="rag">RAG 管理</button>
-          </div>
-
-          <div class="module-stack">
-            <section class="panel module-view active" data-knowledge-module="skills">
-              <div class="panel-head">
-                <h3>技能库</h3>
+          <section class="page-view" data-page="team-templates">
+            <div class="page-head">
+              <div>
+                <h2>团队模板</h2>
               </div>
-              <div class="knowledge-layout">
-                <div class="stack">
-                  <div class="subtle-panel stack">
-                    <div class="panel-head compact-head">
-                      <h4>导入技能</h4>
-                      <p>支持导入单个 skill 文件夹，或一次导入父文件夹下的全部 skill 子目录。</p>
-                    </div>
-                    <div class="actions">
-                      <button type="button" id="skill-import-single-btn">导入单个 skill 文件夹</button>
-                      <button type="button" class="ghost" id="skill-import-batch-btn">批量导入父文件夹</button>
-                    </div>
-                    <div id="skill-import-summary" class="helper-copy">SKILL.md 会写入 skill 版本内容，附带文件会进入 AIMemory object store。</div>
-                    <input id="skill-import-single-input" class="hidden" type="file" webkitdirectory directory multiple />
-                    <input id="skill-import-batch-input" class="hidden" type="file" webkitdirectory directory multiple />
+            </div>
+            <div class="page-grid team-studio-grid">
+              <section class="panel">
+                <div class="panel-title">
+                  <h3>团队信息</h3>
+                </div>
+                <form id="team-template-form" class="form">
+                  <div class="form-grid two">
+                    <label><span>Key</span><input id="team-template-key" placeholder="software_delivery_team" /></label>
+                    <label><span>名称</span><input id="team-template-name" placeholder="软件交付团队" /></label>
+                    <label><span>工作区</span><input id="team-template-workspace" value="local-workspace" /></label>
+                    <label><span>项目</span><input id="team-template-project" value="default-project" /></label>
                   </div>
-                  <div id="skill-form-mode" class="form-mode hidden"></div>
-                  <form id="skill-form" class="stack">
-                    <div class="two-col">
-                      <label>
-                        <span>名称</span>
-                        <input name="name" placeholder="例如：RAG 规划技能" required />
-                      </label>
-                      <label>
-                        <span>状态</span>
-                        <select name="status">
-                          <option value="draft" selected>草稿</option>
-                          <option value="active">启用</option>
-                          <option value="archived">归档</option>
-                        </select>
-                      </label>
+                  <label><span>说明</span><textarea id="team-template-description" rows="3" placeholder="简短说明"></textarea></label>
+
+                  <div class="member-toolbar">
+                    <span class="section-mini-title">团队成员</span>
+                    <div class="member-toolbar-actions">
+                      <button id="team-member-add" type="button" class="ghost">添加成员</button>
                     </div>
-                    <label>
-                      <span>描述</span>
-                      <textarea name="description" rows="4" placeholder="描述这个技能的适用场景、调用方式和预期输出。" required></textarea>
-                    </label>
-                    <label>
-                      <span>提示词模板</span>
-                      <textarea
-                        name="skill_markdown"
-                        rows="16"
-                        placeholder="粘贴或编辑完整的 SKILL.md 内容；保存时会自动同步 frontmatter 的 name 和 description。"
-                        required
-                      ></textarea>
-                      <div class="helper-copy">这里编辑的是完整的 <code>SKILL.md</code> 内容。</div>
-                    </label>
-                    <label>
-                      <span>工作流</span>
-                      <textarea name="workflow" rows="5" placeholder='可填写 JSON 或纯文本，例如 {"steps":["检索","排序","生成"]}'></textarea>
-                    </label>
-                    <div class="two-col long-fields">
-                      <label>
-                        <span>工具</span>
-                        <input name="tools" placeholder="多个工具用逗号分隔，例如 rag.lookup, memory.search" />
-                      </label>
-                      <label>
-                        <span>主题标签</span>
-                        <input name="topics" placeholder="多个主题用逗号分隔，例如 rag, retrieval, planning" />
-                      </label>
-                    </div>
-                    <label>
-                      <span>元数据 JSON</span>
-                      <textarea name="metadata" rows="3" placeholder='{"owner":"platform"}'></textarea>
-                    </label>
-                    <div class="subtle-panel stack">
-                      <div class="panel-head compact-head">
-                        <h4>附带文档</h4>
-                        <p>新增 skill 时可附带参考文档、模板、脚本和其他附件；编辑时新上传文件会追加并按路径覆盖同名文件。</p>
-                      </div>
-                      <div class="upload-grid">
-                        <label>
-                          <span>参考文档</span>
-                          <input id="skill-reference-files" name="reference_files" type="file" multiple />
-                        </label>
-                        <label>
-                          <span>模板文件</span>
-                          <input id="skill-template-files" name="template_files" type="file" multiple />
-                        </label>
-                        <label>
-                          <span>脚本文件</span>
-                          <input id="skill-script-files" name="script_files" type="file" multiple />
-                        </label>
-                        <label>
-                          <span>其他附件</span>
-                          <input id="skill-asset-files" name="asset_files" type="file" multiple />
-                        </label>
-                      </div>
-                      <div id="skill-upload-summary" class="helper-copy">当前未选择附带文件。</div>
-                    </div>
-                    <div class="actions">
-                      <button type="submit">保存技能</button>
-                    </div>
-                  </form>
+                  </div>
+                  <div id="team-member-list" class="member-list"></div>
+
+                  <div class="compact-config-grid">
+                    <label><span>完成条件</span><textarea id="team-template-dod" rows="3" placeholder="每行一个表达式"></textarea></label>
+                    <label><span>验收检查</span><textarea id="team-template-checks" rows="3" placeholder="每行一个表达式"></textarea></label>
+                  </div>
+
+                  <details class="advanced-editor">
+                    <summary>高级 JSON</summary>
+                    <label><span>成员 JSON</span><textarea id="team-template-agents" rows="8" spellcheck="false"></textarea></label>
+                    <label><span>流程 JSON</span><textarea id="team-template-flow" rows="14" spellcheck="false"></textarea></label>
+                  </details>
+
                   <div class="actions">
-                    <button type="button" class="ghost hidden" id="skill-cancel-btn">取消编辑</button>
+                    <button type="submit">保存</button>
+                    <button id="team-template-reset" type="button" class="ghost">新建</button>
                   </div>
-                  <pre id="skill-result" class="result-box hidden"></pre>
-                </div>
+                </form>
+                <pre id="team-template-result" class="result hidden"></pre>
+              </section>
 
-                <div class="knowledge-panel-stack">
-                  <form id="skill-search-form" class="stack inline-search">
-                    <input name="query" placeholder="按名称、描述或主题标签搜索技能" />
-                    <div class="actions">
-                      <button type="submit">搜索</button>
-                      <button type="button" class="ghost" id="skill-reset-btn">查看全部</button>
-                    </div>
-                  </form>
-                  <div id="skill-list" class="list-grid"></div>
-                  <div id="skill-detail" class="detail-panel empty">选择一个技能查看详情。</div>
+              <section class="panel panel-wide panel-tall">
+                <div class="panel-title">
+                  <h3>编排画布</h3>
                 </div>
-              </div>
-            </section>
-
-            <section class="panel module-view" data-knowledge-module="rag">
-              <div class="panel-head">
-                <h3>RAG 文档</h3>
-              </div>
-              <div class="knowledge-layout">
-                <div class="stack">
-                  <div id="knowledge-form-mode" class="form-mode hidden"></div>
-                  <form id="knowledge-form" class="stack">
-                    <label>
-                      <span>标题</span>
-                      <input name="title" placeholder="例如：平台 RAG 手册" required />
-                    </label>
-                    <label>
-                      <span>来源名称</span>
-                      <input name="source_name" placeholder="例如：manual" />
-                    </label>
-                    <label>
-                      <span>正文内容</span>
-                      <textarea name="text" rows="10" placeholder="填写用于检索和回答 grounding 的文档内容。" required></textarea>
-                    </label>
-                    <div class="actions">
-                      <button type="submit">保存文档</button>
+                <div class="team-editor-shell">
+                  <aside class="graph-palette">
+                    <div class="graph-toolbar">
+                      <button type="button" class="ghost" id="team-graph-validate">校验</button>
+                      <button type="button" class="ghost" id="team-graph-preview">预览 Build</button>
+                      <button type="button" class="ghost" id="team-graph-autolayout">自动布局</button>
                     </div>
-                  </form>
-                  <div class="actions">
-                    <button type="button" class="ghost hidden" id="knowledge-cancel-btn">取消编辑</button>
+                    <div class="palette-grid">
+                      <button type="button" class="node-palette-item" data-node-type="agent">Agent</button>
+                      <button type="button" class="node-palette-item" data-node-type="condition">条件</button>
+                      <button type="button" class="node-palette-item" data-node-type="router">路由</button>
+                      <button type="button" class="node-palette-item" data-node-type="loop">循环</button>
+                      <button type="button" class="node-palette-item" data-node-type="approval">审批</button>
+                      <button type="button" class="node-palette-item" data-node-type="artifact">产物</button>
+                      <button type="button" class="node-palette-item" data-node-type="parallel">并行</button>
+                      <button type="button" class="node-palette-item" data-node-type="merge">汇聚</button>
+                      <button type="button" class="node-palette-item" data-node-type="subflow">子流程</button>
+                      <button type="button" class="node-palette-item" data-node-type="end">结束</button>
+                    </div>
+                    <div id="team-template-preview" class="inspector-grid"></div>
+                  </aside>
+
+                  <div class="graph-stage-wrap">
+                    <div id="team-link-hint" class="editor-mode hidden"></div>
+                    <div id="team-graph-stage" class="graph-stage">
+                      <svg id="team-graph-edges" class="graph-edges"></svg>
+                      <div id="team-graph-canvas" class="graph-canvas"></div>
+                    </div>
                   </div>
-                  <pre id="knowledge-result" class="result-box hidden"></pre>
-                </div>
 
-                <div class="knowledge-panel-stack">
-                  <form id="knowledge-search-form" class="stack inline-search">
-                    <input name="query" placeholder="搜索检索切块或源文档内容" />
-                    <div class="actions">
-                      <button type="submit">搜索</button>
-                      <button type="button" class="ghost" id="knowledge-reset-btn">查看全部</button>
+                  <aside class="graph-inspector">
+                    <div class="inspector-header">
+                      <h3>属性</h3>
+                      <div class="inspector-actions">
+                        <button id="team-node-link" type="button" class="ghost">开始连线</button>
+                        <button id="team-node-delete" type="button" class="ghost">删除节点</button>
+                      </div>
                     </div>
-                  </form>
-                  <div id="knowledge-list" class="list-grid"></div>
-                  <div id="knowledge-detail" class="detail-panel empty">选择一个 RAG 文档或检索命中查看详情。</div>
+                    <div id="team-node-empty" class="detail empty compact-detail">选择节点后编辑属性</div>
+                    <div id="team-node-form-shell" class="hidden">
+                      <div class="form-grid two">
+                        <label><span>ID</span><input id="team-node-id" /></label>
+                        <label><span>类型</span><input id="team-node-type" disabled /></label>
+                      </div>
+                      <label><span>名称</span><input id="team-node-name" placeholder="可留空" /></label>
+                      <label><span>绑定成员</span><select id="team-node-agent"></select></label>
+                      <label><span>指令</span><textarea id="team-node-instruction" rows="4" placeholder="节点指令"></textarea></label>
+                      <label><span>表达式</span><textarea id="team-node-expr" rows="3" placeholder="condition/router 使用"></textarea></label>
+                      <div class="form-grid two">
+                        <label><span>最大循环</span><input id="team-node-max-iterations" placeholder="loop 使用" /></label>
+                        <label><span>产物类型</span><input id="team-node-artifact-kind" placeholder="report" /></label>
+                      </div>
+                      <label><span>产物名称</span><input id="team-node-artifact-name" placeholder="artifact.md" /></label>
+                      <label><span>模板</span><textarea id="team-node-template" rows="4" placeholder="{{review.summary}}"></textarea></label>
+                      <label><span>来源</span><input id="team-node-source" placeholder="review.summary" /></label>
+                      <div class="edge-editor-head">
+                        <span class="section-mini-title">出边</span>
+                      </div>
+                      <div id="team-edge-list" class="edge-list"></div>
+                    </div>
+                  </aside>
                 </div>
+              </section>
+
+              <section class="panel">
+                <div class="panel-title">
+                  <h3>图校验</h3>
+                </div>
+                <div id="team-validation-result" class="inspector-grid"></div>
+              </section>
+
+              <section class="panel">
+                <div class="panel-title">
+                  <h3>列表</h3>
+                </div>
+                <div id="team-template-list" class="list"></div>
+              </section>
+            </div>
+          </section>
+
+          <section class="page-view" data-page="builds">
+            <div class="page-head">
+              <div>
+                <h2>构建发布</h2>
               </div>
-            </section>
-          </div>
-        </section>
-      </main>
+            </div>
+            <div class="page-grid runtime-grid">
+              <section class="panel">
+                <div class="panel-title">
+                  <h3>生成 Build</h3>
+                </div>
+                <form id="build-form" class="form">
+                  <label><span>团队模板</span><select id="build-team-template"></select></label>
+                  <label><span>Build 名称</span><input id="build-name" placeholder="可留空" /></label>
+                  <button type="submit">生成</button>
+                </form>
+                <pre id="build-result" class="result hidden"></pre>
+              </section>
+              <section class="panel">
+                <div class="panel-title">
+                  <h3>Build 列表</h3>
+                </div>
+                <div id="build-list" class="list"></div>
+              </section>
+              <section class="panel panel-wide">
+                <div class="panel-title">
+                  <h3>Build 详情</h3>
+                </div>
+                <div id="build-detail" class="detail empty">请选择一个 Build。</div>
+              </section>
+            </div>
+          </section>
+
+          <section class="page-view" data-page="runtime">
+            <div class="page-head">
+              <div>
+                <h2>任务运行</h2>
+              </div>
+            </div>
+            <div class="page-grid runtime-grid">
+              <section class="panel">
+                <div class="panel-title">
+                  <h3>启动 Run</h3>
+                </div>
+                <form id="task-form" class="form">
+                  <label><span>Build</span><select id="task-build"></select></label>
+                  <label><span>内部蓝图</span><select id="task-blueprint"></select></label>
+                  <label><span>任务标题</span><input id="task-title" placeholder="输入标题" /></label>
+                  <label>
+                    <span>审批模式</span>
+                    <select id="task-approval-mode">
+                      <option value="auto" selected>自动通过</option>
+                      <option value="manual">人工审批</option>
+                    </select>
+                  </label>
+                  <label><span>任务描述</span><textarea id="task-prompt" rows="8" placeholder="输入目标、范围、约束和交付件"></textarea></label>
+                  <button type="submit">启动</button>
+                </form>
+                <pre id="task-result" class="result hidden"></pre>
+              </section>
+              <section class="panel">
+                <div class="panel-title">
+                  <h3>Run 列表</h3>
+                </div>
+                <div id="run-list" class="list"></div>
+              </section>
+              <section class="panel panel-wide">
+                <div class="panel-title">
+                  <h3>Run 详情</h3>
+                </div>
+                <div id="run-detail" class="detail empty">请选择一个 Run。</div>
+              </section>
+            </div>
+          </section>
+
+          <section class="page-view" data-page="approvals">
+            <div class="page-head">
+              <div>
+                <h2>审批中心</h2>
+              </div>
+            </div>
+            <div class="page-grid approvals-grid">
+              <section class="panel panel-wide">
+                <div class="panel-title">
+                  <h3>待审批事项</h3>
+                </div>
+                <div id="approval-list" class="list"></div>
+              </section>
+            </div>
+          </section>
+
+          <section class="page-view" data-page="blueprints">
+            <div class="page-head">
+              <div>
+                <h2>内部蓝图</h2>
+              </div>
+            </div>
+            <div class="page-grid runtime-grid">
+              <section class="panel">
+                <div class="panel-title">
+                  <h3>蓝图列表</h3>
+                </div>
+                <div id="blueprint-list" class="list"></div>
+              </section>
+              <section class="panel panel-wide">
+                <div class="panel-title">
+                  <h3>蓝图详情</h3>
+                </div>
+                <div id="blueprint-detail" class="detail empty">请选择一个蓝图。</div>
+              </section>
+            </div>
+          </section>
+        </main>
+      </div>
     </div>
     <script src="/static/app.js" defer></script>
   </body>
