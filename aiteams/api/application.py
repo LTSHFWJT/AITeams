@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sqlite3
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -18,7 +19,7 @@ from aiteams.plugins import PluginManager
 from aiteams.runtime.compiler import BlueprintCompiler
 from aiteams.runtime.engine import RuntimeEngine
 from aiteams.storage.metadata import MetadataStore
-from aiteams.utils import pretty_json
+from aiteams.utils import pretty_json, trim_text
 from aiteams.workspace.manager import WorkspaceManager
 
 
@@ -32,10 +33,11 @@ LOGGER.propagate = False
 
 
 class AppError(RuntimeError):
-    def __init__(self, status: int, detail: str):
+    def __init__(self, status: int, detail: str, *, extra: dict[str, Any] | None = None):
         super().__init__(detail)
         self.status = status
         self.detail = detail
+        self.extra = dict(extra or {})
 
 
 @dataclass(slots=True)
@@ -148,7 +150,7 @@ class WebApplication:
                 return self._json(200, self.container.agent_center.test_provider_model(payload))
             if path.startswith("/api/agent-center/providers/"):
                 provider_id = path.rsplit("/", 1)[-1]
-                provider = self.container.agent_center.normalize_provider_profile(self.container.store.get_provider_profile(provider_id))
+                provider = self.container.agent_center.normalize_provider_profile(self.container.store.get_provider_profile(provider_id, include_secret=True))
                 if provider is None:
                     raise AppError(404, "Provider profile does not exist.")
                 if method == "GET":
@@ -483,7 +485,7 @@ class WebApplication:
                 return self._json(200, {"items": results[:8]})
             raise AppError(404, "Not found.")
         except AppError as exc:
-            return self._json(exc.status, {"detail": exc.detail})
+            return self._json(exc.status, {"detail": exc.detail, **exc.extra})
         except ValueError as exc:
             return self._json(400, {"detail": str(exc)})
         except Exception as exc:
@@ -499,19 +501,71 @@ class WebApplication:
 
     def _save_provider_profile(self, payload: dict[str, Any], *, provider_id: str | None) -> dict[str, Any]:
         existing = self.container.store.get_provider_profile(provider_id) if provider_id else None
-        normalized = self.container.agent_center.prepare_provider_profile(payload, existing=existing)
-        provider = self.container.store.save_provider_profile(
-            provider_profile_id=provider_id,
-            key=str(normalized["key"]),
-            name=str(normalized["name"]),
-            provider_type=str(normalized["provider_type"]),
-            description=str(normalized["description"]),
-            config=dict(normalized["config"]),
-            secret=dict(normalized["secret"]) if normalized["secret"] else None,
-        )
+        try:
+            normalized = self.container.agent_center.prepare_provider_profile(payload, existing=existing)
+        except KeyError as exc:
+            supported = [str(item.get("provider_type") or "") for item in self.container.agent_center.provider_types()]
+            raise AppError(
+                400,
+                "Provider 保存失败。",
+                extra={
+                    "error_type": "provider_validation_error",
+                    "errors": [f"不支持的 API 模式：{payload.get('provider_type') or ''}。"],
+                    "context": self._provider_error_context(payload, provider_id=provider_id),
+                    "supported_provider_types": [item for item in supported if item],
+                },
+            ) from exc
+        except ValueError as exc:
+            raise AppError(
+                400,
+                "Provider 保存失败。",
+                extra={
+                    "error_type": "provider_validation_error",
+                    "errors": [str(exc)],
+                    "context": self._provider_error_context(payload, provider_id=provider_id),
+                },
+            ) from exc
+        try:
+            provider = self.container.store.save_provider_profile(
+                provider_profile_id=provider_id,
+                key=str(normalized["key"]),
+                name=str(normalized["name"]),
+                provider_type=str(normalized["provider_type"]),
+                description=str(normalized["description"]),
+                config=dict(normalized["config"]),
+                secret=dict(normalized["secret"]) if normalized["secret"] else None,
+            )
+        except sqlite3.IntegrityError as exc:
+            message = "Provider Key 已存在，请更换后重试。"
+            if "provider_profiles.key" not in str(exc):
+                message = str(exc)
+            raise AppError(
+                400,
+                "Provider 保存失败。",
+                extra={
+                    "error_type": "provider_persistence_error",
+                    "errors": [message],
+                    "context": self._provider_error_context(payload, provider_id=provider_id),
+                },
+            ) from exc
         normalized_provider = self.container.agent_center.normalize_provider_profile(provider)
         assert normalized_provider is not None
         return normalized_provider
+
+    def _provider_error_context(self, payload: dict[str, Any], *, provider_id: str | None) -> dict[str, Any]:
+        config = dict(payload.get("config") or {})
+        models = payload.get("models", config.get("models"))
+        model_count = len(models) if isinstance(models, list) else 0
+        return {
+            "provider_id": provider_id,
+            "key": self._optional_str(payload.get("key")),
+            "name": self._optional_str(payload.get("name")),
+            "provider_type": self._optional_str(payload.get("provider_type")),
+            "base_url": self._optional_str(payload.get("base_url")) or self._optional_str(config.get("base_url")),
+            "model_count": model_count,
+            "skip_tls_verify": bool(payload.get("skip_tls_verify", config.get("skip_tls_verify"))),
+            "has_secret": bool((payload.get("secret") or {}).get("api_key") or payload.get("api_key")),
+        }
 
     def _save_plugin(self, payload: dict[str, Any], *, plugin_id: str | None) -> dict[str, Any]:
         self._require_fields(payload, "key", "name")
@@ -686,7 +740,24 @@ class _RequestHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(length) if length else b""
         response = self.server.application.handle(self.command, self.path, body)  # type: ignore[attr-defined]
         if response.status >= 400:
-            LOGGER.warning("%s %s -> %s", self.command, self.path, response.status)
+            detail = ""
+            if response.body:
+                if response.content_type.startswith("application/json"):
+                    try:
+                        payload = json.loads(response.body.decode("utf-8"))
+                        error_lines = []
+                        if isinstance(payload, dict):
+                            if payload.get("detail"):
+                                error_lines.append(str(payload["detail"]))
+                            if isinstance(payload.get("errors"), list):
+                                error_lines.extend(str(item) for item in payload["errors"] if item)
+                        detail = " | ".join(error_lines)
+                    except Exception:
+                        detail = response.body.decode("utf-8", errors="ignore")
+                else:
+                    detail = response.body.decode("utf-8", errors="ignore")
+            suffix = f" detail={trim_text(detail, limit=320)}" if detail else ""
+            LOGGER.warning("%s %s -> %s%s", self.command, self.path, response.status, suffix)
         self.send_response(response.status)
         self.send_header("Content-Type", response.content_type)
         self.send_header("Content-Length", str(len(response.body)))

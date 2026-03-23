@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import ssl
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit, urlunsplit
@@ -18,7 +19,7 @@ from aiteams.ai_gateway import AIGateway, ProviderRequestError
 from aiteams.catalog import list_provider_presets, preset_for
 from aiteams.plugins import PluginManager
 from aiteams.storage.metadata import MetadataStore
-from aiteams.utils import pretty_json, slugify, trim_text
+from aiteams.utils import make_uuid7, pretty_json, trim_text
 
 MODEL_TYPES = {"chat", "embedding", "rerank"}
 
@@ -133,12 +134,10 @@ class AgentCenterService:
         models = self._normalize_models(
             payload.get("models", merged_config.get("models")),
             provider_type=provider_type,
-            fallback_model=str(payload.get("model") or merged_config.get("model") or preset.get("default_model") or "").strip(),
+            fallback_model=str(payload.get("model") or merged_config.get("model") or "").strip(),
         )
-        if not models and provider_type == "mock":
-            models = [{"name": str(preset.get("default_model") or "mock-model"), "model_type": "chat"}]
         default_chat = self._find_default_model(models, "chat")
-        default_model_name = default_chat["name"] if default_chat else (models[0]["name"] if models else str(preset.get("default_model") or ""))
+        default_model_name = default_chat["name"] if default_chat else (models[0]["name"] if models else "")
 
         base_url = str(payload.get("base_url") or merged_config.get("base_url") or "").strip()
         if not base_url and preset.get("use_default_base_url_when_blank"):
@@ -146,12 +145,17 @@ class AgentCenterService:
         api_version = str(payload.get("api_version") or merged_config.get("api_version") or preset.get("default_api_version") or "").strip()
         organization = str(payload.get("organization") or merged_config.get("organization") or "").strip()
         api_key_env = str(payload.get("api_key_env") or merged_config.get("api_key_env") or "").strip()
+        skip_tls_verify = self._coerce_bool(payload.get("skip_tls_verify", merged_config.get("skip_tls_verify")))
 
         normalized_config = dict(merged_config)
         normalized_config["backend"] = provider_type
         normalized_config["models"] = models
-        normalized_config["model"] = default_model_name
+        normalized_config["skip_tls_verify"] = skip_tls_verify
         normalized_config["temperature"] = float(merged_config.get("temperature", 0.2))
+        if default_model_name:
+            normalized_config["model"] = default_model_name
+        else:
+            normalized_config.pop("model", None)
         if base_url:
             normalized_config["base_url"] = base_url
         else:
@@ -179,7 +183,7 @@ class AgentCenterService:
                 secret.pop("api_key", None)
 
         return {
-            "key": slugify(str(payload.get("key") or (existing_item or {}).get("key") or name), fallback="provider"),
+            "key": str((existing_item or {}).get("key") or make_uuid7()),
             "name": name,
             "provider_type": provider_type,
             "description": str(payload.get("description") or (existing_item or {}).get("description") or "").strip(),
@@ -194,12 +198,16 @@ class AgentCenterService:
         provider_type = str(item.get("provider_type") or "mock")
         preset = preset_for(provider_type)
         config = dict(item.get("config_json") or {})
-        models = self._normalize_models(config.get("models"), provider_type=provider_type, fallback_model=str(config.get("model") or preset.get("default_model") or "").strip())
+        models = self._normalize_models(config.get("models"), provider_type=provider_type, fallback_model=str(config.get("model") or "").strip())
         default_chat = self._find_default_model(models, "chat")
-        default_model_name = default_chat["name"] if default_chat else (models[0]["name"] if models else str(preset.get("default_model") or ""))
+        default_model_name = default_chat["name"] if default_chat else (models[0]["name"] if models else "")
         config["backend"] = str(config.get("backend") or provider_type)
         config["models"] = models
-        config["model"] = str(config.get("model") or default_model_name)
+        if default_model_name:
+            config["model"] = default_model_name
+        else:
+            config.pop("model", None)
+        config["skip_tls_verify"] = self._coerce_bool(config.get("skip_tls_verify"))
         if not config.get("base_url") and preset.get("use_default_base_url_when_blank"):
             config["base_url"] = str(preset.get("default_base_url") or "")
         if preset.get("default_api_version") and not config.get("api_version"):
@@ -208,7 +216,7 @@ class AgentCenterService:
         item["api_mode"] = provider_type
         item["model_count"] = len(models)
         item["default_model_name"] = default_model_name
-        item["default_chat_model_name"] = default_chat["name"] if default_chat else default_model_name
+        item["default_chat_model_name"] = default_chat["name"] if default_chat else ""
         item["supported_model_types"] = list(preset.get("supported_model_types") or [])
         item["preset"] = preset
         return item
@@ -218,8 +226,8 @@ class AgentCenterService:
         preset = preset_for(str(runtime_provider["provider_type"]))
         discovery_mode = str(preset.get("discovery_mode") or "local")
         if discovery_mode == "local":
-            models = runtime_provider.get("models") or [{"name": str(preset.get("default_model") or "mock-model"), "model_type": "chat"}]
-            return {"items": models, "source": "local"}
+            return {"items": runtime_provider.get("models") or [], "source": "local"}
+        self._require_runtime_base_url(runtime_provider, label=str(preset.get("label") or runtime_provider["provider_type"]))
         if not preset.get("supports_model_discovery"):
             raise ValueError("当前 API 模式不支持自动获取模型列表。")
         items = self._discover_remote_models(runtime_provider, discovery_mode)
@@ -234,6 +242,9 @@ class AgentCenterService:
         model_type = str(model_payload.get("model_type") or "chat").strip() or "chat"
         if model_type not in MODEL_TYPES:
             raise ValueError("模型类型不支持。")
+        if runtime_provider["provider_type"] != "mock":
+            preset = preset_for(str(runtime_provider["provider_type"]))
+            self._require_runtime_base_url(runtime_provider, label=str(preset.get("label") or runtime_provider["provider_type"]))
         if runtime_provider["provider_type"] == "mock":
             return self._mock_model_test(model_name, model_type)
         if model_type == "chat":
@@ -327,29 +338,46 @@ class AgentCenterService:
         return build
 
     def _runtime_provider(self, payload: dict[str, Any]) -> dict[str, Any]:
-        provider_type = str(payload.get("provider_type") or "mock").strip()
+        existing = self._stored_runtime_provider(payload)
+        existing_config = dict((existing or {}).get("config_json") or {})
+        config = dict(existing_config)
+        config.update(dict(payload.get("config") or {}))
+        provider_type = str(payload.get("provider_type") or (existing or {}).get("provider_type") or "mock").strip()
         preset = preset_for(provider_type)
-        config = dict(payload.get("config") or {})
-        models = self._normalize_models(payload.get("models", config.get("models")), provider_type=provider_type, fallback_model=str(config.get("model") or preset.get("default_model") or "").strip())
+        models = self._normalize_models(payload.get("models", config.get("models")), provider_type=provider_type, fallback_model=str(config.get("model") or "").strip())
         base_url = str(payload.get("base_url") or config.get("base_url") or "").strip()
         if not base_url and preset.get("use_default_base_url_when_blank"):
             base_url = str(preset.get("default_base_url") or "").strip()
         api_version = str(payload.get("api_version") or config.get("api_version") or preset.get("default_api_version") or "").strip()
         organization = str(payload.get("organization") or config.get("organization") or "").strip()
-        secret = dict(payload.get("secret") or {})
+        skip_tls_verify = self._coerce_bool(payload.get("skip_tls_verify", config.get("skip_tls_verify")))
+        secret = dict((existing or {}).get("secret_json") or {})
+        secret.update(dict(payload.get("secret") or {}))
         api_key = str(secret.get("api_key") or payload.get("api_key") or "").strip()
         if not api_key:
             api_key = str((payload.get("secret_json") or {}).get("api_key") or "").strip()
         return {
-            "name": str(payload.get("name") or "Provider Test"),
+            "name": str(payload.get("name") or (existing or {}).get("name") or "Provider Test"),
             "provider_type": provider_type,
             "base_url": base_url,
             "api_version": api_version,
             "organization": organization,
+            "skip_tls_verify": skip_tls_verify,
             "api_key": api_key,
             "models": models,
-            "model": str(config.get("model") or (self._find_default_model(models, "chat") or {}).get("name") or preset.get("default_model") or "").strip(),
+            "model": str(config.get("model") or (self._find_default_model(models, "chat") or {}).get("name") or "").strip(),
         }
+
+    def _stored_runtime_provider(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        provider_id = str(payload.get("id") or "").strip()
+        if not provider_id:
+            return None
+        return self.store.get_provider_profile(provider_id, include_secret=True)
+
+    def _require_runtime_base_url(self, provider: dict[str, Any], *, label: str) -> None:
+        if str(provider.get("base_url") or "").strip():
+            return
+        raise ValueError(f"{label} Base URL 不能为空。")
 
     def _normalize_models(self, raw_models: Any, *, provider_type: str, fallback_model: str) -> list[dict[str, Any]]:
         models: list[dict[str, Any]] = []
@@ -377,6 +405,15 @@ class AgentCenterService:
             models = [item for item in models if item["model_type"] in supported] or models
         models.sort(key=lambda item: (0 if item["model_type"] == "chat" else 1 if item["model_type"] == "embedding" else 2, item["name"]))
         return models
+
+    def _coerce_bool(self, value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        if isinstance(value, (int, float)):
+            return bool(value)
+        return False
 
     def _find_default_model(self, models: list[dict[str, Any]], model_type: str) -> dict[str, Any] | None:
         return next((item for item in models if item.get("model_type") == model_type), None)
@@ -406,20 +443,20 @@ class AgentCenterService:
 
     def _discover_remote_models(self, provider: dict[str, Any], discovery_mode: str) -> list[dict[str, Any]]:
         if discovery_mode == "openai":
-            payload = self._request_json("GET", self._append_path(provider["base_url"], "/models"), headers=self._auth_headers(provider, bearer=True))
+            payload = self._request_json("GET", self._append_path(provider["base_url"], "/models"), headers=self._auth_headers(provider, bearer=True), skip_tls_verify=bool(provider.get("skip_tls_verify")))
             items = payload.get("data") or payload.get("models") or []
             return self._normalize_remote_models(items)
         if discovery_mode == "azure-openai":
-            payload = self._request_json("GET", self._azure_models_url(provider), headers=self._auth_headers(provider, azure=True))
+            payload = self._request_json("GET", self._azure_models_url(provider), headers=self._auth_headers(provider, azure=True), skip_tls_verify=bool(provider.get("skip_tls_verify")))
             items = payload.get("data") or payload.get("value") or payload.get("models") or []
             return self._normalize_remote_models(items)
         if discovery_mode == "anthropic":
-            payload = self._request_json("GET", self._append_path(provider["base_url"], "/v1/models"), headers=self._auth_headers(provider, anthropic=True))
+            payload = self._request_json("GET", self._append_path(provider["base_url"], "/v1/models"), headers=self._auth_headers(provider, anthropic=True), skip_tls_verify=bool(provider.get("skip_tls_verify")))
             items = payload.get("data") or payload.get("models") or []
             normalized = [{"name": str(item.get("id") or item.get("name") or ""), "model_type": "chat"} for item in items]
             return self._normalize_models(normalized, provider_type=str(provider["provider_type"]), fallback_model="")
         if discovery_mode == "gemini":
-            payload = self._request_json("GET", self._gemini_url(provider, "/models"))
+            payload = self._request_json("GET", self._gemini_url(provider, "/models"), skip_tls_verify=bool(provider.get("skip_tls_verify")))
             items = payload.get("models") or []
             normalized: list[dict[str, Any]] = []
             for item in items:
@@ -437,7 +474,7 @@ class AgentCenterService:
                 normalized.append(entry)
             return self._normalize_models(normalized, provider_type=str(provider["provider_type"]), fallback_model="")
         if discovery_mode == "cohere":
-            payload = self._request_json("GET", self._append_path(self._cohere_base(provider), "/models"), headers=self._auth_headers(provider, bearer=True))
+            payload = self._request_json("GET", self._append_path(self._cohere_base(provider), "/models"), headers=self._auth_headers(provider, bearer=True), skip_tls_verify=bool(provider.get("skip_tls_verify")))
             items = payload.get("models") or payload.get("data") or []
             normalized: list[dict[str, Any]] = []
             for item in items:
@@ -519,21 +556,21 @@ class AgentCenterService:
     def _embedding_model_test(self, provider: dict[str, Any], model_name: str) -> dict[str, Any]:
         provider_type = str(provider["provider_type"])
         if provider_type in {"openai", "custom_openai", "deepseek", "openrouter", "ollama"}:
-            payload = self._request_json("POST", self._append_path(provider["base_url"], "/embeddings"), headers=self._auth_headers(provider, bearer=True), payload={"model": model_name, "input": "provider embedding probe"})
+            payload = self._request_json("POST", self._append_path(provider["base_url"], "/embeddings"), headers=self._auth_headers(provider, bearer=True), payload={"model": model_name, "input": "provider embedding probe"}, skip_tls_verify=bool(provider.get("skip_tls_verify")))
             data = (payload.get("data") or [{}])[0]
             vector = data.get("embedding") or []
             return {"ok": True, "model": model_name, "model_type": "embedding", "message": "嵌入模型测试通过。", "vector_size": len(vector)}
         if provider_type == "azure_openai":
-            payload = self._request_json("POST", self._azure_embeddings_url(provider, model_name), headers=self._auth_headers(provider, azure=True), payload={"input": "provider embedding probe"})
+            payload = self._request_json("POST", self._azure_embeddings_url(provider, model_name), headers=self._auth_headers(provider, azure=True), payload={"input": "provider embedding probe"}, skip_tls_verify=bool(provider.get("skip_tls_verify")))
             data = (payload.get("data") or [{}])[0]
             vector = data.get("embedding") or []
             return {"ok": True, "model": model_name, "model_type": "embedding", "message": "嵌入模型测试通过。", "vector_size": len(vector)}
         if provider_type == "gemini":
-            payload = self._request_json("POST", self._gemini_url(provider, f"/models/{model_name}:embedContent"), payload={"content": {"parts": [{"text": "provider embedding probe"}]}})
+            payload = self._request_json("POST", self._gemini_url(provider, f"/models/{model_name}:embedContent"), payload={"content": {"parts": [{"text": "provider embedding probe"}]}}, skip_tls_verify=bool(provider.get("skip_tls_verify")))
             vector = ((payload.get("embedding") or {}).get("values")) or []
             return {"ok": True, "model": model_name, "model_type": "embedding", "message": "嵌入模型测试通过。", "vector_size": len(vector)}
         if provider_type == "cohere":
-            payload = self._request_json("POST", self._append_path(self._cohere_base(provider), "/embed"), headers=self._auth_headers(provider, bearer=True), payload={"model": model_name, "texts": ["provider embedding probe"], "input_type": "search_document"})
+            payload = self._request_json("POST", self._append_path(self._cohere_base(provider), "/embed"), headers=self._auth_headers(provider, bearer=True), payload={"model": model_name, "texts": ["provider embedding probe"], "input_type": "search_document"}, skip_tls_verify=bool(provider.get("skip_tls_verify")))
             embeddings = payload.get("embeddings") or {}
             vectors = embeddings.get("float") or embeddings.get("int8") or embeddings.get("uint8") or []
             first = vectors[0] if isinstance(vectors, list) and vectors else []
@@ -548,6 +585,7 @@ class AgentCenterService:
                 self._append_path(self._cohere_base(provider), "/rerank"),
                 headers=self._auth_headers(provider, bearer=True),
                 payload={"model": model_name, "query": "provider rerank probe", "documents": ["provider rerank probe", "unrelated text"], "top_n": 1},
+                skip_tls_verify=bool(provider.get("skip_tls_verify")),
             )
             results = payload.get("results") or []
             top = results[0] if results else {}
@@ -583,17 +621,21 @@ class AgentCenterService:
             headers["OpenAI-Organization"] = organization
         return headers
 
-    def _request_json(self, method: str, url: str, *, headers: dict[str, str] | None = None, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _request_json(self, method: str, url: str, *, headers: dict[str, str] | None = None, payload: dict[str, Any] | None = None, skip_tls_verify: bool = False) -> dict[str, Any]:
         data = json.dumps(payload).encode("utf-8") if payload is not None else None
         request = Request(url, data=data, headers=headers or {}, method=method)
         try:
-            with urlopen(request, timeout=30) as response:
+            context = ssl._create_unverified_context() if skip_tls_verify else None
+            with urlopen(request, timeout=30, context=context) as response:
                 body = response.read().decode("utf-8")
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="ignore") if hasattr(exc, "read") else ""
             raise ValueError(trim_text(detail or str(exc), limit=320) or "Provider request failed.") from exc
         except URLError as exc:
-            raise ValueError(trim_text(str(exc.reason), limit=320) or "Provider request failed.") from exc
+            detail = trim_text(str(exc.reason), limit=320) or "Provider request failed."
+            if "certificate verify failed" in detail.lower() or "certificate_verify_failed" in detail.lower():
+                raise ValueError(f"TLS 证书校验失败。若为自签名证书，请启用“跳过 TLS 证书校验”后重试。原始错误：{detail}") from exc
+            raise ValueError(detail) from exc
         try:
             decoded = json.loads(body) if body else {}
         except json.JSONDecodeError as exc:

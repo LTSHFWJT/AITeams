@@ -4,7 +4,10 @@ import json
 import tempfile
 import textwrap
 import unittest
+from uuid import UUID
+from urllib.error import URLError
 from pathlib import Path
+from unittest import mock
 
 from aiteams.app import AppSettings, create_app
 from aiteams.domain.templates import approval_delivery_template, research_parallel_template, software_delivery_template
@@ -460,7 +463,7 @@ class AITeamsPlatformTests(unittest.TestCase):
             },
         )
         self.assertEqual(status, 200)
-        self.assertEqual(provider["key"], "mock-catalog")
+        self.assertEqual(UUID(provider["key"]).version, 7)
         self.assertEqual(provider["config_json"]["model"], "mock-chat")
         self.assertEqual(len(provider["config_json"]["models"]), 3)
 
@@ -492,6 +495,46 @@ class AITeamsPlatformTests(unittest.TestCase):
         self.assertTrue(tested["ok"])
         self.assertEqual(tested["model_type"], "chat")
 
+    def test_provider_detail_includes_secret_for_editor(self) -> None:
+        status, provider = self._request(
+            "POST",
+            "/api/agent-center/providers",
+            {
+                "name": "Editable Provider",
+                "provider_type": "custom_openai",
+                "config": {"base_url": "https://example.com/v1", "skip_tls_verify": True},
+                "secret": {"api_key": "stored-secret"},
+            },
+        )
+        self.assertEqual(status, 200)
+
+        detail_status, detail = self._request("GET", f"/api/agent-center/providers/{provider['id']}")
+        self.assertEqual(detail_status, 200)
+        self.assertTrue(detail["has_secret"])
+        self.assertEqual(detail["secret_json"]["api_key"], "stored-secret")
+        self.assertTrue(detail["config_json"]["skip_tls_verify"])
+
+    def test_provider_can_be_saved_without_models_or_default_model(self) -> None:
+        status, provider = self._request(
+            "POST",
+            "/api/agent-center/providers",
+            {
+                "name": "Empty Mock Provider",
+                "provider_type": "mock",
+                "config": {
+                    "base_url": "mock://local",
+                    "models": [],
+                    "model": "",
+                },
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(provider["model_count"], 0)
+        self.assertEqual(provider["config_json"]["models"], [])
+        self.assertNotIn("model", provider["config_json"])
+        self.assertEqual(provider["default_model_name"], "")
+        self.assertEqual(provider["default_chat_model_name"], "")
+
     def test_custom_openai_provider_keeps_rerank_models(self) -> None:
         status, provider = self._request(
             "POST",
@@ -517,6 +560,170 @@ class AITeamsPlatformTests(unittest.TestCase):
         )
         self.assertEqual(provider["model_count"], 3)
         self.assertIn("rerank", provider["supported_model_types"])
+
+    def test_discover_models_reuses_saved_provider_secret_when_editing(self) -> None:
+        status, provider = self._request(
+            "POST",
+            "/api/agent-center/providers",
+            {
+                "name": "Secured OpenAI Catalog",
+                "provider_type": "custom_openai",
+                "config": {
+                    "base_url": "https://example.com/v1",
+                    "models": [{"name": "seed-chat", "model_type": "chat"}],
+                },
+                "secret": {"api_key": "stored-secret"},
+            },
+        )
+        self.assertEqual(status, 200)
+
+        get_status, editable = self._request("GET", f"/api/agent-center/providers/{provider['id']}")
+        self.assertEqual(get_status, 200)
+        self.assertTrue(editable["has_secret"])
+
+        with mock.patch.object(
+            self._app.container.agent_center,
+            "_request_json",
+            return_value={"data": [{"id": "remote-chat"}]},
+        ) as request_json:
+            discover_status, discovered = self._request(
+                "POST",
+                "/api/agent-center/providers/discover-models",
+                {
+                    "id": editable["id"],
+                    "name": editable["name"],
+                    "provider_type": editable["provider_type"],
+                    "config": editable["config_json"],
+                },
+            )
+
+        self.assertEqual(discover_status, 200)
+        self.assertEqual(discovered["items"][0]["name"], "remote-chat")
+        _, _, kwargs = request_json.mock_calls[0]
+        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer stored-secret")
+
+    def test_discover_models_uses_unverified_ssl_context_when_enabled(self) -> None:
+        class _Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"data":[{"id":"remote-chat"}]}'
+
+        with mock.patch("aiteams.agent_center.service.urlopen", return_value=_Response()) as mocked_urlopen:
+            status, payload = self._request(
+                "POST",
+                "/api/agent-center/providers/discover-models",
+                {
+                    "name": "Self Signed Provider",
+                    "provider_type": "custom_openai",
+                    "config": {
+                        "base_url": "https://example.com/v1",
+                        "skip_tls_verify": True,
+                    },
+                },
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["items"][0]["name"], "remote-chat")
+        self.assertIsNotNone(mocked_urlopen.call_args.kwargs["context"])
+
+    def test_discover_models_requires_base_url_for_custom_openai(self) -> None:
+        status, payload = self._request(
+            "POST",
+            "/api/agent-center/providers/discover-models",
+            {
+                "name": "Broken OpenAI Catalog",
+                "provider_type": "custom_openai",
+                "config": {},
+            },
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["detail"], "OpenAI 兼容接口 Base URL 不能为空。")
+
+    def test_mock_discover_models_returns_empty_when_provider_has_no_models(self) -> None:
+        status, payload = self._request(
+            "POST",
+            "/api/agent-center/providers/discover-models",
+            {
+                "name": "Empty Mock Provider",
+                "provider_type": "mock",
+                "config": {
+                    "base_url": "mock://local",
+                    "models": [],
+                    "model": "",
+                },
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["source"], "local")
+        self.assertEqual(payload["items"], [])
+
+    def test_discover_models_ssl_error_recommends_tls_toggle(self) -> None:
+        with mock.patch(
+            "aiteams.agent_center.service.urlopen",
+            side_effect=URLError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate in certificate chain (_ssl.c:1081)"),
+        ):
+            status, payload = self._request(
+                "POST",
+                "/api/agent-center/providers/discover-models",
+                {
+                    "name": "Self Signed Provider",
+                    "provider_type": "custom_openai",
+                    "config": {"base_url": "https://example.com/v1"},
+                },
+            )
+
+        self.assertEqual(status, 400)
+        self.assertIn("TLS 证书校验失败", payload["detail"])
+        self.assertIn("跳过 TLS 证书校验", payload["detail"])
+
+    def test_provider_save_returns_structured_validation_error(self) -> None:
+        status, payload = self._request(
+            "POST",
+            "/api/agent-center/providers",
+            {
+                "provider_type": "mock",
+                "config": {"base_url": "mock://local"},
+            },
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["detail"], "Provider 保存失败。")
+        self.assertEqual(payload["error_type"], "provider_validation_error")
+        self.assertIn("Provider 名称不能为空。", payload["errors"])
+        self.assertEqual(payload["context"]["provider_type"], "mock")
+        self.assertFalse(payload["context"]["has_secret"])
+
+    def test_provider_key_is_internal_uuid7_and_immutable_on_update(self) -> None:
+        first_status, created = self._request(
+            "POST",
+            "/api/agent-center/providers",
+            {
+                "key": "user-specified-provider-key",
+                "name": "Duplicate Provider A",
+                "provider_type": "mock",
+                "config": {"base_url": "mock://local"},
+            },
+        )
+        self.assertEqual(first_status, 200)
+        self.assertEqual(UUID(created["key"]).version, 7)
+        self.assertNotEqual(created["key"], "user-specified-provider-key")
+
+        status, updated = self._request(
+            "PUT",
+            f"/api/agent-center/providers/{created['id']}",
+            {
+                "key": "another-user-key",
+                "name": "Duplicate Provider B",
+                "provider_type": "mock",
+                "config": {"base_url": "mock://local"},
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(updated["key"], created["key"])
 
     def test_provider_can_be_deleted(self) -> None:
         status, provider = self._request(

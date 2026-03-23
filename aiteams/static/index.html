@@ -137,18 +137,43 @@
               <section class="modal-card provider-modal-card">
                 <div class="modal-head">
                   <h3 id="provider-modal-title">新增模型提供方</h3>
-                  <button type="button" class="ghost" data-provider-modal-close>关闭</button>
                 </div>
                 <form id="provider-form" class="form provider-editor-form">
-                  <input id="provider-key" type="hidden" />
                   <div class="form-grid two">
                     <label><span>名称</span><input id="provider-name" placeholder="例如：OpenAI 生产环境" /></label>
                     <label>
                       <span>API 模式</span>
                       <select id="provider-type"></select>
                     </label>
-                    <label><span>API 密钥</span><input id="provider-api-key" type="password" placeholder="输入 API Key" /></label>
+                    <label class="secret-field">
+                      <span>API 密钥</span>
+                      <div class="secret-input">
+                        <input id="provider-api-key" type="password" placeholder="输入 API Key" autocomplete="off" />
+                        <button id="provider-api-key-toggle" type="button" class="icon-button secret-toggle" aria-label="显示 API Key" aria-pressed="false" title="显示 API Key">
+                          <svg id="provider-api-key-icon-show" viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M2 12s3.8-6 10-6 10 6 10 6-3.8 6-10 6-10-6-10-6Z" />
+                            <circle cx="12" cy="12" r="3" />
+                          </svg>
+                          <svg id="provider-api-key-icon-hide" viewBox="0 0 24 24" aria-hidden="true" hidden>
+                            <path d="M3 3l18 18" />
+                            <path d="M10.7 6.2A11.5 11.5 0 0 1 12 6c6.2 0 10 6 10 6a17.6 17.6 0 0 1-4 4.4" />
+                            <path d="M6.6 6.7C3.9 8.3 2 12 2 12s3.8 6 10 6c1.8 0 3.5-.5 4.9-1.2" />
+                            <path d="M9.9 9.9A3 3 0 0 0 14.1 14.1" />
+                          </svg>
+                        </button>
+                      </div>
+                    </label>
                     <label><span>Base URL</span><input id="provider-base-url" placeholder="留空则按该模式默认地址" /></label>
+                  </div>
+                  <div class="provider-inline-options">
+                    <label class="toggle-chip" title="仅在内网、自签名证书或测试环境下启用。">
+                      <input id="provider-skip-tls-verify" type="checkbox" />
+                      <span>跳过 TLS 校验</span>
+                    </label>
+                    <div class="provider-inline-actions">
+                      <button id="provider-cancel" type="button" class="ghost">取消</button>
+                      <button id="provider-save" type="submit">保存</button>
+                    </div>
                   </div>
 
                   <section class="provider-model-panel">
@@ -163,11 +188,6 @@
                     </div>
                     <div id="provider-model-list" class="provider-model-list"></div>
                   </section>
-
-                  <div class="modal-actions">
-                    <button id="provider-cancel" type="button" class="ghost">取消</button>
-                    <button id="provider-save" type="submit">保存</button>
-                  </div>
                 </form>
               </section>
             </div>

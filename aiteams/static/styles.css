@@ -836,6 +836,10 @@ pre {
   overflow: auto;
 }
 
+.provider-modal-card .modal-head {
+  justify-content: flex-start;
+}
+
 .provider-editor-form {
   margin-top: 12px;
 }
@@ -904,6 +908,11 @@ pre {
   border-radius: 12px;
   border: 1px dashed rgba(22, 150, 193, 0.3);
   background: rgba(255, 255, 255, 0.76);
+}
+
+.provider-model-editor input,
+.provider-model-editor select {
+  height: 42px;
 }
 
 .form-grid.three {
@@ -987,6 +996,57 @@ label span {
   color: var(--cyan-deep);
 }
 
+.secret-input {
+  position: relative;
+}
+
+.secret-input input {
+  min-width: 0;
+  padding-right: 44px;
+}
+
+.provider-inline-options {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  margin-top: 4px;
+}
+
+.provider-inline-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-left: auto;
+}
+
+.form .toggle-chip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid rgba(22, 150, 193, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.62);
+  cursor: pointer;
+}
+
+.form .toggle-chip input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--cyan-deep);
+}
+
+.form .toggle-chip > span:not(.hover-tip-content) {
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: var(--ink);
+}
+
 textarea,
 input,
 select {
@@ -1040,6 +1100,51 @@ button.ghost {
   background: linear-gradient(135deg, rgba(255, 155, 69, 0.16), rgba(255, 255, 255, 0.96));
   color: #9b4f0f;
   box-shadow: none;
+}
+
+.icon-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+}
+
+.secret-toggle {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  width: 32px;
+  height: 32px;
+  color: var(--muted);
+  transform: translateY(-50%);
+}
+
+.secret-toggle svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.icon-button:hover {
+  filter: none;
+}
+
+.secret-toggle:hover,
+.secret-toggle:focus-visible {
+  color: var(--cyan-deep);
+  background: rgba(22, 150, 193, 0.08);
+  transform: translateY(-50%);
+}
+
+.secret-toggle[aria-pressed="true"] {
+  color: var(--cyan-deep);
 }
 
 button.warn {

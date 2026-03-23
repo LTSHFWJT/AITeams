@@ -82,11 +82,14 @@ const overviewBuilds = document.querySelector("#overview-builds");
 const overviewRuns = document.querySelector("#overview-runs");
 
 const providerForm = document.querySelector("#provider-form");
-const providerKey = document.querySelector("#provider-key");
 const providerName = document.querySelector("#provider-name");
 const providerType = document.querySelector("#provider-type");
 const providerBaseUrl = document.querySelector("#provider-base-url");
 const providerApiKey = document.querySelector("#provider-api-key");
+const providerApiKeyToggle = document.querySelector("#provider-api-key-toggle");
+const providerApiKeyIconShow = document.querySelector("#provider-api-key-icon-show");
+const providerApiKeyIconHide = document.querySelector("#provider-api-key-icon-hide");
+const providerSkipTlsVerify = document.querySelector("#provider-skip-tls-verify");
 const providerPageSize = document.querySelector("#provider-page-size");
 const providerOpenCreate = document.querySelector("#provider-open-create");
 const providerList = document.querySelector("#provider-list");
@@ -236,9 +239,36 @@ async function api(path, options = {}) {
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(payload.detail || response.statusText);
+    const message = formatApiError(payload, response.statusText);
+    const error = new Error(message);
+    error.payload = payload;
+    throw error;
   }
   return payload;
+}
+
+function formatApiError(payload, fallbackMessage = "Request failed") {
+  if (!payload || typeof payload !== "object") {
+    return fallbackMessage;
+  }
+  const lines = [];
+  if (typeof payload.detail === "string" && payload.detail.trim()) {
+    lines.push(payload.detail.trim());
+  }
+  if (Array.isArray(payload.errors)) {
+    payload.errors
+      .map((item) => (typeof item === "string" ? item.trim() : ""))
+      .filter(Boolean)
+      .forEach((item) => lines.push(item));
+  }
+  return lines.length ? lines.join("\n") : fallbackMessage;
+}
+
+function errorResult(error) {
+  if (error && typeof error === "object" && error.payload && typeof error.payload === "object" && Object.keys(error.payload).length) {
+    return error.payload;
+  }
+  return { error: error?.message || "Request failed." };
 }
 
 function showResult(target, value) {
@@ -610,12 +640,26 @@ function readProviderModelEditor() {
   };
 }
 
+function setProviderApiKeyVisibility(visible) {
+  providerApiKey.type = visible ? "text" : "password";
+  providerApiKeyToggle.setAttribute("aria-pressed", visible ? "true" : "false");
+  providerApiKeyToggle.setAttribute("aria-label", visible ? "隐藏 API Key" : "显示 API Key");
+  providerApiKeyToggle.title = visible ? "隐藏 API Key" : "显示 API Key";
+  providerApiKeyIconShow.hidden = visible;
+  providerApiKeyIconHide.hidden = !visible;
+}
+
+function setProviderApiKeyValue(value) {
+  providerApiKey.value = value;
+  setProviderApiKeyVisibility(false);
+}
+
 function resetProviderForm() {
   state.editingProviderId = null;
-  providerKey.value = "";
   providerName.value = "";
   providerBaseUrl.value = "";
-  providerApiKey.value = "";
+  setProviderApiKeyValue("");
+  providerSkipTlsVerify.checked = true;
   state.providerEditor = {
     models: [],
     savedModels: [],
@@ -716,11 +760,12 @@ function resetTeamTemplateForm() {
 function fillProviderForm(provider) {
   state.editingProviderId = provider.id;
   const config = provider.config_json || {};
-  providerKey.value = provider.key || "";
+  const secret = provider.secret_json || {};
   providerName.value = provider.name || "";
   providerType.value = provider.provider_type || "";
   providerBaseUrl.value = config.base_url || "";
-  providerApiKey.value = "";
+  setProviderApiKeyValue(secret.api_key || "");
+  providerSkipTlsVerify.checked = Boolean(config.skip_tls_verify);
   state.providerEditor = {
     models: clone(config.models || []),
     savedModels: clone(config.models || []),
@@ -876,10 +921,10 @@ function renderProviders() {
           return `
             <article class="provider-row">
               <div class="provider-main">
-                <strong title="${escapeHtml(item.key || item.id)}">${escapeHtml(item.name)}</strong>
+                <strong>${escapeHtml(item.name)}</strong>
               </div>
               <div class="provider-cell">
-                <strong title="${escapeHtml(item.provider_type)}">${escapeHtml(preset.label || item.provider_type)}</strong>
+                <strong>${escapeHtml(preset.label || item.provider_type)}</strong>
               </div>
               <div class="provider-cell provider-model-cell">
                 <strong title="${escapeAttribute(modelTooltip)}">${escapeHtml(item.model_count || 0)} \u4e2a\u6a21\u578b</strong>
@@ -1606,15 +1651,15 @@ function buildProviderPayloadFromForm() {
   const defaultChatModel = models.find((item) => item.model_type === "chat") || models[0] || null;
   return {
     id: state.editingProviderId,
-    key: providerKey.value.trim(),
     name: providerName.value.trim(),
     provider_type: providerType.value,
     config: {
       base_url: providerBaseUrl.value.trim(),
       api_version: selectedType?.default_api_version || "",
       backend: providerType.value,
-      model: defaultChatModel?.name || selectedType?.default_model || "",
+      model: defaultChatModel?.name || "",
       models,
+      skip_tls_verify: providerSkipTlsVerify.checked,
       temperature: 0.2,
     },
     ...(providerApiKey.value.trim() ? { secret: { api_key: providerApiKey.value.trim() } } : {}),
@@ -1908,7 +1953,7 @@ providerForm.addEventListener("submit", async (event) => {
     showResult(providerResult, { message: "\u63d0\u4f9b\u65b9\u5df2\u4fdd\u5b58", id: saved.id });
   } catch (error) {
     providerResult?.classList.remove("empty");
-    showResult(providerResult, { error: error.message });
+    showResult(providerResult, errorResult(error));
   }
 });
 
@@ -2027,6 +2072,9 @@ providerOpenCreate.addEventListener("click", () => {
 providerModalCloseButtons.forEach((button) => button.addEventListener("click", closeProviderModal));
 providerModelEditorModalCloseButtons.forEach((button) => button.addEventListener("click", closeProviderModelEditorModal));
 providerCancel.addEventListener("click", closeProviderModal);
+providerApiKeyToggle.addEventListener("click", () => {
+  setProviderApiKeyVisibility(providerApiKey.type === "password");
+});
 providerModelNew.addEventListener("click", () => {
   startProviderModelEditor();
 });
@@ -2077,7 +2125,7 @@ providerModelFetch.addEventListener("click", async () => {
     showResult(providerResult, payload);
   } catch (error) {
     providerResult?.classList.remove("empty");
-    showResult(providerResult, { error: error.message });
+    showResult(providerResult, errorResult(error));
   }
 });
 providerModelTest.addEventListener("click", async () => {
@@ -2091,7 +2139,7 @@ providerModelTest.addEventListener("click", async () => {
     });
     showResult(providerModelTestResult, payload);
   } catch (error) {
-    showResult(providerModelTestResult, { error: error.message });
+    showResult(providerModelTestResult, errorResult(error));
   }
 });
 document.querySelector("#plugin-reset").addEventListener("click", resetPluginForm);
@@ -2173,17 +2221,20 @@ document.addEventListener("click", async (event) => {
       showResult(providerResult, { message: "\u63d0\u4f9b\u65b9\u5df2\u5220\u9664", id: providerId });
     } catch (error) {
       providerResult?.classList.remove("empty");
-      showResult(providerResult, { error: error.message });
+      showResult(providerResult, errorResult(error));
     }
     return;
   }
 
   const providerEdit = event.target.closest("[data-provider-edit]");
   if (providerEdit) {
-    const provider = state.providers.find((item) => item.id === providerEdit.dataset.providerEdit);
-    if (provider) {
+    try {
+      const provider = await api(`/api/agent-center/providers/${providerEdit.dataset.providerEdit}`);
       fillProviderForm(provider);
       switchPage("providers");
+    } catch (error) {
+      providerResult?.classList.remove("empty");
+      showResult(providerResult, errorResult(error));
     }
     return;
   }

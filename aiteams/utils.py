@@ -5,7 +5,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from uuid import uuid4, uuid7
 
 
 def utcnow_iso() -> str:
@@ -14,6 +14,10 @@ def utcnow_iso() -> str:
 
 def make_id(prefix: str) -> str:
     return f"{prefix}_{uuid4().hex[:12]}"
+
+
+def make_uuid7() -> str:
+    return str(uuid7())
 
 
 def json_dumps(value: Any) -> str:
