@@ -19,7 +19,7 @@ from aiteams.ai_gateway import AIGateway, ProviderRequestError
 from aiteams.catalog import list_provider_presets, preset_for
 from aiteams.plugins import PluginManager
 from aiteams.storage.metadata import MetadataStore
-from aiteams.utils import make_uuid7, pretty_json, trim_text
+from aiteams.utils import pretty_json, trim_text
 
 MODEL_TYPES = {"chat", "embedding", "rerank"}
 
@@ -32,22 +32,29 @@ class AgentCenterService:
         self.gateway = gateway or AIGateway()
 
     def ensure_defaults(self) -> None:
+        provider_id_map: dict[str, str] = {}
         for provider in default_provider_profiles():
-            if self.store.get_provider_profile(str(provider["id"])) is None:
-                normalized = self.prepare_provider_profile(provider)
-                self.store.save_provider_profile(
-                    provider_profile_id=str(provider["id"]),
-                    key=str(normalized["key"]),
+            existing = self._find_default_provider_profile(provider)
+            saved = existing
+            if saved is None:
+                normalized = self.prepare_provider_profile(self._default_provider_payload(provider))
+                saved = self.store.save_provider_profile(
+                    provider_profile_id=None,
                     name=str(normalized["name"]),
                     provider_type=str(normalized["provider_type"]),
                     description=str(normalized["description"]),
                     config=dict(normalized["config"]),
                     secret=dict(normalized["secret"]),
                 )
+            provider_id_map[str(provider["builtin_ref"])] = str(saved["id"])
+
+        plugin_id_map: dict[str, str] = {}
         for plugin in default_plugins():
-            if self.store.get_plugin(str(plugin["id"])) is None:
-                self.store.save_plugin(
-                    plugin_id=str(plugin["id"]),
+            existing = self.store.get_plugin_by_key(str(plugin["key"]))
+            saved = existing
+            if saved is None:
+                saved = self.store.save_plugin(
+                    plugin_id=None,
                     key=str(plugin["key"]),
                     name=str(plugin["name"]),
                     version=str(plugin["version"]),
@@ -56,26 +63,31 @@ class AgentCenterService:
                     manifest=dict(plugin.get("manifest") or {}),
                     install_path=None,
                 )
+            plugin_id_map[str(plugin["key"])] = str(saved["id"])
+
+        agent_template_id_map: dict[str, str] = {}
         for template in default_agent_templates():
-            if self.store.get_agent_template(str(template["id"])) is None:
-                self.store.save_agent_template(
-                    agent_template_id=str(template["id"]),
-                    key=str(template["key"]),
+            existing = self._find_default_agent_template(template)
+            saved = existing
+            if saved is None:
+                saved = self.store.save_agent_template(
+                    agent_template_id=None,
                     name=str(template["name"]),
                     role=str(template["role"]),
                     description=str(template.get("description") or ""),
                     version="v1",
-                    spec=dict(template.get("spec") or {}),
+                    spec=self._default_agent_template_spec(template, provider_id_map=provider_id_map, plugin_id_map=plugin_id_map),
                 )
+            agent_template_id_map[str(template["builtin_ref"])] = str(saved["id"])
+
         for team in default_team_templates():
-            if self.store.get_team_template(str(team["id"])) is None:
+            if self._find_default_team_template(team) is None:
                 self.store.save_team_template(
-                    team_template_id=str(team["id"]),
-                    key=str(team["key"]),
+                    team_template_id=None,
                     name=str(team["name"]),
                     description=str(team.get("description") or ""),
                     version="v1",
-                    spec=dict(team.get("spec") or {}),
+                    spec=self._default_team_template_spec(team, agent_template_id_map=agent_template_id_map),
                 )
 
     def provider_types(self) -> list[dict[str, Any]]:
@@ -89,33 +101,13 @@ class AgentCenterService:
         limit: int | None = None,
         offset: int = 0,
     ) -> dict[str, Any]:
-        items = [self.normalize_provider_profile(item) for item in self.store.list_provider_profiles()]
-        keyword = str(query or "").strip().lower()
-        if keyword:
-            items = [
-                item
-                for item in items
-                if keyword in str(item.get("name") or "").lower()
-                or keyword in str(item.get("key") or "").lower()
-                or keyword in str(item.get("provider_type") or "").lower()
-                or keyword in str(item.get("description") or "").lower()
-            ]
-        selected_type = str(provider_type or "").strip()
-        if selected_type:
-            items = [item for item in items if str(item.get("provider_type") or "") == selected_type]
-        total = len(items)
-        safe_offset = max(0, int(offset or 0))
-        if limit is not None:
-            safe_limit = max(1, int(limit))
-            paged = items[safe_offset : safe_offset + safe_limit]
-        else:
-            safe_limit = total or 0
-            paged = items
+        page = self.store.list_provider_profiles_page(query=query, provider_type=provider_type, limit=limit, offset=offset)
+        items = [self.normalize_provider_profile(item) for item in page["items"]]
         return {
-            "items": paged,
-            "total": total,
-            "offset": safe_offset,
-            "limit": safe_limit,
+            "items": items,
+            "total": page["total"],
+            "offset": page["offset"],
+            "limit": page["limit"],
         }
 
     def prepare_provider_profile(self, payload: dict[str, Any], *, existing: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -183,7 +175,6 @@ class AgentCenterService:
                 secret.pop("api_key", None)
 
         return {
-            "key": str((existing_item or {}).get("key") or make_uuid7()),
             "name": name,
             "provider_type": provider_type,
             "description": str(payload.get("description") or (existing_item or {}).get("description") or "").strip(),
@@ -282,7 +273,6 @@ class AgentCenterService:
             }
         pseudo_template = {
             "id": team_template_id or "preview_team_template",
-            "key": "preview_team_template",
             "name": name or "Preview Team Template",
             "version": "draft",
             "description": "",
@@ -328,7 +318,6 @@ class AgentCenterService:
         build = self.store.save_blueprint_build(
             build_id=None,
             team_template_id=str(team_template["id"]),
-            key=str(team_template["key"]),
             name=build_title,
             description=str(team_template.get("description") or ""),
             spec=spec,
@@ -336,6 +325,88 @@ class AgentCenterService:
             blueprint_id=str(blueprint["id"]),
         )
         return build
+
+    def _default_provider_payload(self, provider: dict[str, Any]) -> dict[str, Any]:
+        payload = {
+            "name": str(provider.get("name") or ""),
+            "provider_type": str(provider.get("provider_type") or ""),
+            "description": str(provider.get("description") or ""),
+            "config": json.loads(json.dumps(provider.get("config") or {}, ensure_ascii=False)),
+            "secret": json.loads(json.dumps(provider.get("secret") or {}, ensure_ascii=False)),
+        }
+        config = dict(payload.get("config") or {})
+        config["builtin_ref"] = str(provider.get("builtin_ref") or "")
+        payload["config"] = config
+        return payload
+
+    def _default_agent_template_spec(
+        self,
+        template: dict[str, Any],
+        *,
+        provider_id_map: dict[str, str],
+        plugin_id_map: dict[str, str],
+    ) -> dict[str, Any]:
+        spec = json.loads(json.dumps(template.get("spec") or {}, ensure_ascii=False))
+        provider_ref = str(spec.get("provider_ref") or "").strip()
+        if provider_ref:
+            spec["provider_ref"] = provider_id_map.get(provider_ref, provider_ref)
+        spec["plugin_refs"] = [plugin_id_map.get(str(item), str(item)) for item in spec.get("plugin_refs", [])]
+        metadata = dict(spec.get("metadata") or {})
+        metadata["builtin_ref"] = str(template.get("builtin_ref") or "")
+        spec["metadata"] = metadata
+        return spec
+
+    def _default_team_template_spec(self, team: dict[str, Any], *, agent_template_id_map: dict[str, str]) -> dict[str, Any]:
+        spec = json.loads(json.dumps(team.get("spec") or {}, ensure_ascii=False))
+        agents = []
+        for item in spec.get("agents", []):
+            agent = dict(item or {})
+            reference = str(agent.get("agent_template_ref") or "").strip()
+            if reference:
+                agent["agent_template_ref"] = agent_template_id_map.get(reference, reference)
+            agents.append(agent)
+        spec["agents"] = agents
+        metadata = dict(spec.get("metadata") or {})
+        metadata["builtin_ref"] = str(team.get("builtin_ref") or "")
+        spec["metadata"] = metadata
+        return spec
+
+    def _find_default_provider_profile(self, provider: dict[str, Any]) -> dict[str, Any] | None:
+        builtin_ref = str(provider.get("builtin_ref") or "").strip()
+        provider_type = str(provider.get("provider_type") or "").strip()
+        name = str(provider.get("name") or "").strip()
+        for item in self.store.list_provider_profiles():
+            config = dict(item.get("config_json") or {})
+            if builtin_ref and str(config.get("builtin_ref") or "").strip() == builtin_ref:
+                return item
+            if str(item.get("provider_type") or "").strip() == provider_type and str(item.get("name") or "").strip() == name:
+                return item
+        return None
+
+    def _find_default_agent_template(self, template: dict[str, Any]) -> dict[str, Any] | None:
+        builtin_ref = str(template.get("builtin_ref") or "").strip()
+        role = str(template.get("role") or "").strip()
+        name = str(template.get("name") or "").strip()
+        for item in self.store.list_agent_templates():
+            spec = dict(item.get("spec_json") or {})
+            metadata = dict(spec.get("metadata") or {})
+            if builtin_ref and str(metadata.get("builtin_ref") or "").strip() == builtin_ref:
+                return item
+            if str(item.get("role") or "").strip() == role and str(item.get("name") or "").strip() == name:
+                return item
+        return None
+
+    def _find_default_team_template(self, team: dict[str, Any]) -> dict[str, Any] | None:
+        builtin_ref = str(team.get("builtin_ref") or "").strip()
+        name = str(team.get("name") or "").strip()
+        for item in self.store.list_team_templates():
+            spec = dict(item.get("spec_json") or {})
+            metadata = dict(spec.get("metadata") or {})
+            if builtin_ref and str(metadata.get("builtin_ref") or "").strip() == builtin_ref:
+                return item
+            if str(item.get("name") or "").strip() == name:
+                return item
+        return None
 
     def _runtime_provider(self, payload: dict[str, Any]) -> dict[str, Any]:
         existing = self._stored_runtime_provider(payload)

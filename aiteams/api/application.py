@@ -165,12 +165,23 @@ class WebApplication:
                         raise AppError(404, "Provider profile does not exist.")
                     return self._json(200, {"deleted": True, "id": provider_id})
             if method == "GET" and path == "/api/agent-center/plugins":
+                limit = self._optional_int(query.get("limit"))
+                offset = self._optional_int(query.get("offset")) or 0
+                page = self.container.store.list_plugins_page(limit=limit, offset=offset)
                 items = []
-                for item in self.container.store.list_plugins():
+                for item in page["items"]:
                     plugin = dict(item)
                     plugin["runtime"] = self.container.plugins.snapshot(str(item["id"]))
                     items.append(plugin)
-                return self._json(200, {"items": items})
+                return self._json(
+                    200,
+                    {
+                        "items": items,
+                        "total": page["total"],
+                        "offset": page["offset"],
+                        "limit": page["limit"],
+                    },
+                )
             if method == "POST" and path == "/api/agent-center/plugins/validate-package":
                 payload = self._parse_json(body)
                 self._require_fields(payload, "path")
@@ -215,7 +226,9 @@ class WebApplication:
                     updated = self._save_plugin(payload, plugin_id=plugin_id)
                     return self._json(200, updated)
             if method == "GET" and path == "/api/agent-center/agent-templates":
-                return self._json(200, {"items": self.container.store.list_agent_templates()})
+                limit = self._optional_int(query.get("limit"))
+                offset = self._optional_int(query.get("offset")) or 0
+                return self._json(200, self.container.store.list_agent_templates_page(limit=limit, offset=offset))
             if method == "POST" and path == "/api/agent-center/agent-templates":
                 payload = self._parse_json(body)
                 template = self._save_agent_template(payload, template_id=self._optional_str(payload.get("id")))
@@ -231,6 +244,11 @@ class WebApplication:
                     payload = self._parse_json(body)
                     updated = self._save_agent_template(payload, template_id=template_id)
                     return self._json(200, updated)
+                if method == "DELETE":
+                    deleted = self.container.store.delete_agent_template(template_id)
+                    if deleted is None:
+                        raise AppError(404, "Agent template does not exist.")
+                    return self._json(200, {"deleted": True, "id": template_id})
             if method == "GET" and path == "/api/agent-center/team-templates":
                 return self._json(200, {"items": self.container.store.list_team_templates()})
             if method == "POST" and path == "/api/agent-center/team-templates/graph/normalize":
@@ -528,7 +546,6 @@ class WebApplication:
         try:
             provider = self.container.store.save_provider_profile(
                 provider_profile_id=provider_id,
-                key=str(normalized["key"]),
                 name=str(normalized["name"]),
                 provider_type=str(normalized["provider_type"]),
                 description=str(normalized["description"]),
@@ -536,15 +553,12 @@ class WebApplication:
                 secret=dict(normalized["secret"]) if normalized["secret"] else None,
             )
         except sqlite3.IntegrityError as exc:
-            message = "Provider Key 已存在，请更换后重试。"
-            if "provider_profiles.key" not in str(exc):
-                message = str(exc)
             raise AppError(
                 400,
                 "Provider 保存失败。",
                 extra={
                     "error_type": "provider_persistence_error",
-                    "errors": [message],
+                    "errors": [str(exc)],
                     "context": self._provider_error_context(payload, provider_id=provider_id),
                 },
             ) from exc
@@ -558,7 +572,6 @@ class WebApplication:
         model_count = len(models) if isinstance(models, list) else 0
         return {
             "provider_id": provider_id,
-            "key": self._optional_str(payload.get("key")),
             "name": self._optional_str(payload.get("name")),
             "provider_type": self._optional_str(payload.get("provider_type")),
             "base_url": self._optional_str(payload.get("base_url")) or self._optional_str(config.get("base_url")),
@@ -592,26 +605,33 @@ class WebApplication:
         )
 
     def _save_agent_template(self, payload: dict[str, Any], *, template_id: str | None) -> dict[str, Any]:
-        self._require_fields(payload, "key", "name", "role")
+        self._require_fields(payload, "name", "role")
+        existing = self.container.store.get_agent_template(template_id) if template_id else None
+        existing_spec = dict((existing or {}).get("spec_json") or {})
+        incoming_spec = dict(payload.get("spec") or {})
+        spec = dict(existing_spec)
+        spec.update(incoming_spec)
+        metadata = dict(existing_spec.get("metadata") or {})
+        metadata.update(dict(incoming_spec.get("metadata") or {}))
+        if metadata:
+            spec["metadata"] = metadata
         return self.container.store.save_agent_template(
             agent_template_id=template_id,
-            key=str(payload["key"]),
             name=str(payload["name"]),
             role=str(payload["role"]),
             description=str(payload.get("description") or ""),
             version=str(payload.get("version") or "v1"),
-            spec=dict(payload.get("spec") or {}),
+            spec=spec,
         )
 
     def _save_team_template(self, payload: dict[str, Any], *, template_id: str | None) -> dict[str, Any]:
-        self._require_fields(payload, "key", "name")
+        self._require_fields(payload, "name")
         spec = self.container.agent_center.normalize_team_spec(dict(payload.get("spec") or {}))
         validation = self.container.agent_center.validate_team_spec(spec)
         if validation["errors"]:
             raise ValueError("; ".join(validation["errors"]))
         return self.container.store.save_team_template(
             team_template_id=template_id,
-            key=str(payload["key"]),
             name=str(payload["name"]),
             description=str(payload.get("description") or ""),
             version=str(payload.get("version") or "v1"),

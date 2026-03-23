@@ -5,7 +5,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from aiteams.utils import json_dumps, json_loads, make_id, utcnow_iso
+from aiteams.utils import json_dumps, json_loads, make_id, make_uuid7, utcnow_iso
 
 
 SCHEMA = [
@@ -163,7 +163,6 @@ SCHEMA = [
     """
     CREATE TABLE IF NOT EXISTS provider_profiles (
         id TEXT PRIMARY KEY,
-        key TEXT NOT NULL UNIQUE,
         name TEXT NOT NULL,
         provider_type TEXT NOT NULL,
         description TEXT,
@@ -199,7 +198,6 @@ SCHEMA = [
     """
     CREATE TABLE IF NOT EXISTS agent_templates (
         id TEXT PRIMARY KEY,
-        key TEXT NOT NULL UNIQUE,
         name TEXT NOT NULL,
         role TEXT NOT NULL,
         description TEXT,
@@ -213,7 +211,6 @@ SCHEMA = [
     """
     CREATE TABLE IF NOT EXISTS team_templates (
         id TEXT PRIMARY KEY,
-        key TEXT NOT NULL UNIQUE,
         name TEXT NOT NULL,
         description TEXT,
         version TEXT NOT NULL DEFAULT 'v1',
@@ -227,7 +224,6 @@ SCHEMA = [
     CREATE TABLE IF NOT EXISTS blueprint_builds (
         id TEXT PRIMARY KEY,
         team_template_id TEXT NOT NULL,
-        key TEXT NOT NULL,
         name TEXT NOT NULL,
         description TEXT,
         spec_json TEXT NOT NULL DEFAULT '{}',
@@ -478,7 +474,6 @@ class MetadataStore:
         self,
         *,
         provider_profile_id: str | None,
-        key: str,
         name: str,
         provider_type: str,
         description: str,
@@ -486,14 +481,13 @@ class MetadataStore:
         secret: dict[str, Any] | None = None,
         status: str = "active",
     ) -> dict[str, Any]:
-        record_id = provider_profile_id or make_id("provider")
+        record_id = provider_profile_id or make_uuid7()
         now = utcnow_iso()
         self.execute(
             """
-            INSERT INTO provider_profiles(id, key, name, provider_type, description, config_json, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM provider_profiles WHERE id = ?), ?), ?)
+            INSERT INTO provider_profiles(id, name, provider_type, description, config_json, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM provider_profiles WHERE id = ?), ?), ?)
             ON CONFLICT(id) DO UPDATE SET
-                key = excluded.key,
                 name = excluded.name,
                 provider_type = excluded.provider_type,
                 description = excluded.description,
@@ -501,7 +495,7 @@ class MetadataStore:
                 status = excluded.status,
                 updated_at = excluded.updated_at
             """,
-            (record_id, key, name, provider_type, description, json_dumps(config), status, record_id, now, now),
+            (record_id, name, provider_type, description, json_dumps(config), status, record_id, now, now),
         )
         if secret is not None:
             self.execute(
@@ -522,13 +516,50 @@ class MetadataStore:
         provider = self._deserialize(self.fetch_one("SELECT * FROM provider_profiles WHERE id = ?", (provider_profile_id,)))
         return self._attach_provider_secret(provider, include_secret=include_secret)
 
-    def get_provider_profile_by_key(self, key: str, *, include_secret: bool = False) -> dict[str, Any] | None:
-        provider = self._deserialize(self.fetch_one("SELECT * FROM provider_profiles WHERE key = ?", (key,)))
-        return self._attach_provider_secret(provider, include_secret=include_secret)
-
     def list_provider_profiles(self, *, include_secret: bool = False) -> list[dict[str, Any]]:
         rows = self._deserialize_many(self.fetch_all("SELECT * FROM provider_profiles ORDER BY updated_at DESC"))
         return [self._attach_provider_secret(row, include_secret=include_secret) for row in rows]
+
+    def list_provider_profiles_page(
+        self,
+        *,
+        query: str | None = None,
+        provider_type: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        include_secret: bool = False,
+    ) -> dict[str, Any]:
+        conditions: list[str] = []
+        params: list[Any] = []
+        keyword = str(query or "").strip().lower()
+        if keyword:
+            like = f"%{keyword}%"
+            conditions.append("(LOWER(name) LIKE ? OR LOWER(provider_type) LIKE ? OR LOWER(description) LIKE ?)")
+            params.extend([like, like, like])
+        selected_type = str(provider_type or "").strip()
+        if selected_type:
+            conditions.append("provider_type = ?")
+            params.append(selected_type)
+        where_sql = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        total = int(
+            (self.fetch_one(f"SELECT COUNT(*) AS count FROM provider_profiles{where_sql}", tuple(params)) or {}).get("count", 0) or 0
+        )
+        safe_offset = max(0, int(offset or 0))
+        sql = f"SELECT * FROM provider_profiles{where_sql} ORDER BY updated_at DESC"
+        query_params = list(params)
+        if limit is not None:
+            safe_limit = max(1, int(limit))
+            sql += " LIMIT ? OFFSET ?"
+            query_params.extend([safe_limit, safe_offset])
+        else:
+            safe_limit = total or 0
+        rows = self._deserialize_many(self.fetch_all(sql, tuple(query_params)))
+        return {
+            "items": [self._attach_provider_secret(row, include_secret=include_secret) for row in rows],
+            "total": total,
+            "offset": safe_offset,
+            "limit": safe_limit,
+        }
 
     def delete_provider_profile(self, provider_profile_id: str) -> dict[str, Any] | None:
         existing = self.get_provider_profile(provider_profile_id)
@@ -562,7 +593,7 @@ class MetadataStore:
         install_path: str | None,
         status: str = "active",
     ) -> dict[str, Any]:
-        record_id = plugin_id or make_id("plugin")
+        record_id = plugin_id or make_uuid7()
         now = utcnow_iso()
         self.execute(
             """
@@ -595,11 +626,28 @@ class MetadataStore:
     def list_plugins(self) -> list[dict[str, Any]]:
         return self._deserialize_many(self.fetch_all("SELECT * FROM plugins ORDER BY updated_at DESC"))
 
+    def list_plugins_page(self, *, limit: int | None = None, offset: int = 0) -> dict[str, Any]:
+        total = int((self.fetch_one("SELECT COUNT(*) AS count FROM plugins") or {}).get("count", 0) or 0)
+        safe_offset = max(0, int(offset or 0))
+        sql = "SELECT * FROM plugins ORDER BY updated_at DESC"
+        params: list[Any] = []
+        if limit is not None:
+            safe_limit = max(1, int(limit))
+            sql += " LIMIT ? OFFSET ?"
+            params.extend([safe_limit, safe_offset])
+        else:
+            safe_limit = total or 0
+        return {
+            "items": self._deserialize_many(self.fetch_all(sql, tuple(params))),
+            "total": total,
+            "offset": safe_offset,
+            "limit": safe_limit,
+        }
+
     def save_agent_template(
         self,
         *,
         agent_template_id: str | None,
-        key: str,
         name: str,
         role: str,
         description: str,
@@ -607,14 +655,13 @@ class MetadataStore:
         spec: dict[str, Any],
         status: str = "active",
     ) -> dict[str, Any]:
-        record_id = agent_template_id or make_id("agt")
+        record_id = agent_template_id or make_uuid7()
         now = utcnow_iso()
         self.execute(
             """
-            INSERT INTO agent_templates(id, key, name, role, description, version, spec_json, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM agent_templates WHERE id = ?), ?), ?)
+            INSERT INTO agent_templates(id, name, role, description, version, spec_json, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM agent_templates WHERE id = ?), ?), ?)
             ON CONFLICT(id) DO UPDATE SET
-                key = excluded.key,
                 name = excluded.name,
                 role = excluded.role,
                 description = excluded.description,
@@ -623,7 +670,7 @@ class MetadataStore:
                 status = excluded.status,
                 updated_at = excluded.updated_at
             """,
-            (record_id, key, name, role, description, version, json_dumps(spec), status, record_id, now, now),
+            (record_id, name, role, description, version, json_dumps(spec), status, record_id, now, now),
         )
         template = self.get_agent_template(record_id)
         assert template is not None
@@ -632,31 +679,51 @@ class MetadataStore:
     def get_agent_template(self, agent_template_id: str) -> dict[str, Any] | None:
         return self._deserialize(self.fetch_one("SELECT * FROM agent_templates WHERE id = ?", (agent_template_id,)))
 
-    def get_agent_template_by_key(self, key: str) -> dict[str, Any] | None:
-        return self._deserialize(self.fetch_one("SELECT * FROM agent_templates WHERE key = ?", (key,)))
-
     def list_agent_templates(self) -> list[dict[str, Any]]:
         return self._deserialize_many(self.fetch_all("SELECT * FROM agent_templates ORDER BY updated_at DESC"))
+
+    def list_agent_templates_page(self, *, limit: int | None = None, offset: int = 0) -> dict[str, Any]:
+        total = int((self.fetch_one("SELECT COUNT(*) AS count FROM agent_templates") or {}).get("count", 0) or 0)
+        safe_offset = max(0, int(offset or 0))
+        sql = "SELECT * FROM agent_templates ORDER BY updated_at DESC"
+        params: list[Any] = []
+        if limit is not None:
+            safe_limit = max(1, int(limit))
+            sql += " LIMIT ? OFFSET ?"
+            params.extend([safe_limit, safe_offset])
+        else:
+            safe_limit = total or 0
+        return {
+            "items": self._deserialize_many(self.fetch_all(sql, tuple(params))),
+            "total": total,
+            "offset": safe_offset,
+            "limit": safe_limit,
+        }
+
+    def delete_agent_template(self, agent_template_id: str) -> dict[str, Any] | None:
+        existing = self.get_agent_template(agent_template_id)
+        if existing is None:
+            return None
+        self.execute("DELETE FROM agent_templates WHERE id = ?", (agent_template_id,))
+        return existing
 
     def save_team_template(
         self,
         *,
         team_template_id: str | None,
-        key: str,
         name: str,
         description: str,
         version: str,
         spec: dict[str, Any],
         status: str = "active",
     ) -> dict[str, Any]:
-        record_id = team_template_id or make_id("team")
+        record_id = team_template_id or make_uuid7()
         now = utcnow_iso()
         self.execute(
             """
-            INSERT INTO team_templates(id, key, name, description, version, spec_json, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM team_templates WHERE id = ?), ?), ?)
+            INSERT INTO team_templates(id, name, description, version, spec_json, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM team_templates WHERE id = ?), ?), ?)
             ON CONFLICT(id) DO UPDATE SET
-                key = excluded.key,
                 name = excluded.name,
                 description = excluded.description,
                 version = excluded.version,
@@ -664,7 +731,7 @@ class MetadataStore:
                 status = excluded.status,
                 updated_at = excluded.updated_at
             """,
-            (record_id, key, name, description, version, json_dumps(spec), status, record_id, now, now),
+            (record_id, name, description, version, json_dumps(spec), status, record_id, now, now),
         )
         template = self.get_team_template(record_id)
         assert template is not None
@@ -672,9 +739,6 @@ class MetadataStore:
 
     def get_team_template(self, team_template_id: str) -> dict[str, Any] | None:
         return self._deserialize(self.fetch_one("SELECT * FROM team_templates WHERE id = ?", (team_template_id,)))
-
-    def get_team_template_by_key(self, key: str) -> dict[str, Any] | None:
-        return self._deserialize(self.fetch_one("SELECT * FROM team_templates WHERE key = ?", (key,)))
 
     def list_team_templates(self) -> list[dict[str, Any]]:
         return self._deserialize_many(self.fetch_all("SELECT * FROM team_templates ORDER BY updated_at DESC"))
@@ -684,7 +748,6 @@ class MetadataStore:
         *,
         build_id: str | None,
         team_template_id: str,
-        key: str,
         name: str,
         description: str,
         spec: dict[str, Any],
@@ -695,11 +758,10 @@ class MetadataStore:
         now = utcnow_iso()
         self.execute(
             """
-            INSERT INTO blueprint_builds(id, team_template_id, key, name, description, spec_json, resource_lock_json, blueprint_id, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM blueprint_builds WHERE id = ?), ?), ?)
+            INSERT INTO blueprint_builds(id, team_template_id, name, description, spec_json, resource_lock_json, blueprint_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM blueprint_builds WHERE id = ?), ?), ?)
             ON CONFLICT(id) DO UPDATE SET
                 team_template_id = excluded.team_template_id,
-                key = excluded.key,
                 name = excluded.name,
                 description = excluded.description,
                 spec_json = excluded.spec_json,
@@ -707,7 +769,7 @@ class MetadataStore:
                 blueprint_id = excluded.blueprint_id,
                 updated_at = excluded.updated_at
             """,
-            (record_id, team_template_id, key, name, description, json_dumps(spec), json_dumps(resource_lock), blueprint_id, record_id, now, now),
+            (record_id, team_template_id, name, description, json_dumps(spec), json_dumps(resource_lock), blueprint_id, record_id, now, now),
         )
         build = self.get_blueprint_build(record_id)
         assert build is not None

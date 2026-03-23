@@ -91,9 +91,9 @@ class BuildResolver:
                 "extra_config": dict(provider_config.get("extra_config") or {}),
                 "metadata": {
                     "agent_template_id": template["id"],
-                    "agent_template_key": template["key"],
+                    "agent_template_name": template["name"],
                     "provider_profile_id": provider["id"],
-                    "provider_profile_key": provider["key"],
+                    "provider_profile_name": provider["name"],
                     "skills": list(template_spec.get("skills", [])),
                     "plugin_ids": [item["id"] for item in plugins],
                     "plugins": locked_plugin_entries,
@@ -105,13 +105,15 @@ class BuildResolver:
                 "role_template": role_template_key,
                 "metadata": {
                     "agent_template_id": template["id"],
+                    "agent_template_name": template["name"],
                     "provider_profile_id": provider["id"],
+                    "provider_profile_name": provider["name"],
                     "plugin_ids": [item["id"] for item in plugins],
                     "plugins": locked_plugin_entries,
                 },
             }
-            locked_templates.append({"id": template["id"], "key": template["key"], "version": template["version"]})
-            locked_providers.append({"id": provider["id"], "key": provider["key"], "provider_type": provider["provider_type"]})
+            locked_templates.append({"id": template["id"], "name": template["name"], "version": template["version"]})
+            locked_providers.append({"id": provider["id"], "name": provider["name"], "provider_type": provider["provider_type"]})
 
         blueprint_payload = {
             "name": slugify(name, fallback="team_build"),
@@ -127,10 +129,10 @@ class BuildResolver:
             "acceptance_checks": [str(item) for item in team_spec.get("acceptance_checks", [])],
             "metadata": {
                 "team_template_id": team_template["id"],
-                "team_template_key": team_template["key"],
+                "team_template_name": team_template["name"],
                 "communication_policy": str((team_spec.get("metadata") or {}).get("communication_policy") or "graph-ancestor-scoped"),
                 "resource_lock": {
-                    "team_template": {"id": team_template["id"], "key": team_template["key"], "version": team_template["version"]},
+                    "team_template": {"id": team_template["id"], "name": team_template["name"], "version": team_template["version"]},
                     "agent_templates": self._unique_locked(locked_templates, "id"),
                     "provider_profiles": self._unique_locked(locked_providers, "id"),
                     "plugins": self._unique_locked(locked_plugins, "id"),
@@ -152,12 +154,10 @@ class BuildResolver:
         return [dict(item or {}) for item in payload]
 
     def _resolve_agent_template(self, member: dict[str, Any]) -> dict[str, Any]:
-        reference = member.get("agent_template_ref") or member.get("agent_template_id") or member.get("agent_template_key")
+        reference = member.get("agent_template_ref") or member.get("agent_template_id")
         if reference is None:
             raise ValueError(f"Agent member `{member.get('key')}` requires agent_template_ref.")
         template = self.store.get_agent_template(str(reference))
-        if template is None:
-            template = self.store.get_agent_template_by_key(str(reference))
         if template is None:
             raise ValueError(f"Unknown agent template `{reference}`.")
         return template
@@ -166,16 +166,12 @@ class BuildResolver:
         reference = (
             member.get("provider_ref")
             or member.get("provider_profile_id")
-            or member.get("provider_profile_key")
             or template_spec.get("provider_ref")
             or template_spec.get("provider_profile_id")
-            or template_spec.get("provider_profile_key")
         )
         if reference is None:
             raise ValueError(f"Agent `{member.get('key')}` requires provider_ref.")
         provider = self.store.get_provider_profile(str(reference), include_secret=True)
-        if provider is None:
-            provider = self.store.get_provider_profile_by_key(str(reference), include_secret=True)
         if provider is None:
             raise ValueError(f"Unknown provider profile `{reference}`.")
         return provider

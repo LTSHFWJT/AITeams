@@ -229,35 +229,62 @@
                 <h2>插件中心</h2>
               </div>
             </div>
-            <div class="page-grid resource-grid">
-              <section class="panel">
-                <div class="panel-title">
-                  <h3>插件</h3>
+            <div class="page-grid resource-page-grid">
+              <section class="panel panel-wide">
+                <div class="resource-toolbar">
+                  <button id="plugin-open-create" type="button">新增</button>
                 </div>
-                <form id="plugin-form" class="form">
+                <div class="resource-list-head plugin-list-head">
+                  <span>插件</span>
+                  <span>版本</span>
+                  <span>Workbench</span>
+                  <span>运行状态</span>
+                  <span>操作</span>
+                </div>
+                <div id="plugin-list" class="resource-list"></div>
+                <div class="provider-pagination">
+                  <div id="plugin-pagination-meta" class="provider-pagination-meta"></div>
+                  <label class="page-size-mini">
+                    <span>每页</span>
+                    <select id="plugin-page-size">
+                      <option value="10" selected>10</option>
+                      <option value="20">20</option>
+                      <option value="50">50</option>
+                    </select>
+                  </label>
+                </div>
+                <pre id="plugin-result" class="result hidden"></pre>
+              </section>
+            </div>
+
+            <div id="plugin-modal" class="modal-shell hidden">
+              <div class="modal-backdrop" data-plugin-modal-close></div>
+              <section class="modal-card resource-modal-card">
+                <div class="modal-head">
+                  <h3 id="plugin-modal-title">新增插件</h3>
+                </div>
+                <form id="plugin-form" class="form resource-editor-form">
                   <div class="form-grid two">
-                    <label><span>Key</span><input id="plugin-key" placeholder="research_kit" /></label>
+                    <label>
+                      <span>插件包标识 / Slug</span>
+                      <input id="plugin-key" placeholder="research_kit" />
+                      <small class="field-note">用于插件包、安装目录和运行时引用，不作为展示名称。</small>
+                    </label>
                     <label><span>名称</span><input id="plugin-name" placeholder="研究工具集" /></label>
                     <label><span>版本</span><input id="plugin-version" value="v1" /></label>
                     <label><span>类型</span><input id="plugin-type" value="toolset" /></label>
-                    <label><span>Workbench Key</span><input id="plugin-workbench-key" placeholder="research" /></label>
+                    <label><span>Workbench 标识</span><input id="plugin-workbench-key" placeholder="research" /></label>
                     <label><span>安装路径</span><input id="plugin-install-path" placeholder="本地插件目录" /></label>
                   </div>
                   <label><span>工具</span><input id="plugin-tools" placeholder="search, docs" /></label>
                   <label><span>权限</span><input id="plugin-permissions" placeholder="readonly, network_limited" /></label>
                   <label><span>说明</span><textarea id="plugin-description" rows="3" placeholder="简短说明"></textarea></label>
-                  <div class="actions">
-                    <button type="submit">保存</button>
-                    <button id="plugin-reset" type="button" class="ghost">新建</button>
+                  <pre id="plugin-modal-result" class="result hidden"></pre>
+                  <div class="modal-actions">
+                    <button id="plugin-cancel" type="button" class="ghost">取消</button>
+                    <button id="plugin-save" type="submit">保存</button>
                   </div>
                 </form>
-                <pre id="plugin-result" class="result hidden"></pre>
-              </section>
-              <section class="panel panel-wide">
-                <div class="panel-title">
-                  <h3>列表</h3>
-                </div>
-                <div id="plugin-list" class="list"></div>
               </section>
             </div>
           </section>
@@ -268,14 +295,42 @@
                 <h2>Agent 模板</h2>
               </div>
             </div>
-            <div class="page-grid resource-grid">
-              <section class="panel">
-                <div class="panel-title">
-                  <h3>模板</h3>
+            <div class="page-grid resource-page-grid">
+              <section class="panel panel-wide">
+                <div class="resource-toolbar">
+                  <button id="agent-template-open-create" type="button">新增</button>
                 </div>
-                <form id="agent-template-form" class="form">
-                  <div class="form-grid two">
-                    <label><span>Key</span><input id="agent-template-key" placeholder="strategy_planner" /></label>
+                <div class="resource-list-head agent-template-list-head">
+                  <span>模板</span>
+                  <span>角色</span>
+                  <span>Provider</span>
+                  <span>模型</span>
+                  <span>操作</span>
+                </div>
+                <div id="agent-template-list" class="resource-list"></div>
+                <div class="provider-pagination">
+                  <div id="agent-template-pagination-meta" class="provider-pagination-meta"></div>
+                  <label class="page-size-mini">
+                    <span>每页</span>
+                    <select id="agent-template-page-size">
+                      <option value="10" selected>10</option>
+                      <option value="20">20</option>
+                      <option value="50">50</option>
+                    </select>
+                  </label>
+                </div>
+                <pre id="agent-template-result" class="result hidden"></pre>
+              </section>
+            </div>
+
+            <div id="agent-template-modal" class="modal-shell hidden">
+              <div class="modal-backdrop" data-agent-template-modal-close></div>
+              <section class="modal-card resource-modal-card">
+                <div class="modal-head">
+                  <h3 id="agent-template-modal-title">新增 Agent 模板</h3>
+                </div>
+                <form id="agent-template-form" class="form resource-editor-form">
+                <div class="form-grid two">
                     <label><span>名称</span><input id="agent-template-name" placeholder="策略规划师" /></label>
                     <label><span>角色</span><input id="agent-template-role" placeholder="planner" /></label>
                     <label>
@@ -298,18 +353,12 @@
                   <label><span>目标</span><textarea id="agent-template-goal" rows="3" placeholder="描述 Agent 的工作目标"></textarea></label>
                   <label><span>指令</span><textarea id="agent-template-instructions" rows="5" placeholder="系统指令模板"></textarea></label>
                   <label><span>说明</span><textarea id="agent-template-description" rows="3" placeholder="简短说明"></textarea></label>
-                  <div class="actions">
-                    <button type="submit">保存</button>
-                    <button id="agent-template-reset" type="button" class="ghost">新建</button>
+                  <pre id="agent-template-modal-result" class="result hidden"></pre>
+                  <div class="modal-actions">
+                    <button id="agent-template-cancel" type="button" class="ghost">取消</button>
+                    <button id="agent-template-save" type="submit">保存</button>
                   </div>
                 </form>
-                <pre id="agent-template-result" class="result hidden"></pre>
-              </section>
-              <section class="panel panel-wide">
-                <div class="panel-title">
-                  <h3>列表</h3>
-                </div>
-                <div id="agent-template-list" class="list"></div>
               </section>
             </div>
           </section>
@@ -327,7 +376,6 @@
                 </div>
                 <form id="team-template-form" class="form">
                   <div class="form-grid two">
-                    <label><span>Key</span><input id="team-template-key" placeholder="software_delivery_team" /></label>
                     <label><span>名称</span><input id="team-template-name" placeholder="软件交付团队" /></label>
                     <label><span>工作区</span><input id="team-template-workspace" value="local-workspace" /></label>
                     <label><span>项目</span><input id="team-template-project" value="default-project" /></label>

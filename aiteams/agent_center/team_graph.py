@@ -94,7 +94,7 @@ def validate_team_template_spec(spec: dict[str, Any] | None) -> dict[str, Any]:
     if len(set(agent_keys)) != len([key for key in agent_keys if key]):
         errors.append("团队成员 key 必须唯一。")
     for agent in agents:
-        if not str(agent.get("agent_template_ref") or agent.get("agent_template_id") or agent.get("agent_template_key") or "").strip():
+        if not str(agent.get("agent_template_ref") or agent.get("agent_template_id") or "").strip():
             errors.append(f"成员 `{agent.get('key') or 'unknown'}` 缺少 agent_template_ref。")
 
     if not nodes:

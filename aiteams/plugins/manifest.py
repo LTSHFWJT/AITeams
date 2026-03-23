@@ -23,11 +23,11 @@ def load_plugin_manifest(path: str | Path) -> dict[str, Any]:
 def normalize_plugin_manifest(payload: dict[str, Any], root: str | Path | None = None) -> dict[str, Any]:
     manifest = dict(payload or {})
     key = str(manifest.get("key") or "").strip()
-    name = str(manifest.get("name") or key).strip()
+    name = str(manifest.get("name") or "").strip()
     version = str(manifest.get("version") or "v1").strip()
     entrypoint = str(manifest.get("entrypoint") or "").strip()
     if not key:
-        raise ValueError("Plugin manifest requires key.")
+        raise ValueError("Plugin manifest requires package slug `key`.")
     if not name:
         raise ValueError("Plugin manifest requires name.")
     if not version:

@@ -14,7 +14,19 @@
     providerType: "",
   },
   plugins: [],
+  pluginPage: {
+    items: [],
+    total: 0,
+    limit: 10,
+    offset: 0,
+  },
   agentTemplates: [],
+  agentTemplatePage: {
+    items: [],
+    total: 0,
+    limit: 10,
+    offset: 0,
+  },
   teamTemplates: [],
   builds: [],
   blueprints: [],
@@ -34,6 +46,21 @@
     models: [],
     savedModels: [],
     editingModelIndex: null,
+  },
+  loaded: {
+    controlPlane: false,
+    providerTypes: false,
+    providerRefs: false,
+    providerPage: false,
+    pluginRefs: false,
+    pluginPage: false,
+    agentTemplateRefs: false,
+    agentTemplatePage: false,
+    teamTemplates: false,
+    builds: false,
+    blueprints: false,
+    runs: false,
+    approvals: false,
   },
   teamEditor: {
     spec: null,
@@ -126,11 +153,18 @@ const pluginInstallPath = document.querySelector("#plugin-install-path");
 const pluginTools = document.querySelector("#plugin-tools");
 const pluginPermissions = document.querySelector("#plugin-permissions");
 const pluginDescription = document.querySelector("#plugin-description");
+const pluginOpenCreate = document.querySelector("#plugin-open-create");
+const pluginPageSize = document.querySelector("#plugin-page-size");
 const pluginList = document.querySelector("#plugin-list");
+const pluginPaginationMeta = document.querySelector("#plugin-pagination-meta");
 const pluginResult = document.querySelector("#plugin-result");
+const pluginModal = document.querySelector("#plugin-modal");
+const pluginModalTitle = document.querySelector("#plugin-modal-title");
+const pluginModalCloseButtons = Array.from(document.querySelectorAll("[data-plugin-modal-close]"));
+const pluginCancel = document.querySelector("#plugin-cancel");
+const pluginModalResult = document.querySelector("#plugin-modal-result");
 
 const agentTemplateForm = document.querySelector("#agent-template-form");
-const agentTemplateKey = document.querySelector("#agent-template-key");
 const agentTemplateName = document.querySelector("#agent-template-name");
 const agentTemplateRole = document.querySelector("#agent-template-role");
 const agentTemplateProvider = document.querySelector("#agent-template-provider");
@@ -141,11 +175,18 @@ const agentTemplatePlugins = document.querySelector("#agent-template-plugins");
 const agentTemplateGoal = document.querySelector("#agent-template-goal");
 const agentTemplateInstructions = document.querySelector("#agent-template-instructions");
 const agentTemplateDescription = document.querySelector("#agent-template-description");
+const agentTemplateOpenCreate = document.querySelector("#agent-template-open-create");
+const agentTemplatePageSize = document.querySelector("#agent-template-page-size");
 const agentTemplateList = document.querySelector("#agent-template-list");
+const agentTemplatePaginationMeta = document.querySelector("#agent-template-pagination-meta");
 const agentTemplateResult = document.querySelector("#agent-template-result");
+const agentTemplateModal = document.querySelector("#agent-template-modal");
+const agentTemplateModalTitle = document.querySelector("#agent-template-modal-title");
+const agentTemplateModalCloseButtons = Array.from(document.querySelectorAll("[data-agent-template-modal-close]"));
+const agentTemplateCancel = document.querySelector("#agent-template-cancel");
+const agentTemplateModalResult = document.querySelector("#agent-template-modal-result");
 
 const teamTemplateForm = document.querySelector("#team-template-form");
-const teamTemplateKey = document.querySelector("#team-template-key");
 const teamTemplateName = document.querySelector("#team-template-name");
 const teamTemplateWorkspace = document.querySelector("#team-template-workspace");
 const teamTemplateProject = document.querySelector("#team-template-project");
@@ -287,7 +328,7 @@ function hideResult(target) {
   target.textContent = "";
 }
 
-function switchPage(pageName) {
+async function switchPage(pageName, options = {}) {
   state.activePage = pageName;
   state.activeNavSection = PAGE_SECTIONS[pageName] || "overview";
   topNavButtons.forEach((button) => {
@@ -302,9 +343,14 @@ function switchPage(pageName) {
   pageViews.forEach((view) => {
     view.classList.toggle("active", view.dataset.page === pageName);
   });
+  try {
+    await ensurePageData(pageName, { ...options, force: true });
+  } catch (error) {
+    showResult(taskResult, errorResult(error));
+  }
 }
 
-function switchNavSection(sectionName) {
+async function switchNavSection(sectionName) {
   const targetPage = SECTION_DEFAULT_PAGE[sectionName] || "overview";
   if (PAGE_SECTIONS[state.activePage] === sectionName) {
     topNavButtons.forEach((button) => {
@@ -314,9 +360,14 @@ function switchNavSection(sectionName) {
       panel.classList.toggle("active", panel.dataset.navPanel === sectionName);
     });
     state.activeNavSection = sectionName;
+    try {
+      await ensurePageData(state.activePage, { force: true });
+    } catch (error) {
+      showResult(taskResult, errorResult(error));
+    }
     return;
   }
-  switchPage(targetPage);
+  await switchPage(targetPage);
 }
 
 function linesToList(value) {
@@ -375,6 +426,27 @@ function chip(label, value) {
   return `<span class="system-chip"><strong>${escapeHtml(label)}</strong>${escapeHtml(value)}</span>`;
 }
 
+function currentAgentTemplateMetadata() {
+  const template =
+    state.agentTemplatePage.items.find((item) => item.id === state.editingAgentTemplateId) ||
+    state.agentTemplates.find((item) => item.id === state.editingAgentTemplateId) ||
+    null;
+  return { ...(template?.spec_json?.metadata || {}) };
+}
+
+function buildTeamTemplateLabel(item) {
+  const lock = item?.resource_lock_json?.team_template || {};
+  return lock.name || state.teamTemplates.find((entry) => entry.id === item?.team_template_id)?.name || item?.team_template_id || "-";
+}
+
+function pluginDisplayName(item) {
+  return item?.name || "未命名插件";
+}
+
+function pluginDisplaySubtitle(item) {
+  return item?.description || item?.plugin_type || "未配置说明";
+}
+
 function teamSummary(spec) {
   return {
     agents: Array.isArray(spec?.agents) ? spec.agents : [],
@@ -396,6 +468,14 @@ function blueprintSummary(spec) {
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+function invalidateData(...keys) {
+  keys.forEach((key) => {
+    if (Object.prototype.hasOwnProperty.call(state.loaded, key)) {
+      state.loaded[key] = false;
+    }
+  });
 }
 
 function teamEditorSpec() {
@@ -654,6 +734,24 @@ function setProviderApiKeyValue(value) {
   setProviderApiKeyVisibility(false);
 }
 
+function openPluginModal() {
+  pluginModal.classList.remove("hidden");
+}
+
+function closePluginModal() {
+  pluginModal.classList.add("hidden");
+  hideResult(pluginModalResult);
+}
+
+function openAgentTemplateModal() {
+  agentTemplateModal.classList.remove("hidden");
+}
+
+function closeAgentTemplateModal() {
+  agentTemplateModal.classList.add("hidden");
+  hideResult(agentTemplateModalResult);
+}
+
 function resetProviderForm() {
   state.editingProviderId = null;
   providerName.value = "";
@@ -688,11 +786,12 @@ function resetPluginForm() {
   pluginTools.value = "";
   pluginPermissions.value = "";
   pluginDescription.value = "";
+  pluginModalTitle.textContent = "新增插件";
+  hideResult(pluginModalResult);
 }
 
 function resetAgentTemplateForm() {
   state.editingAgentTemplateId = null;
-  agentTemplateKey.value = "";
   agentTemplateName.value = "";
   agentTemplateRole.value = "";
   agentTemplateModel.value = "";
@@ -705,6 +804,8 @@ function resetAgentTemplateForm() {
     agentTemplateProvider.value = state.providers[0].id;
   }
   setMultiSelectValues(agentTemplatePlugins, []);
+  agentTemplateModalTitle.textContent = "新增 Agent 模板";
+  hideResult(agentTemplateModalResult);
 }
 
 function defaultTeamAgents() {
@@ -712,7 +813,7 @@ function defaultTeamAgents() {
     {
       key: "planner",
       name: "规划负责人",
-      agent_template_ref: state.agentTemplates[0]?.id || "agt_strategy_planner",
+      agent_template_ref: state.agentTemplates[0]?.id || "",
     },
   ]);
 }
@@ -734,7 +835,6 @@ function defaultTeamFlow() {
 function resetTeamTemplateForm() {
   state.editingTeamTemplateId = null;
   state.selectedTeamTemplateId = null;
-  teamTemplateKey.value = "";
   teamTemplateName.value = "";
   teamTemplateWorkspace.value = "local-workspace";
   teamTemplateProject.value = "default-project";
@@ -789,12 +889,14 @@ function fillPluginForm(plugin) {
   pluginTools.value = (manifest.tools || []).join(", ");
   pluginPermissions.value = (manifest.permissions || []).join(", ");
   pluginDescription.value = plugin.description || "";
+  pluginModalTitle.textContent = "编辑插件";
+  hideResult(pluginModalResult);
+  openPluginModal();
 }
 
 function fillAgentTemplateForm(template) {
   state.editingAgentTemplateId = template.id;
   const spec = template.spec_json || {};
-  agentTemplateKey.value = template.key || "";
   agentTemplateName.value = template.name || "";
   agentTemplateRole.value = template.role || "";
   agentTemplateProvider.value = spec.provider_ref || "";
@@ -805,13 +907,15 @@ function fillAgentTemplateForm(template) {
   agentTemplateInstructions.value = spec.instructions || "";
   agentTemplateDescription.value = template.description || "";
   setMultiSelectValues(agentTemplatePlugins, spec.plugin_refs || []);
+  agentTemplateModalTitle.textContent = "编辑 Agent 模板";
+  hideResult(agentTemplateModalResult);
+  openAgentTemplateModal();
 }
 
 function fillTeamTemplateForm(template) {
   state.editingTeamTemplateId = template.id;
   state.selectedTeamTemplateId = template.id;
   const spec = template.spec_json || {};
-  teamTemplateKey.value = template.key || "";
   teamTemplateName.value = template.name || "";
   teamTemplateWorkspace.value = spec.workspace_id || "local-workspace";
   teamTemplateProject.value = spec.project_id || "default-project";
@@ -871,8 +975,8 @@ function renderOverview() {
         .map((item) =>
           cardMarkup({
             title: item.name,
-            body: item.description || item.key,
-            meta: `team=${item.key} / blueprint=${item.blueprint_id || "-"}`,
+            body: item.description || buildTeamTemplateLabel(item),
+            meta: `team=${buildTeamTemplateLabel(item)} / blueprint=${item.blueprint_id || "-"}`,
             actions: `<button type="button" class="ghost" data-build-open="${item.id}">查看</button>`,
           }),
         )
@@ -894,19 +998,26 @@ function renderOverview() {
 }
 
 function renderProviderPagination() {
-  const { total, limit, offset } = state.providerPage;
-  if (!total) {
-    providerPaginationMeta.innerHTML = "";
+  renderOffsetPagination(state.providerPage, providerPaginationMeta, "provider-page");
+}
+
+function renderOffsetPagination(pageState, target, dataAttribute) {
+  const { total, limit, offset } = pageState;
+  if (!target) {
     return;
   }
-  const page = Math.floor(offset / limit) + 1;
+  if (!total) {
+    target.innerHTML = "";
+    return;
+  }
+  const currentPage = Math.floor(offset / limit) + 1;
   const pageCount = Math.max(1, Math.ceil(total / limit));
   const prevOffset = Math.max(0, offset - limit);
   const nextOffset = offset + limit < total ? offset + limit : offset;
-  providerPaginationMeta.innerHTML = `
-    <span class="page-status">\u7b2c ${page} / ${pageCount} \u9875\uff0c\u5171 ${total} \u6761</span>
-    <button type="button" class="ghost" data-provider-page="${prevOffset}" ${offset === 0 ? "disabled" : ""}>\u4e0a\u4e00\u9875</button>
-    <button type="button" class="ghost" data-provider-page="${nextOffset}" ${offset + limit >= total ? "disabled" : ""}>\u4e0b\u4e00\u9875</button>
+  target.innerHTML = `
+    <span class="page-status">\u7b2c ${currentPage} / ${pageCount} \u9875\uff0c\u5171 ${total} \u6761</span>
+    <button type="button" class="ghost" data-${dataAttribute}="${prevOffset}" ${offset === 0 ? "disabled" : ""}>\u4e0a\u4e00\u9875</button>
+    <button type="button" class="ghost" data-${dataAttribute}="${nextOffset}" ${offset + limit >= total ? "disabled" : ""}>\u4e0b\u4e00\u9875</button>
   `;
 }
 
@@ -945,48 +1056,86 @@ function renderProviders() {
 }
 
 function renderPlugins() {
-  pluginList.innerHTML = state.plugins.length
-    ? state.plugins
+  pluginList.innerHTML = state.pluginPage.items.length
+    ? state.pluginPage.items
         .map((item) => {
           const manifest = item.manifest_json || {};
           const runtime = item.runtime || {};
           const descriptor = runtime.descriptor || {};
           const runtimeState = runtime.running ? "running" : runtime.status || (item.install_path ? "idle" : "metadata_only");
-          return cardMarkup({
-            title: item.name,
-            body: item.description || item.plugin_type,
-            meta: `${item.version} / runtime=${runtimeState} / tools=${(descriptor.tools || manifest.tools || []).join(",") || "-"} / permissions=${(descriptor.permissions || manifest.permissions || []).join(",") || "-"}`,
-            actions: `
-              <button type="button" data-plugin-edit="${item.id}">编辑</button>
-              <button type="button" class="ghost" data-plugin-validate="${item.id}">校验</button>
-              <button type="button" class="ghost" data-plugin-install="${item.id}">安装</button>
-              <button type="button" class="ghost" data-plugin-load="${item.id}">加载</button>
-              <button type="button" class="ghost" data-plugin-reload="${item.id}">重载</button>
-              <button type="button" class="ghost" data-plugin-health="${item.id}">健康</button>
-            `,
-            active: item.id === state.editingPluginId,
-          });
+          const tools = (descriptor.tools || manifest.tools || []).join(", ") || "-";
+          const workbenchKey = manifest.workbench_key || "-";
+          const statusHint = item.install_path ? item.install_path : "未配置安装路径";
+          return `
+            <article class="resource-row plugin-row">
+              <div class="resource-main">
+                <strong title="${escapeAttribute(pluginDisplayName(item))}">${escapeHtml(pluginDisplayName(item))}</strong>
+                <span title="${escapeAttribute(pluginDisplaySubtitle(item))}">${escapeHtml(pluginDisplaySubtitle(item))}</span>
+              </div>
+              <div class="resource-cell">
+                <strong>${escapeHtml(item.version || "-")}</strong>
+                <span>${escapeHtml(item.plugin_type || "-")}</span>
+              </div>
+              <div class="resource-cell">
+                <strong title="${escapeAttribute(workbenchKey)}">${escapeHtml(workbenchKey)}</strong>
+                <span title="${escapeAttribute(`tools=${tools}`)}">${escapeHtml(`tools=${tools}`)}</span>
+              </div>
+              <div class="resource-cell">
+                <strong>${escapeHtml(runtimeState)}</strong>
+                <span title="${escapeAttribute(statusHint)}">${escapeHtml(statusHint)}</span>
+              </div>
+              <div class="resource-row-actions">
+                <button type="button" data-plugin-edit="${item.id}">编辑</button>
+                <button type="button" class="ghost" data-plugin-validate="${item.id}">校验</button>
+                <button type="button" class="ghost" data-plugin-install="${item.id}">安装</button>
+                <button type="button" class="ghost" data-plugin-load="${item.id}">加载</button>
+                <button type="button" class="ghost" data-plugin-reload="${item.id}">重载</button>
+                <button type="button" class="ghost" data-plugin-health="${item.id}">健康</button>
+              </div>
+            </article>
+          `;
         })
         .join("")
-    : cardMarkup({ title: "暂无插件", body: "先创建一个插件。", meta: "" });
+    : '<div class="detail empty compact-detail">暂无插件，先新建一个插件。</div>';
+  renderOffsetPagination(state.pluginPage, pluginPaginationMeta, "plugin-page");
 }
 
 function renderAgentTemplates() {
-  agentTemplateList.innerHTML = state.agentTemplates.length
-    ? state.agentTemplates
+  agentTemplateList.innerHTML = state.agentTemplatePage.items.length
+    ? state.agentTemplatePage.items
         .map((item) => {
           const spec = item.spec_json || {};
           const provider = state.providers.find((entry) => entry.id === spec.provider_ref);
-          return cardMarkup({
-            title: item.name,
-            body: item.description || item.role,
-            meta: `${item.role} / provider=${provider?.name || spec.provider_ref || "-"} / plugins=${(spec.plugin_refs || []).length}`,
-            actions: `<button type="button" data-agent-template-edit="${item.id}">编辑</button>`,
-            active: item.id === state.editingAgentTemplateId,
-          });
+          const providerLabel = provider?.name || spec.provider_ref || "-";
+          const skills = Array.isArray(spec.skills) && spec.skills.length ? spec.skills.join(", ") : "未配置技能";
+          return `
+            <article class="resource-row agent-template-row">
+              <div class="resource-main">
+                <strong title="${escapeAttribute(item.name || item.id || "-")}">${escapeHtml(item.name || item.id || "-")}</strong>
+                <span title="${escapeAttribute(item.description || item.role || "-")}">${escapeHtml(item.description || item.role || "-")}</span>
+              </div>
+              <div class="resource-cell">
+                <strong>${escapeHtml(item.role || "-")}</strong>
+                <span>${escapeHtml(spec.memory_policy || "-")}</span>
+              </div>
+              <div class="resource-cell">
+                <strong title="${escapeAttribute(providerLabel)}">${escapeHtml(providerLabel)}</strong>
+                <span>${escapeHtml(`${(spec.plugin_refs || []).length} 个插件`)}</span>
+              </div>
+              <div class="resource-cell">
+                <strong title="${escapeAttribute(spec.model || "-")}">${escapeHtml(spec.model || "-")}</strong>
+                <span title="${escapeAttribute(skills)}">${escapeHtml(skills)}</span>
+              </div>
+              <div class="resource-row-actions">
+                <button type="button" data-agent-template-edit="${item.id}">编辑</button>
+                <button type="button" class="ghost warn" data-agent-template-delete="${item.id}">删除</button>
+              </div>
+            </article>
+          `;
         })
         .join("")
-    : cardMarkup({ title: "暂无 Agent 模板", body: "创建第一个角色模板。", meta: "" });
+    : '<div class="detail empty compact-detail">暂无 Agent 模板，先新建一个模板。</div>';
+  renderOffsetPagination(state.agentTemplatePage, agentTemplatePaginationMeta, "agent-template-page");
 }
 
 function buildTeamTemplateSpecFromForm() {
@@ -1027,14 +1176,17 @@ function renderTeamTemplatePreview(specOverride = null) {
   const summary = teamSummary(spec);
   const agentLines = summary.agents.length
     ? summary.agents
-        .map(
-          (item) => `
+        .map((item) => {
+          const templateRef = item.agent_template_ref || item.agent_template_id || "";
+          const template = state.agentTemplates.find((entry) => entry.id === templateRef);
+          const templateLabel = template?.name || templateRef || "-";
+          return `
             <div class="inspector-line">
               <strong>${escapeHtml(item.name || item.key)}</strong>
-              <span>${escapeHtml(item.key)} / ${escapeHtml(item.agent_template_ref || item.agent_template_id || "-")}</span>
+              <span>${escapeHtml(item.key)} / ${escapeHtml(templateLabel)}</span>
             </div>
-          `,
-        )
+          `;
+        })
         .join("")
     : `<div class="inspector-line"><strong>暂无成员</strong><span>请先添加团队成员</span></div>`;
   const validation = state.teamEditor.validation;
@@ -1534,8 +1686,8 @@ function renderBuilds() {
         .map((item) =>
           cardMarkup({
             title: item.name,
-            body: item.description || item.key,
-            meta: `team=${item.key} / blueprint=${item.blueprint_id || "-"}`,
+            body: item.description || buildTeamTemplateLabel(item),
+            meta: `team=${buildTeamTemplateLabel(item)} / blueprint=${item.blueprint_id || "-"}`,
             actions: `
               <button type="button" data-build-open="${item.id}">查看</button>
               <button type="button" class="ghost" data-build-use="${item.id}">用于任务</button>
@@ -1558,7 +1710,7 @@ function renderBuildDetail(build) {
   buildDetail.textContent =
     `Build：${build.id}\n` +
     `名称：${build.name}\n` +
-    `团队模板：${build.key}\n` +
+    `团队模板：${buildTeamTemplateLabel(build)}\n` +
     `蓝图快照：${build.blueprint_id || ""}\n` +
     `角色模板：${summary.roleTemplates.length}\n` +
     `Agent：${summary.agents.length}\n` +
@@ -1687,7 +1839,6 @@ function buildPluginPayloadFromForm() {
 function buildAgentTemplatePayloadFromForm() {
   return {
     id: state.editingAgentTemplateId,
-    key: agentTemplateKey.value.trim(),
     name: agentTemplateName.value.trim(),
     role: agentTemplateRole.value.trim(),
     description: agentTemplateDescription.value.trim(),
@@ -1701,7 +1852,7 @@ function buildAgentTemplatePayloadFromForm() {
       plugin_refs: getMultiSelectValues(agentTemplatePlugins),
       skills: commaListToArray(agentTemplateSkills.value),
       delegation_mode: "none",
-      metadata: {},
+      metadata: currentAgentTemplateMetadata(),
     },
   };
 }
@@ -1710,7 +1861,6 @@ function buildTeamTemplatePayloadFromForm() {
   syncTeamEditorToForm();
   return {
     id: state.editingTeamTemplateId,
-    key: teamTemplateKey.value.trim(),
     name: teamTemplateName.value.trim(),
     description: teamTemplateDescription.value.trim(),
     version: "v1",
@@ -1725,6 +1875,11 @@ async function loadControlPlane() {
   state.providerTypes = payload.provider_types || [];
   state.recentBuilds = payload.recent_builds || [];
   state.recentRuns = payload.recent_runs || [];
+}
+
+async function loadProviderTypes() {
+  const payload = await api("/api/agent-center/provider-types");
+  state.providerTypes = payload.items || [];
 }
 
 async function loadProviders() {
@@ -1757,9 +1912,33 @@ async function loadPlugins() {
   populatePluginOptions();
 }
 
+async function loadPluginPage() {
+  const params = new URLSearchParams({
+    limit: String(state.pluginPage.limit || 10),
+    offset: String(state.pluginPage.offset || 0),
+  });
+  const payload = await api(`/api/agent-center/plugins?${params.toString()}`);
+  state.pluginPage.items = payload.items || [];
+  state.pluginPage.total = payload.total || 0;
+  state.pluginPage.limit = payload.limit || state.pluginPage.limit;
+  state.pluginPage.offset = payload.offset || 0;
+}
+
 async function loadAgentTemplates() {
   const payload = await api("/api/agent-center/agent-templates");
   state.agentTemplates = payload.items || [];
+}
+
+async function loadAgentTemplatePage() {
+  const params = new URLSearchParams({
+    limit: String(state.agentTemplatePage.limit || 10),
+    offset: String(state.agentTemplatePage.offset || 0),
+  });
+  const payload = await api(`/api/agent-center/agent-templates?${params.toString()}`);
+  state.agentTemplatePage.items = payload.items || [];
+  state.agentTemplatePage.total = payload.total || 0;
+  state.agentTemplatePage.limit = payload.limit || state.agentTemplatePage.limit;
+  state.agentTemplatePage.offset = payload.offset || 0;
 }
 
 async function loadTeamTemplates() {
@@ -1848,45 +2027,127 @@ async function openBlueprint(blueprintId) {
   populateTaskOptions();
 }
 
-async function refreshAll() {
-  await Promise.all([
-    loadControlPlane(),
-    loadProviders(),
-    loadProviderPage(),
-    loadPlugins(),
-    loadAgentTemplates(),
-    loadTeamTemplates(),
-    loadBuilds(),
-    loadBlueprints(),
-    loadRuns(),
-    loadApprovals(),
-  ]);
-  populateProviderTypeOptions();
-  providerPageSize.value = String(state.providerPage.limit || 10);
+async function ensureAgentTemplateEditorData(force = false) {
+  if (!state.loaded.providerRefs || force) {
+    await loadProviders();
+    state.loaded.providerRefs = true;
+  }
+  if (!state.loaded.pluginRefs || force) {
+    await loadPlugins();
+    state.loaded.pluginRefs = true;
+  }
   populateProviderOptions();
   populatePluginOptions();
-  populateTeamTemplateOptions();
-  populateTaskOptions();
+}
+
+async function ensureOverviewData(force = false) {
+  if (!state.loaded.controlPlane || force) {
+    await loadControlPlane();
+    state.loaded.controlPlane = true;
+    state.loaded.providerTypes = true;
+  }
+  populateProviderTypeOptions();
   renderOverview();
+}
+
+async function ensureProvidersPage(force = false) {
+  if (!state.loaded.providerTypes || force) {
+    await loadProviderTypes();
+    state.loaded.providerTypes = true;
+  }
+  if (!state.loaded.providerPage || force) {
+    await loadProviderPage();
+    state.loaded.providerPage = true;
+  }
+  populateProviderTypeOptions();
+  providerPageSize.value = String(state.providerPage.limit || 10);
   renderProviders();
+}
+
+async function ensurePluginsPage(force = false) {
+  if (!state.loaded.pluginPage || force) {
+    await loadPluginPage();
+    state.loaded.pluginPage = true;
+  }
+  pluginPageSize.value = String(state.pluginPage.limit || 10);
   renderPlugins();
+}
+
+async function ensureAgentTemplatesPage(force = false) {
+  if (!state.loaded.providerRefs || force) {
+    await loadProviders();
+    state.loaded.providerRefs = true;
+  }
+  if (!state.loaded.agentTemplatePage || force) {
+    await loadAgentTemplatePage();
+    state.loaded.agentTemplatePage = true;
+  }
+  populateProviderOptions();
+  agentTemplatePageSize.value = String(state.agentTemplatePage.limit || 10);
   renderAgentTemplates();
+}
+
+async function ensureTeamTemplatesPage(force = false) {
+  if (!state.loaded.agentTemplateRefs || force) {
+    await loadAgentTemplates();
+    state.loaded.agentTemplateRefs = true;
+  }
+  if (!state.loaded.teamTemplates || force) {
+    await loadTeamTemplates();
+    state.loaded.teamTemplates = true;
+  }
   renderTeamTemplates();
-  renderTeamEditor();
+  if (!state.teamEditor.spec) {
+    resetTeamTemplateForm();
+  } else {
+    renderTeamEditor();
+  }
+}
+
+async function ensureBuildsPage(force = false) {
+  if (!state.loaded.teamTemplates || force) {
+    await loadTeamTemplates();
+    state.loaded.teamTemplates = true;
+  }
+  if (!state.loaded.builds || force) {
+    await loadBuilds();
+    state.loaded.builds = true;
+  }
   renderBuilds();
-  renderBlueprints();
-  renderRuns();
-  renderApprovals();
   if (state.selectedBuildId) {
     renderBuildDetail(state.builds.find((item) => item.id === state.selectedBuildId) || null);
   } else {
     setDetailPlaceholder(buildDetail, "请选择一个 Build。");
   }
+}
+
+async function ensureBlueprintsPage(force = false) {
+  if (!state.loaded.blueprints || force) {
+    await loadBlueprints();
+    state.loaded.blueprints = true;
+  }
+  renderBlueprints();
   if (state.selectedBlueprintId) {
     renderBlueprintDetail(state.blueprints.find((item) => item.id === state.selectedBlueprintId) || null);
   } else {
     setDetailPlaceholder(blueprintDetail, "请选择一个蓝图。");
   }
+}
+
+async function ensureRuntimePage(force = false) {
+  if (!state.loaded.builds || force) {
+    await loadBuilds();
+    state.loaded.builds = true;
+  }
+  if (!state.loaded.blueprints || force) {
+    await loadBlueprints();
+    state.loaded.blueprints = true;
+  }
+  if (!state.loaded.runs || force) {
+    await loadRuns();
+    state.loaded.runs = true;
+  }
+  renderRuns();
   if (state.selectedRunId) {
     await loadRunDetail(state.selectedRunId);
   } else {
@@ -1894,15 +2155,58 @@ async function refreshAll() {
   }
 }
 
+async function ensureApprovalsPage(force = false) {
+  if (!state.loaded.approvals || force) {
+    await loadApprovals();
+    state.loaded.approvals = true;
+  }
+  renderApprovals();
+}
+
+async function ensurePageData(pageName, options = {}) {
+  const force = Boolean(options.force);
+  switch (pageName) {
+    case "overview":
+      await ensureOverviewData(force);
+      break;
+    case "providers":
+      await ensureProvidersPage(force);
+      break;
+    case "plugins":
+      await ensurePluginsPage(force);
+      break;
+    case "agent-templates":
+      await ensureAgentTemplatesPage(force);
+      break;
+    case "team-templates":
+      await ensureTeamTemplatesPage(force);
+      break;
+    case "builds":
+      await ensureBuildsPage(force);
+      break;
+    case "runtime":
+      await ensureRuntimePage(force);
+      break;
+    case "approvals":
+      await ensureApprovalsPage(force);
+      break;
+    case "blueprints":
+      await ensureBlueprintsPage(force);
+      break;
+    default:
+      break;
+  }
+}
+
 navButtons.forEach((button) => {
-  button.addEventListener("click", () => {
-    switchPage(button.dataset.pageTarget);
+  button.addEventListener("click", async () => {
+    await switchPage(button.dataset.pageTarget);
   });
 });
 
 topNavButtons.forEach((button) => {
-  button.addEventListener("click", () => {
-    switchNavSection(button.dataset.navSection);
+  button.addEventListener("click", async () => {
+    await switchNavSection(button.dataset.navSection);
   });
 });
 
@@ -1910,7 +2214,7 @@ const refreshAllButton = document.querySelector("#refresh-all");
 if (refreshAllButton) {
   refreshAllButton.addEventListener("click", async () => {
   try {
-    await refreshAll();
+    await ensurePageData(state.activePage, { force: true });
   } catch (error) {
     showResult(taskResult, { error: error.message });
   }
@@ -1921,6 +2225,7 @@ const quickBuildButton = document.querySelector("#quick-build");
 if (quickBuildButton) {
   quickBuildButton.addEventListener("click", async () => {
   try {
+    await ensureTeamTemplatesPage(true);
     const targetId = state.selectedTeamTemplateId || state.teamTemplates[0]?.id;
     if (!targetId) {
       throw new Error("暂无可构建的团队模板。");
@@ -1930,10 +2235,13 @@ if (quickBuildButton) {
       body: JSON.stringify({}),
     });
     state.selectedBuildId = payload.id;
+    if (payload.blueprint_id) {
+      state.selectedBlueprintId = payload.blueprint_id;
+    }
     hideResult(buildResult);
-    await refreshAll();
+    invalidateData("builds", "blueprints", "controlPlane");
+    await switchPage("builds", { force: true });
     await openBuild(payload.id);
-    switchPage("builds");
   } catch (error) {
     showResult(buildResult, { error: error.message });
   }
@@ -1943,11 +2251,16 @@ if (quickBuildButton) {
 providerForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
+    const isCreate = !state.editingProviderId;
     const payload = buildProviderPayloadFromForm();
     const method = state.editingProviderId ? "PUT" : "POST";
     const path = state.editingProviderId ? `/api/agent-center/providers/${state.editingProviderId}` : "/api/agent-center/providers";
     const saved = await api(path, { method, body: JSON.stringify(payload) });
-    await refreshAll();
+    if (isCreate) {
+      state.providerPage.offset = 0;
+    }
+    invalidateData("providerPage", "providerRefs", "controlPlane");
+    await ensureProvidersPage(true);
     closeProviderModal();
     providerResult?.classList.remove("empty");
     showResult(providerResult, { message: "\u63d0\u4f9b\u65b9\u5df2\u4fdd\u5b58", id: saved.id });
@@ -1960,34 +2273,46 @@ providerForm.addEventListener("submit", async (event) => {
 pluginForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   hideResult(pluginResult);
+  hideResult(pluginModalResult);
   try {
+    const isCreate = !state.editingPluginId;
     const payload = buildPluginPayloadFromForm();
     const method = state.editingPluginId ? "PUT" : "POST";
     const path = state.editingPluginId ? `/api/agent-center/plugins/${state.editingPluginId}` : "/api/agent-center/plugins";
     const saved = await api(path, { method, body: JSON.stringify(payload) });
-    fillPluginForm(saved);
-    await refreshAll();
+    if (isCreate) {
+      state.pluginPage.offset = 0;
+    }
+    invalidateData("pluginPage", "pluginRefs", "controlPlane");
+    await ensurePluginsPage(true);
+    closePluginModal();
     showResult(pluginResult, { message: "插件已保存", id: saved.id });
   } catch (error) {
-    showResult(pluginResult, { error: error.message });
+    showResult(pluginModalResult, errorResult(error));
   }
 });
 
 agentTemplateForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   hideResult(agentTemplateResult);
+  hideResult(agentTemplateModalResult);
   try {
+    const isCreate = !state.editingAgentTemplateId;
     const payload = buildAgentTemplatePayloadFromForm();
     const method = state.editingAgentTemplateId ? "PUT" : "POST";
     const path = state.editingAgentTemplateId
       ? `/api/agent-center/agent-templates/${state.editingAgentTemplateId}`
       : "/api/agent-center/agent-templates";
     const saved = await api(path, { method, body: JSON.stringify(payload) });
-    fillAgentTemplateForm(saved);
-    await refreshAll();
+    if (isCreate) {
+      state.agentTemplatePage.offset = 0;
+    }
+    invalidateData("agentTemplatePage", "agentTemplateRefs", "controlPlane");
+    await ensureAgentTemplatesPage(true);
+    closeAgentTemplateModal();
     showResult(agentTemplateResult, { message: "Agent 模板已保存", id: saved.id });
   } catch (error) {
-    showResult(agentTemplateResult, { error: error.message });
+    showResult(agentTemplateModalResult, errorResult(error));
   }
 });
 
@@ -2002,7 +2327,8 @@ teamTemplateForm.addEventListener("submit", async (event) => {
       : "/api/agent-center/team-templates";
     const saved = await api(path, { method, body: JSON.stringify(payload) });
     fillTeamTemplateForm(saved);
-    await refreshAll();
+    invalidateData("teamTemplates", "builds", "controlPlane");
+    await ensureTeamTemplatesPage(true);
     showResult(teamTemplateResult, { message: "团队模板已保存", id: saved.id });
   } catch (error) {
     showResult(teamTemplateResult, { error: error.message });
@@ -2024,7 +2350,11 @@ buildForm.addEventListener("submit", async (event) => {
       }),
     });
     state.selectedBuildId = payload.id;
-    await refreshAll();
+    if (payload.blueprint_id) {
+      state.selectedBlueprintId = payload.blueprint_id;
+    }
+    invalidateData("builds", "blueprints", "controlPlane");
+    await ensureBuildsPage(true);
     await openBuild(payload.id);
     showResult(buildResult, { message: "Build 已生成", id: payload.id, blueprint_id: payload.blueprint_id });
   } catch (error) {
@@ -2056,16 +2386,19 @@ taskForm.addEventListener("submit", async (event) => {
       body: JSON.stringify(payload),
     });
     state.selectedRunId = runBundle.run.id;
-    await refreshAll();
+    invalidateData("runs", "approvals", "controlPlane");
+    await switchPage("runtime", { force: true });
     await loadRunDetail(runBundle.run.id);
     showResult(taskResult, { message: "Run 已启动", run_id: runBundle.run.id, status: runBundle.run.status });
-    switchPage("runtime");
   } catch (error) {
     showResult(taskResult, { error: error.message });
   }
 });
 
-providerOpenCreate.addEventListener("click", () => {
+providerOpenCreate.addEventListener("click", async () => {
+  await loadProviderTypes();
+  state.loaded.providerTypes = true;
+  populateProviderTypeOptions();
   resetProviderForm();
   openProviderModal();
 });
@@ -2093,8 +2426,7 @@ providerType.addEventListener("change", () => {
 providerPageSize.addEventListener("change", async () => {
   state.providerPage.limit = Number(providerPageSize.value || 10);
   state.providerPage.offset = 0;
-  await loadProviderPage();
-  renderProviders();
+  await ensureProvidersPage(true);
 });
 providerModelSave.addEventListener("click", () => {
   const model = readProviderModelEditor();
@@ -2142,9 +2474,33 @@ providerModelTest.addEventListener("click", async () => {
     showResult(providerModelTestResult, errorResult(error));
   }
 });
-document.querySelector("#plugin-reset").addEventListener("click", resetPluginForm);
-document.querySelector("#agent-template-reset").addEventListener("click", resetAgentTemplateForm);
-document.querySelector("#team-template-reset").addEventListener("click", resetTeamTemplateForm);
+pluginOpenCreate.addEventListener("click", () => {
+  resetPluginForm();
+  openPluginModal();
+});
+pluginModalCloseButtons.forEach((button) => button.addEventListener("click", closePluginModal));
+pluginCancel.addEventListener("click", closePluginModal);
+pluginPageSize.addEventListener("change", async () => {
+  state.pluginPage.limit = Number(pluginPageSize.value || 10);
+  state.pluginPage.offset = 0;
+  await ensurePluginsPage(true);
+});
+agentTemplateOpenCreate.addEventListener("click", async () => {
+  await ensureAgentTemplateEditorData(true);
+  resetAgentTemplateForm();
+  openAgentTemplateModal();
+});
+agentTemplateModalCloseButtons.forEach((button) => button.addEventListener("click", closeAgentTemplateModal));
+agentTemplateCancel.addEventListener("click", closeAgentTemplateModal);
+agentTemplatePageSize.addEventListener("change", async () => {
+  state.agentTemplatePage.limit = Number(agentTemplatePageSize.value || 10);
+  state.agentTemplatePage.offset = 0;
+  await ensureAgentTemplatesPage(true);
+});
+document.querySelector("#team-template-reset").addEventListener("click", async () => {
+  await ensureTeamTemplatesPage(true);
+  resetTeamTemplateForm();
+});
 document.querySelector("#team-member-add").addEventListener("click", addTeamMember);
 teamGraphValidate.addEventListener("click", validateTeamGraph);
 teamGraphPreview.addEventListener("click", previewTeamGraph);
@@ -2216,7 +2572,8 @@ document.addEventListener("click", async (event) => {
         resetProviderForm();
         closeProviderModal();
       }
-      await refreshAll();
+      invalidateData("providerPage", "providerRefs", "controlPlane");
+      await ensureProvidersPage(true);
       providerResult?.classList.remove("empty");
       showResult(providerResult, { message: "\u63d0\u4f9b\u65b9\u5df2\u5220\u9664", id: providerId });
     } catch (error) {
@@ -2231,7 +2588,7 @@ document.addEventListener("click", async (event) => {
     try {
       const provider = await api(`/api/agent-center/providers/${providerEdit.dataset.providerEdit}`);
       fillProviderForm(provider);
-      switchPage("providers");
+      await switchPage("providers");
     } catch (error) {
       providerResult?.classList.remove("empty");
       showResult(providerResult, errorResult(error));
@@ -2242,8 +2599,21 @@ document.addEventListener("click", async (event) => {
   const providerPageButton = event.target.closest("[data-provider-page]");
   if (providerPageButton && !providerPageButton.hasAttribute("disabled")) {
     state.providerPage.offset = Number(providerPageButton.dataset.providerPage || 0);
-    await loadProviderPage();
-    renderProviders();
+    await ensureProvidersPage(true);
+    return;
+  }
+
+  const pluginPageButton = event.target.closest("[data-plugin-page]");
+  if (pluginPageButton && !pluginPageButton.hasAttribute("disabled")) {
+    state.pluginPage.offset = Number(pluginPageButton.dataset.pluginPage || 0);
+    await ensurePluginsPage(true);
+    return;
+  }
+
+  const agentTemplatePageButton = event.target.closest("[data-agent-template-page]");
+  if (agentTemplatePageButton && !agentTemplatePageButton.hasAttribute("disabled")) {
+    state.agentTemplatePage.offset = Number(agentTemplatePageButton.dataset.agentTemplatePage || 0);
+    await ensureAgentTemplatesPage(true);
     return;
   }
 
@@ -2263,10 +2633,12 @@ document.addEventListener("click", async (event) => {
 
   const pluginEdit = event.target.closest("[data-plugin-edit]");
   if (pluginEdit) {
-    const plugin = state.plugins.find((item) => item.id === pluginEdit.dataset.pluginEdit);
-    if (plugin) {
+    try {
+      const plugin = await api(`/api/agent-center/plugins/${pluginEdit.dataset.pluginEdit}`);
       fillPluginForm(plugin);
-      switchPage("plugins");
+      await switchPage("plugins");
+    } catch (error) {
+      showResult(pluginResult, errorResult(error));
     }
     return;
   }
@@ -2274,7 +2646,7 @@ document.addEventListener("click", async (event) => {
   const pluginValidate = event.target.closest("[data-plugin-validate]");
   if (pluginValidate) {
     try {
-      const plugin = state.plugins.find((item) => item.id === pluginValidate.dataset.pluginValidate);
+      const plugin = state.pluginPage.items.find((item) => item.id === pluginValidate.dataset.pluginValidate) || null;
       if (!plugin?.install_path) {
         throw new Error("插件未配置安装路径。");
       }
@@ -2283,7 +2655,6 @@ document.addEventListener("click", async (event) => {
         body: JSON.stringify({ path: plugin.install_path }),
       });
       showResult(pluginResult, payload);
-      await refreshAll();
     } catch (error) {
       showResult(pluginResult, { error: error.message });
     }
@@ -2298,7 +2669,8 @@ document.addEventListener("click", async (event) => {
         body: JSON.stringify({}),
       });
       showResult(pluginResult, payload);
-      await refreshAll();
+      invalidateData("pluginPage", "pluginRefs");
+      await ensurePluginsPage(true);
     } catch (error) {
       showResult(pluginResult, { error: error.message });
     }
@@ -2313,7 +2685,8 @@ document.addEventListener("click", async (event) => {
         body: JSON.stringify({}),
       });
       showResult(pluginResult, payload);
-      await refreshAll();
+      invalidateData("pluginPage", "pluginRefs");
+      await ensurePluginsPage(true);
     } catch (error) {
       showResult(pluginResult, { error: error.message });
     }
@@ -2328,7 +2701,8 @@ document.addEventListener("click", async (event) => {
         body: JSON.stringify({}),
       });
       showResult(pluginResult, payload);
-      await refreshAll();
+      invalidateData("pluginPage", "pluginRefs");
+      await ensurePluginsPage(true);
     } catch (error) {
       showResult(pluginResult, { error: error.message });
     }
@@ -2340,7 +2714,8 @@ document.addEventListener("click", async (event) => {
     try {
       const payload = await api(`/api/agent-center/plugins/${pluginHealth.dataset.pluginHealth}/health`);
       showResult(pluginResult, payload);
-      await refreshAll();
+      invalidateData("pluginPage");
+      await ensurePluginsPage(true);
     } catch (error) {
       showResult(pluginResult, { error: error.message });
     }
@@ -2367,10 +2742,39 @@ document.addEventListener("click", async (event) => {
 
   const agentTemplateEdit = event.target.closest("[data-agent-template-edit]");
   if (agentTemplateEdit) {
-    const template = state.agentTemplates.find((item) => item.id === agentTemplateEdit.dataset.agentTemplateEdit);
-    if (template) {
+    try {
+      await ensureAgentTemplateEditorData();
+      const template = await api(`/api/agent-center/agent-templates/${agentTemplateEdit.dataset.agentTemplateEdit}`);
       fillAgentTemplateForm(template);
-      switchPage("agent-templates");
+      await switchPage("agent-templates");
+    } catch (error) {
+      showResult(agentTemplateResult, errorResult(error));
+    }
+    return;
+  }
+
+  const agentTemplateDelete = event.target.closest("[data-agent-template-delete]");
+  if (agentTemplateDelete) {
+    const templateId = agentTemplateDelete.dataset.agentTemplateDelete;
+    const template = state.agentTemplatePage.items.find((item) => item.id === templateId) || state.agentTemplates.find((item) => item.id === templateId) || null;
+    const templateName = template?.name || templateId;
+    if (!window.confirm(`确认删除 Agent 模板“${templateName}”？`)) {
+      return;
+    }
+    try {
+      if (state.agentTemplatePage.items.length === 1 && state.agentTemplatePage.offset > 0) {
+        state.agentTemplatePage.offset = Math.max(0, state.agentTemplatePage.offset - state.agentTemplatePage.limit);
+      }
+      await api(`/api/agent-center/agent-templates/${templateId}`, { method: "DELETE" });
+      if (state.editingAgentTemplateId === templateId) {
+        resetAgentTemplateForm();
+        closeAgentTemplateModal();
+      }
+      invalidateData("agentTemplatePage", "agentTemplateRefs", "controlPlane");
+      await ensureAgentTemplatesPage(true);
+      showResult(agentTemplateResult, { message: "Agent 模板已删除", id: templateId });
+    } catch (error) {
+      showResult(agentTemplateResult, errorResult(error));
     }
     return;
   }
@@ -2380,7 +2784,7 @@ document.addEventListener("click", async (event) => {
     const template = state.teamTemplates.find((item) => item.id === teamTemplateEdit.dataset.teamTemplateEdit);
     if (template) {
       fillTeamTemplateForm(template);
-      switchPage("team-templates");
+      await switchPage("team-templates");
     }
     return;
   }
@@ -2393,9 +2797,12 @@ document.addEventListener("click", async (event) => {
         body: JSON.stringify({}),
       });
       state.selectedBuildId = payload.id;
-      await refreshAll();
+      if (payload.blueprint_id) {
+        state.selectedBlueprintId = payload.blueprint_id;
+      }
+      invalidateData("builds", "blueprints", "controlPlane");
+      await switchPage("builds", { force: true });
       await openBuild(payload.id);
-      switchPage("builds");
     } catch (error) {
       showResult(buildResult, { error: error.message });
     }
@@ -2404,8 +2811,8 @@ document.addEventListener("click", async (event) => {
 
   const buildOpen = event.target.closest("[data-build-open]");
   if (buildOpen) {
+    await switchPage("builds");
     await openBuild(buildOpen.dataset.buildOpen);
-    switchPage("builds");
     return;
   }
 
@@ -2413,14 +2820,14 @@ document.addEventListener("click", async (event) => {
   if (buildUse) {
     state.selectedBuildId = buildUse.dataset.buildUse;
     populateTaskOptions();
-    switchPage("runtime");
+    await switchPage("runtime");
     return;
   }
 
   const blueprintOpen = event.target.closest("[data-blueprint-open]");
   if (blueprintOpen) {
+    await switchPage("blueprints");
     await openBlueprint(blueprintOpen.dataset.blueprintOpen);
-    switchPage("blueprints");
     return;
   }
 
@@ -2428,15 +2835,15 @@ document.addEventListener("click", async (event) => {
   if (blueprintUse) {
     state.selectedBlueprintId = blueprintUse.dataset.blueprintUse;
     populateTaskOptions();
-    switchPage("runtime");
+    await switchPage("runtime");
     return;
   }
 
   const runOpen = event.target.closest("[data-run-open]");
   if (runOpen) {
+    await switchPage("runtime");
     await loadRunDetail(runOpen.dataset.runOpen);
     renderRuns();
-    switchPage("runtime");
     return;
   }
 
@@ -2448,9 +2855,9 @@ document.addEventListener("click", async (event) => {
         body: JSON.stringify({}),
       });
       state.selectedRunId = payload.run.id;
-      await refreshAll();
+      invalidateData("runs", "approvals", "controlPlane");
+      await switchPage("runtime", { force: true });
       await loadRunDetail(payload.run.id);
-      switchPage("runtime");
     } catch (error) {
       showResult(taskResult, { error: error.message });
     }
@@ -2469,9 +2876,9 @@ document.addEventListener("click", async (event) => {
         body: JSON.stringify({}),
       });
       state.selectedRunId = payload.run.id;
-      await refreshAll();
+      invalidateData("runs", "approvals", "controlPlane");
+      await switchPage("runtime", { force: true });
       await loadRunDetail(payload.run.id);
-      switchPage("runtime");
     } catch (error) {
       showResult(taskResult, { error: error.message });
     }
@@ -2490,9 +2897,9 @@ document.addEventListener("click", async (event) => {
         body: JSON.stringify({}),
       });
       state.selectedRunId = payload.run.id;
-      await refreshAll();
+      invalidateData("runs", "approvals", "controlPlane");
+      await switchPage("runtime", { force: true });
       await loadRunDetail(payload.run.id);
-      switchPage("runtime");
     } catch (error) {
       showResult(taskResult, { error: error.message });
     }
@@ -2579,12 +2986,7 @@ window.addEventListener("pointerup", () => {
 
 (async function bootstrap() {
   try {
-    switchPage(state.activePage);
-    await refreshAll();
-    resetProviderForm();
-    resetPluginForm();
-    resetAgentTemplateForm();
-    resetTeamTemplateForm();
+    await switchPage(state.activePage);
   } catch (error) {
     showResult(taskResult, { error: error.message });
   }
