@@ -1070,22 +1070,112 @@ class WebApplication:
         )
 
     def _save_team_definition(self, payload: dict[str, Any], *, definition_id: str | None) -> dict[str, Any]:
-        self._require_fields(payload, "key", "name")
+        self._require_fields(payload, "name")
         existing = self.container.store.get_team_definition(definition_id) if definition_id else None
         spec = dict((existing or {}).get("spec_json") or {})
         spec.update(dict(payload.get("spec") or {}))
-        has_tree_root = isinstance(spec.get("root"), dict) or isinstance(spec.get("lead"), dict)
-        if has_tree_root:
-            spec.pop("members", None)
-            spec.pop("agents", None)
-        else:
-            members = [dict(item or {}) for item in list(spec.get("members") or spec.get("agents") or [])]
-            if not members:
-                raise AppError(400, "Team definition requires at least one member or a root lead.")
-            spec["members"] = members
+        store = self.container.store
+
+        def _normalize_name(value: Any) -> str | None:
+            normalized = self._optional_str(value)
+            return normalized or None
+
+        def _resolve_agent_template_ref(reference: str) -> str:
+            template = store.get_agent_template(reference)
+            if template is None:
+                for item in store.list_agent_templates():
+                    template_spec = dict(item.get("spec_json") or {})
+                    metadata = dict(template_spec.get("metadata") or {})
+                    if str(metadata.get("builtin_ref") or "") == reference or str(item.get("name") or "") == reference:
+                        template = item
+                        break
+            if template is None:
+                raise AppError(400, f"Unknown agent template `{reference}`.")
+            return str(template.get("id") or reference)
+
+        def _resolve_team_definition_ref(reference: str) -> str:
+            team_definition = store.get_team_definition(reference) or store.get_team_definition_by_key(reference)
+            if team_definition is None:
+                for item in store.list_team_definitions():
+                    if str(item.get("name") or "") == reference:
+                        team_definition = item
+                        break
+            if team_definition is None:
+                raise AppError(400, f"Unknown team definition `{reference}`.")
+            team_spec = dict(team_definition.get("spec_json") or {})
+            if not isinstance(team_spec.get("root"), dict) and not isinstance(team_spec.get("lead"), dict):
+                raise AppError(400, f"Nested team `{reference}` is not a deep hierarchy team definition.")
+            return str(team_definition.get("id") or reference)
+
+        def _normalize_child_node(node: dict[str, Any], *, index: int) -> dict[str, Any]:
+            source_kind = self._optional_str(node.get("source_kind"))
+            if not source_kind:
+                source_kind = "team_definition" if self._optional_str(node.get("team_definition_ref") or node.get("team_definition_id")) else "agent_template"
+            if source_kind == "team_definition":
+                team_ref = self._optional_str(node.get("team_definition_ref") or node.get("team_definition_id") or node.get("source_ref"))
+                if not team_ref:
+                    raise AppError(400, f"Child #{index} requires team_definition_ref.")
+                team_ref = _resolve_team_definition_ref(team_ref)
+                if definition_id and team_ref == definition_id:
+                    raise AppError(400, "Team definition cannot reference itself as a child team.")
+                normalized = {
+                    "kind": "team",
+                    "source_kind": "team_definition",
+                    "team_definition_ref": team_ref,
+                }
+            elif source_kind == "agent_template":
+                template_ref = self._optional_str(node.get("agent_template_ref") or node.get("agent_template_id") or node.get("source_ref"))
+                if not template_ref:
+                    raise AppError(400, f"Child #{index} requires agent_template_ref.")
+                template_ref = _resolve_agent_template_ref(template_ref)
+                normalized = {
+                    "kind": "agent",
+                    "source_kind": "agent_template",
+                    "agent_template_ref": template_ref,
+                }
+            else:
+                raise AppError(400, f"Child #{index} has unsupported source_kind `{source_kind}`.")
+            child_name = _normalize_name(node.get("name"))
+            if child_name:
+                normalized["name"] = child_name
+            return normalized
+
+        lead_payload = dict(spec.get("lead") or {})
+        lead_template_ref = self._optional_str(
+            lead_payload.get("agent_template_ref") or lead_payload.get("agent_template_id") or lead_payload.get("source_ref")
+        )
+        if not lead_template_ref:
+            raise AppError(400, "Team definition requires a lead agent_template_ref.")
+        lead_template_ref = _resolve_agent_template_ref(lead_template_ref)
+        spec["lead"] = {
+            "kind": "agent",
+            "source_kind": "agent_template",
+            "agent_template_ref": lead_template_ref,
+        }
+
+        children_raw = spec.get("children") or []
+        if not isinstance(children_raw, list):
+            raise AppError(400, "Team definition children must be an array.")
+        spec["children"] = [_normalize_child_node(dict(item or {}), index=index) for index, item in enumerate(children_raw, start=1)]
+        spec["workspace_id"] = self._optional_str(spec.get("workspace_id")) or "local-workspace"
+        spec["project_id"] = self._optional_str(spec.get("project_id")) or "default-project"
+        spec.pop("root", None)
+        spec.pop("members", None)
+        spec.pop("agents", None)
+        spec.pop("review_policy_refs", None)
+        spec.pop("review_overrides", None)
+        spec.pop("shared_kb_bindings", None)
+        spec.pop("shared_knowledge_base_refs", None)
+        spec.pop("shared_knowledge_bases", None)
+        spec.pop("shared_static_memory_bindings", None)
+        spec.pop("shared_static_memory_refs", None)
+        spec.pop("shared_static_memories", None)
+        spec.pop("task_entry_policy", None)
+        spec.pop("task_entry_agent", None)
+        spec.pop("termination_policy", None)
         return self.container.store.save_team_definition(
             team_definition_id=definition_id,
-            key=str(payload["key"]),
+            key=self._optional_str(payload.get("key")) or self._optional_str((existing or {}).get("key")),
             name=str(payload["name"]),
             description=str(payload.get("description") or ""),
             version=str(payload.get("version") or "v1"),

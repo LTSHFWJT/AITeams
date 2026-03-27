@@ -530,20 +530,37 @@ def default_team_definitions() -> list[dict[str, Any]]:
         {
             "key": "team.software_delivery.v1",
             "name": "软件交付团队",
-            "description": "按层级组织的默认多 Agent 交付团队。",
+            "description": "按 create_deep_agent 层级组织的默认软件交付团队。",
             "version": "v1",
             "spec": {
                 "workspace_id": "local-workspace",
                 "project_id": "default-project",
-                "task_entry_agent": "planner",
-                "members": [
-                    {"key": "planner", "name": "规划负责人", "agent_definition_ref": DEFAULT_AGENT_DEFINITION_IDS["planner"], "level": 10, "can_receive_task": True, "can_finish_task": True},
-                    {"key": "architect", "name": "架构负责人", "agent_definition_ref": DEFAULT_AGENT_DEFINITION_IDS["architect"], "level": 8},
-                    {"key": "engineer", "name": "交付工程师", "agent_definition_ref": DEFAULT_AGENT_DEFINITION_IDS["engineer"], "level": 5},
-                    {"key": "reviewer", "name": "质量审查员", "agent_definition_ref": DEFAULT_AGENT_DEFINITION_IDS["reviewer"], "level": 1},
+                "lead": {
+                    "kind": "agent",
+                    "source_kind": "agent_template",
+                    "agent_template_ref": "strategy_planner",
+                    "name": "规划负责人",
+                },
+                "children": [
+                    {
+                        "kind": "agent",
+                        "source_kind": "agent_template",
+                        "agent_template_ref": "solution_architect",
+                        "name": "架构负责人",
+                    },
+                    {
+                        "kind": "agent",
+                        "source_kind": "agent_template",
+                        "agent_template_ref": "implementation_engineer",
+                        "name": "交付工程师",
+                    },
+                    {
+                        "kind": "agent",
+                        "source_kind": "agent_template",
+                        "agent_template_ref": "quality_reviewer",
+                        "name": "质量审查员",
+                    },
                 ],
-                "communication_policy": {"type": "adjacent_level_all"},
-                "review_policy_refs": ["review.high_risk_tools", "review.cross_level_message"],
             },
         }
     ]

@@ -760,7 +760,7 @@
                   </label>
                 </div>
                 <div class="form-grid two">
-                  <label class="tag-multi-select-field">
+                  <div class="tag-multi-select-field">
                     <span>插件</span>
                     <div
                       class="tag-multi-select"
@@ -770,8 +770,8 @@
                       data-empty-list-label="暂无可选插件"
                     ></div>
                     <select id="agent-definition-plugins" multiple class="hidden" aria-hidden="true" tabindex="-1"></select>
-                  </label>
-                  <label class="tag-multi-select-field">
+                  </div>
+                  <div class="tag-multi-select-field">
                     <span>技能</span>
                     <div
                       class="tag-multi-select"
@@ -781,7 +781,7 @@
                       data-empty-list-label="暂无可选技能"
                     ></div>
                     <select id="agent-definition-skills" multiple class="hidden" aria-hidden="true" tabindex="-1"></select>
-                  </label>
+                  </div>
                   <label><span>知识库</span><select id="agent-definition-knowledge-bases"></select></label>
                   <label><span>审核策略</span><select id="agent-definition-review-policies"></select></label>
                 </div>
@@ -956,103 +956,51 @@
                 <h3 id="team-definition-modal-title">新增团队管理项</h3>
               </div>
               <form id="team-definition-form" class="form resource-editor-form">
-                <div class="field-note">主路径：选择已组合好的 Agent，然后配置层级、入口/完成权限、共享资源和边审批策略。</div>
+                <div class="field-note">团队管理只保存层级定义，不会在保存时创建 `create_deep_agent`。真正运行时，才会按当前团队和子团队引用递归创建。</div>
+                <input id="team-definition-key" class="hidden" aria-hidden="true" />
                 <div class="form-grid two">
-                  <label><span>Key</span><input id="team-definition-key" placeholder="delivery_team_v2" /></label>
                   <label><span>名称</span><input id="team-definition-name" placeholder="软件交付团队定义" /></label>
                   <label><span>工作区</span><input id="team-definition-workspace" value="local-workspace" /></label>
                   <label><span>项目</span><input id="team-definition-project" value="default-project" /></label>
                 </div>
                 <label><span>说明</span><textarea id="team-definition-description" rows="3" placeholder="简短说明"></textarea></label>
 
+                <div class="retrieval-block">
+                  <div class="retrieval-block-head">
+                    <h4>Lead Agent</h4>
+                    <p class="field-note">每个团队本身都是一个 `create_deep_agent` 对象，这里指定它的主 Agent 模板。</p>
+                  </div>
+                  <label><span>Lead Agent 模板</span><select id="team-definition-lead-agent-template"></select></label>
+                </div>
+
                 <div class="member-toolbar">
-                  <span class="section-mini-title">团队成员</span>
+                  <span class="section-mini-title">直属 Subagents</span>
                   <div class="member-toolbar-actions">
-                    <button id="team-definition-member-add" type="button" class="ghost">添加成员</button>
+                    <button id="team-definition-member-add" type="button" class="ghost">添加 Subagent</button>
                   </div>
                 </div>
-                <div class="field-note">选择已组合好的 Agent，然后配置层级、入口/完成权限。相邻层级可自动互相对话。</div>
+                <div class="field-note">每个 subagent 节点都带一个 `source_kind`，明确它引用的是 `agent template` 还是另一个 `team definition`，避免只靠 id 产生歧义。</div>
                 <div id="team-definition-member-list" class="member-list"></div>
 
-                <div class="retrieval-block">
-                  <div class="retrieval-block-head">
-                    <h4>任务入口策略</h4>
-                    <p class="field-note">决定人下达任务后，优先把任务送到哪个 Agent。</p>
-                  </div>
-                  <div class="form-grid two">
-                    <label>
-                      <span>模式</span>
-                      <select id="team-definition-entry-mode">
-                        <option value="auto">系统自动选择</option>
-                        <option value="specific_agent">指定入口 Agent</option>
-                      </select>
-                    </label>
-                    <label>
-                      <span>入口 Agent</span>
-                      <select id="team-definition-entry-agent"></select>
-                    </label>
-                  </div>
-                </div>
-
-                <div class="retrieval-block">
-                  <div class="retrieval-block-head">
-                    <h4>共享资源绑定</h4>
-                    <p class="field-note">团队所有成员共享可见的知识库和角色管理项。</p>
-                  </div>
-                  <div class="form-grid two">
-                    <label><span>共享知识库</span><select id="team-definition-shared-kbs" multiple size="6"></select></label>
-                    <label><span>角色管理</span><select id="team-definition-shared-static-memories" multiple size="6"></select></label>
-                  </div>
-                </div>
-
-                <div class="retrieval-block">
-                  <div class="retrieval-block-head">
-                    <h4>审核策略绑定</h4>
-                    <p class="field-note">把已有 Review Policy 作为团队默认审核策略显式绑定，不再手写 refs。</p>
-                  </div>
-                  <label><span>Review Policies</span><select id="team-definition-review-policies" multiple size="6"></select></label>
-                </div>
-
-                <div class="retrieval-block">
-                  <div class="retrieval-block-head">
-                    <h4>终止策略</h4>
-                    <p class="field-note">决定团队在哪些 Agent 产出上行结果后可视为完成。</p>
-                  </div>
-                  <div class="form-grid two">
-                    <label>
-                      <span>模式</span>
-                      <select id="team-definition-termination-mode">
-                        <option value="member_finishers">沿用成员完成标记</option>
-                        <option value="entry_agent">入口 Agent 完成即终止</option>
-                        <option value="specific_agents">指定完成 Agent</option>
-                      </select>
-                    </label>
-                    <label>
-                      <span>完成 Agent</span>
-                      <select id="team-definition-termination-agents" multiple size="6"></select>
-                    </label>
-                  </div>
-                </div>
-
-                <div class="retrieval-block">
-                  <div class="retrieval-block-head">
-                    <h4>Team Edge 审批策略</h4>
-                    <p class="field-note">可视化配置“某两个 Agent 之间的消息必须人工前审”。</p>
-                  </div>
-                  <div class="member-toolbar">
-                    <span class="section-mini-title">Review Overrides</span>
-                    <div class="member-toolbar-actions">
-                      <button id="team-definition-review-override-add" type="button" class="ghost">添加策略</button>
-                    </div>
-                  </div>
+                <div class="hidden" aria-hidden="true">
+                  <select id="team-definition-entry-mode">
+                    <option value="auto">系统自动选择</option>
+                    <option value="specific_agent">指定入口 Agent</option>
+                  </select>
+                  <select id="team-definition-entry-agent"></select>
+                  <select id="team-definition-shared-kbs" multiple size="6"></select>
+                  <select id="team-definition-shared-static-memories" multiple size="6"></select>
+                  <select id="team-definition-review-policies" multiple size="6"></select>
+                  <select id="team-definition-termination-mode">
+                    <option value="member_finishers">沿用成员完成标记</option>
+                    <option value="entry_agent">入口 Agent 完成即终止</option>
+                    <option value="specific_agents">指定完成 Agent</option>
+                  </select>
+                  <select id="team-definition-termination-agents" multiple size="6"></select>
                   <div id="team-definition-review-override-list" class="member-list"></div>
                   <textarea id="team-definition-review-overrides" class="hidden" aria-hidden="true"></textarea>
                 </div>
 
-                <details class="advanced-editor">
-                  <summary>内部调试 JSON</summary>
-                  <div class="field-note">`members` 与 `review_policy_refs` 已切到上方显式可视化编辑；这里只保留隐藏兼容状态字段。</div>
-                </details>
                 <textarea id="team-definition-members" class="hidden" aria-hidden="true"></textarea>
 
                 <pre id="team-definition-modal-result" class="result hidden"></pre>

@@ -1117,12 +1117,14 @@ pre {
 }
 
 .form label,
-.toolbar label {
+.toolbar label,
+.tag-multi-select-field {
   display: grid;
   gap: 5px;
 }
 
-label span {
+label span,
+.tag-multi-select-field > span {
   font-size: 0.9rem;
   font-weight: 700;
   color: var(--cyan-deep);
@@ -1278,6 +1280,7 @@ select[multiple] {
   flex-wrap: wrap;
   flex: 1 1 auto;
   min-width: 0;
+  order: 1;
 }
 
 .tag-multi-select-placeholder {
@@ -1297,6 +1300,7 @@ select[multiple] {
   color: var(--cyan-deep);
   font-size: 0.82rem;
   line-height: 1.2;
+  cursor: default;
 }
 
 .tag-multi-select-token-label {
@@ -1320,6 +1324,15 @@ select[multiple] {
   font-size: 0.92rem;
   font-weight: 700;
   line-height: 1;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease, background 120ms ease;
+}
+
+.tag-multi-select-token:hover .tag-multi-select-token-remove,
+.tag-multi-select-token:focus-within .tag-multi-select-token-remove {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .tag-multi-select-token-remove:hover {
@@ -1338,6 +1351,7 @@ select[multiple] {
   background: transparent;
   box-shadow: none;
   line-height: 1.3;
+  order: 0;
 }
 
 .tag-multi-select-input:focus {
@@ -1420,6 +1434,12 @@ select[multiple] {
   padding: 10px;
   color: var(--muted);
   font-size: 0.84rem;
+}
+
+.agent-definition-modal-card select:not([multiple]) {
+  height: 42px;
+  min-height: 42px;
+  line-height: 1.4;
 }
 
 button {

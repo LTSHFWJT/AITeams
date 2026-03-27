@@ -449,6 +449,7 @@ const teamDefinitionName = document.querySelector("#team-definition-name");
 const teamDefinitionWorkspace = document.querySelector("#team-definition-workspace");
 const teamDefinitionProject = document.querySelector("#team-definition-project");
 const teamDefinitionDescription = document.querySelector("#team-definition-description");
+const teamDefinitionLeadAgentTemplate = document.querySelector("#team-definition-lead-agent-template");
 const teamDefinitionEntryMode = document.querySelector("#team-definition-entry-mode");
 const teamDefinitionEntryAgent = document.querySelector("#team-definition-entry-agent");
 const teamDefinitionSharedKbs = document.querySelector("#team-definition-shared-kbs");
@@ -814,6 +815,17 @@ function initializeTagMultiSelects() {
       ui.open = true;
       renderTagMultiSelect(select);
     });
+    root.addEventListener("pointerdown", (event) => {
+      if (!(event.target instanceof Element)) {
+        return;
+      }
+      if (event.target instanceof HTMLInputElement) {
+        return;
+      }
+      if (event.target.closest("[data-tag-select-option]") || event.target.closest("[data-tag-select-remove]")) {
+        event.preventDefault();
+      }
+    });
     input.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
         event.preventDefault();
@@ -844,6 +856,7 @@ function initializeTagMultiSelects() {
       const remove = event.target.closest("[data-tag-select-remove]");
       if (remove) {
         event.preventDefault();
+        event.stopPropagation();
         setTagMultiSelectOption(select, remove.dataset.tagSelectRemove || "", false);
         input.focus();
         return;
@@ -851,6 +864,7 @@ function initializeTagMultiSelects() {
       const option = event.target.closest("[data-tag-select-option]");
       if (option) {
         event.preventDefault();
+        event.stopPropagation();
         const value = option.dataset.tagSelectOption || "";
         const items = tagMultiSelectItems(select);
         const current = items.find((item) => item.value === value) || null;
@@ -986,7 +1000,6 @@ function setTagMultiSelectOption(select, value, nextSelected) {
   const ui = tagMultiSelectRegistry.get(select);
   if (ui) {
     ui.open = true;
-    ui.input.value = "";
   }
   syncTagMultiSelect(select);
   select.dispatchEvent(new Event("change", { bubbles: true }));
@@ -1562,88 +1575,121 @@ function populateAgentDefinitionReferenceOptions(includeStaticMemoryRefs = []) {
   );
 }
 
+const TEAM_DEFINITION_CHILD_SOURCE_KIND_OPTIONS = [
+  { value: "agent_template", label: "Agent 模板" },
+  { value: "team_definition", label: "团队" },
+];
+
+function teamDefinitionSourceKind(value) {
+  return String(value || "").trim() === "team_definition" ? "team_definition" : "agent_template";
+}
+
+function normalizeTeamDefinitionReference(sourceKind, value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return "";
+  }
+  if (teamDefinitionSourceKind(sourceKind) === "team_definition") {
+    const matched = state.teamDefinitions.find((item) => item.id === raw || item.key === raw || item.name === raw) || null;
+    return matched?.id || raw;
+  }
+  const matched =
+    state.agentTemplates.find((item) => item.id === raw) ||
+    state.agentTemplates.find((item) => String(dictOrEmpty(item.spec_json).metadata?.builtin_ref || "").trim() === raw) ||
+    state.agentTemplates.find((item) => item.name === raw) ||
+    null;
+  return matched?.id || raw;
+}
+
+function normalizeTeamDefinitionMember(item) {
+  const payload = item && typeof item === "object" ? { ...item } : {};
+  let sourceKind = String(payload.source_kind || "").trim();
+  if (!sourceKind) {
+    sourceKind = payload.team_definition_ref || payload.team_definition_id ? "team_definition" : "agent_template";
+  }
+  sourceKind = teamDefinitionSourceKind(sourceKind);
+  const kind = sourceKind === "team_definition" ? "team" : "agent";
+  const sourceRef =
+    sourceKind === "team_definition"
+      ? String(payload.team_definition_ref || payload.team_definition_id || payload.source_ref || "").trim()
+      : String(payload.agent_template_ref || payload.agent_template_id || payload.source_ref || "").trim();
+  return {
+    kind,
+    source_kind: sourceKind,
+    source_ref: normalizeTeamDefinitionReference(sourceKind, sourceRef),
+    name: String(payload.name || "").trim(),
+  };
+}
+
+function isDeepTeamDefinitionRecord(item) {
+  const spec = dictOrEmpty(item?.spec_json);
+  return Boolean((spec.root && typeof spec.root === "object") || (spec.lead && typeof spec.lead === "object"));
+}
+
+function teamDefinitionReferenceOptions(sourceKind, { excludeDefinitionId = state.editingTeamDefinitionId } = {}) {
+  if (teamDefinitionSourceKind(sourceKind) === "team_definition") {
+    return state.teamDefinitions
+      .filter((item) => isDeepTeamDefinitionRecord(item))
+      .filter((item) => item.id !== excludeDefinitionId)
+      .map((item) => ({ value: item.id, label: item.name || item.id }));
+  }
+  return state.agentTemplates.map((item) => ({ value: item.id, label: item.name || item.id }));
+}
+
+function teamDefinitionSelectOptionsMarkup(items, selectedValue = "", { allowBlank = false, blankLabel = "请选择", fallbackLabel = "暂无可选项" } = {}) {
+  const selectItems = allowBlank ? [{ value: "", label: blankLabel }, ...items] : items;
+  return selectItems.length
+    ? selectItems
+        .map((item) => `<option value="${escapeHtml(item.value)}" ${item.value === selectedValue ? "selected" : ""}>${escapeHtml(item.label)}</option>`)
+        .join("")
+    : `<option value="">${escapeHtml(fallbackLabel)}</option>`;
+}
+
+function teamDefinitionMemberSourceLabel(member) {
+  const item = normalizeTeamDefinitionMember(member);
+  const options = teamDefinitionReferenceOptions(item.source_kind, { excludeDefinitionId: null });
+  return (
+    options.find((entry) => entry.value === item.source_ref)?.label ||
+    item.source_ref ||
+    (item.source_kind === "team_definition" ? "未选择团队" : "未选择 Agent 模板")
+  );
+}
+
+function renderTeamDefinitionLeadAgentOptions(selectedValue = "") {
+  renderSingleSelect(
+    teamDefinitionLeadAgentTemplate,
+    state.agentTemplates.map((item) => ({ value: item.id, label: item.name || item.id })),
+    selectedValue,
+    "暂无 Agent 模板",
+    { allowBlank: true, blankLabel: "请选择" },
+  );
+}
+
 function teamDefinitionMembersValue() {
   try {
     const parsed = safeParseJson(teamDefinitionMembers?.value, []);
-    return Array.isArray(parsed) ? parsed.filter((item) => item && typeof item === "object") : [];
+    return Array.isArray(parsed) ? parsed.filter((item) => item && typeof item === "object").map(normalizeTeamDefinitionMember) : [];
   } catch (error) {
     return [];
   }
 }
 
 function teamDefinitionMemberOptions() {
-  return teamDefinitionMembersValue()
-    .map((item) => {
-      const key = String(item.key || "").trim();
-      if (!key) {
-        return null;
-      }
-      return { key, name: String(item.name || key).trim() || key };
-    })
-    .filter(Boolean);
+  return teamDefinitionMembersValue().map((item, index) => ({
+    key: item.source_ref || `member_${index + 1}`,
+    name: item.name || teamDefinitionMemberSourceLabel(item) || `成员 ${index + 1}`,
+  }));
 }
 
-function populateTeamDefinitionSharedOptions(includeStaticMemoryRefs = []) {
-  const selectedKbs = getMultiSelectValues(teamDefinitionSharedKbs);
-  const selectedStaticMemories = getMultiSelectValues(teamDefinitionSharedStaticMemories);
-  if (teamDefinitionSharedKbs) {
-    teamDefinitionSharedKbs.innerHTML =
-      state.knowledgeBases.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)} / ${escapeHtml(item.key)}</option>`).join("") ||
-      '<option value="">暂无知识库</option>';
-    setMultiSelectValues(
-      teamDefinitionSharedKbs,
-      selectedKbs.filter((value) => state.knowledgeBases.some((item) => item.id === value)),
-    );
-  }
-  if (teamDefinitionSharedStaticMemories) {
-    const items = staticMemorySelectableItems("role", [...selectedStaticMemories, ...(includeStaticMemoryRefs || [])]);
-    teamDefinitionSharedStaticMemories.innerHTML =
-      items.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join("") ||
-      '<option value="">暂无角色管理项</option>';
-    setMultiSelectValues(
-      teamDefinitionSharedStaticMemories,
-      selectedStaticMemories.filter((value) => items.some((item) => item.id === value)),
-    );
-  }
-}
+function populateTeamDefinitionSharedOptions() {}
 
-function populateTeamDefinitionPolicyAgentOptions() {
-  const members = teamDefinitionMemberOptions();
-  const entrySelected = teamDefinitionEntryAgent?.value || "";
-  const finishSelected = getMultiSelectValues(teamDefinitionTerminationAgents);
-  if (teamDefinitionEntryAgent) {
-    teamDefinitionEntryAgent.innerHTML = members.length
-      ? members.map((item) => `<option value="${escapeHtml(item.key)}">${escapeHtml(item.name)} / ${escapeHtml(item.key)}</option>`).join("")
-      : '<option value="">请先配置成员</option>';
-    if (entrySelected && members.some((item) => item.key === entrySelected)) {
-      teamDefinitionEntryAgent.value = entrySelected;
-    } else {
-      teamDefinitionEntryAgent.value = members[0]?.key || "";
-    }
-  }
-  if (teamDefinitionTerminationAgents) {
-    teamDefinitionTerminationAgents.innerHTML = members.length
-      ? members.map((item) => `<option value="${escapeHtml(item.key)}">${escapeHtml(item.name)} / ${escapeHtml(item.key)}</option>`).join("")
-      : '<option value="">请先配置成员</option>';
-    setMultiSelectValues(teamDefinitionTerminationAgents, finishSelected.filter((value) => members.some((item) => item.key === value)));
-  }
-  syncTeamDefinitionPolicyControls();
-}
+function populateTeamDefinitionPolicyAgentOptions() {}
 
-function syncTeamDefinitionPolicyControls() {
-  if (teamDefinitionEntryAgent) {
-    teamDefinitionEntryAgent.disabled = teamDefinitionEntryMode?.value !== "specific_agent";
-  }
-  if (teamDefinitionTerminationAgents) {
-    teamDefinitionTerminationAgents.disabled = teamDefinitionTerminationMode?.value !== "specific_agents";
-  }
-}
+function syncTeamDefinitionPolicyControls() {}
 
 function setTeamDefinitionMembers(members) {
-  teamDefinitionMembers.value = prettyJson(members || []);
+  teamDefinitionMembers.value = prettyJson((members || []).map((item) => normalizeTeamDefinitionMember(item)));
   renderTeamDefinitionMembers();
-  populateTeamDefinitionPolicyAgentOptions();
-  renderTeamDefinitionReviewOverrides();
 }
 
 function mutateTeamDefinitionMembers(mutator) {
@@ -1657,14 +1703,11 @@ function renderTeamDefinitionMembers() {
     return;
   }
   const members = teamDefinitionMembersValue();
-  const agentOptions = state.agentDefinitions
-    .map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name || item.id)}</option>`)
-    .join("");
   teamDefinitionMemberList.innerHTML = members.length
     ? members
         .map((member, index) => {
-          const label = member.name || member.key || `成员 ${index + 1}`;
-          const level = Number(member.level || 1);
+          const sourceKind = teamDefinitionSourceKind(member.source_kind);
+          const label = member.name || teamDefinitionMemberSourceLabel(member) || `Subagent ${index + 1}`;
           return `
             <article class="member-card">
               <div class="member-card-head">
@@ -1672,58 +1715,39 @@ function renderTeamDefinitionMembers() {
                 <button type="button" class="ghost" data-team-definition-member-remove="${index}">移除</button>
               </div>
               <div class="form-grid two">
-                <label><span>Key</span><input data-team-definition-member-field="key" data-member-index="${index}" value="${escapeHtml(member.key || "")}" /></label>
-                <label><span>名称</span><input data-team-definition-member-field="name" data-member-index="${index}" value="${escapeHtml(member.name || "")}" /></label>
+                <label><span>显示名称</span><input data-team-definition-member-field="name" data-member-index="${index}" value="${escapeHtml(member.name || "")}" placeholder="可选" /></label>
+                <label>
+                  <span>节点类型</span>
+                  <select data-team-definition-member-field="source_kind" data-member-index="${index}">
+                    ${teamDefinitionSelectOptionsMarkup(TEAM_DEFINITION_CHILD_SOURCE_KIND_OPTIONS, sourceKind)}
+                  </select>
+                </label>
               </div>
               <label>
-                <span>Agent</span>
-                <select data-team-definition-member-field="agent_definition_ref" data-member-index="${index}">
-                  ${agentOptions.replace(
-                    `value="${escapeHtml(member.agent_definition_ref || "")}"`,
-                    `value="${escapeHtml(member.agent_definition_ref || "")}" selected`,
-                  )}
+                <span>引用来源</span>
+                <select data-team-definition-member-field="source_ref" data-member-index="${index}">
+                  ${teamDefinitionSelectOptionsMarkup(teamDefinitionReferenceOptions(sourceKind), member.source_ref, {
+                    allowBlank: true,
+                    blankLabel: sourceKind === "team_definition" ? "请选择团队" : "请选择 Agent 模板",
+                    fallbackLabel: sourceKind === "team_definition" ? "暂无可引用团队" : "暂无 Agent 模板",
+                  })}
                 </select>
               </label>
-              <div class="form-grid three">
-                <label><span>层级</span><input data-team-definition-member-field="level" data-member-index="${index}" type="number" min="1" max="16" value="${escapeHtml(level)}" /></label>
-                <label class="toggle-chip">
-                  <input data-team-definition-member-check="can_receive_task" data-member-index="${index}" type="checkbox" ${member.can_receive_task ? "checked" : ""} />
-                  <span>可接收任务</span>
-                </label>
-                <label class="toggle-chip">
-                  <input data-team-definition-member-check="can_finish_task" data-member-index="${index}" type="checkbox" ${member.can_finish_task ? "checked" : ""} />
-                  <span>可完成任务</span>
-                </label>
-              </div>
             </article>
           `;
         })
         .join("")
-    : '<div class="detail empty compact-detail">暂无成员。先添加 Agent，再配置层级。</div>';
+    : '<div class="detail empty compact-detail">暂无直属 Subagent。可添加 Agent 模板或另一个团队作为子节点。</div>';
 }
 
 function addTeamDefinitionMember() {
   mutateTeamDefinitionMembers((members) => {
-    const agentDefinition = state.agentDefinitions[0] || null;
-    const usedKeys = new Set(
-      members
-        .map((item) => String(item.key || "").trim())
-        .filter(Boolean),
-    );
-    let index = 1;
-    let candidate = "agent_1";
-    while (usedKeys.has(candidate)) {
-      index += 1;
-      candidate = `agent_${index}`;
-    }
+    const firstAgentTemplate = state.agentTemplates[0] || null;
     members.push({
-      key: candidate,
-      name: agentDefinition?.name || `成员 ${index}`,
-      agent_definition_ref: agentDefinition?.id || "",
-      level: Math.max(1, 16 - members.length),
-      can_receive_task: members.length === 0,
-      can_finish_task: members.length === 0,
-      peer_chat_enabled: true,
+      kind: "agent",
+      source_kind: "agent_template",
+      source_ref: firstAgentTemplate?.id || "",
+      name: "",
     });
   });
 }
@@ -1734,23 +1758,23 @@ function updateTeamDefinitionMemberField(index, field, value) {
     if (!member) {
       return;
     }
-    if (field === "level") {
-      member[field] = Math.min(16, Math.max(1, Number(value || 1) || 1));
+    if (field === "source_kind") {
+      const sourceKind = teamDefinitionSourceKind(value);
+      const options = teamDefinitionReferenceOptions(sourceKind);
+      member.source_kind = sourceKind;
+      member.kind = sourceKind === "team_definition" ? "team" : "agent";
+      member.source_ref = options.some((item) => item.value === member.source_ref) ? member.source_ref : options[0]?.value || "";
       return;
     }
-    member[field] = value;
+    if (field === "source_ref") {
+      member.source_ref = String(value || "").trim();
+      return;
+    }
+    member[field] = String(value || "");
   });
 }
 
-function updateTeamDefinitionMemberCheck(index, field, checked) {
-  mutateTeamDefinitionMembers((members) => {
-    const member = members[index];
-    if (!member) {
-      return;
-    }
-    member[field] = Boolean(checked);
-  });
-}
+function updateTeamDefinitionMemberCheck() {}
 
 function removeTeamDefinitionMember(index) {
   mutateTeamDefinitionMembers((members) => {
@@ -3264,6 +3288,20 @@ function renderTeamTemplates() {
     : cardMarkup({ title: "暂无团队模板", body: "创建第一个团队模板。", meta: "" });
 }
 
+function teamDefinitionHierarchySpec(spec) {
+  const payload = dictOrEmpty(spec);
+  const root = payload.root && typeof payload.root === "object" ? dictOrEmpty(payload.root) : {};
+  const children = Array.isArray(root.children) ? root.children : Array.isArray(payload.children) ? payload.children : [];
+  const legacyMembers = Array.isArray(payload.members) ? payload.members : Array.isArray(payload.agents) ? payload.agents : [];
+  return {
+    workspaceId: String(payload.workspace_id || "local-workspace"),
+    projectId: String(payload.project_id || "default-project"),
+    lead: normalizeTeamDefinitionMember(root.lead || payload.lead || {}),
+    children: children.map((item) => normalizeTeamDefinitionMember(item)),
+    legacyMembers,
+  };
+}
+
 function renderTeamDefinitions() {
   if (!teamDefinitionList) {
     return;
@@ -3272,40 +3310,28 @@ function renderTeamDefinitions() {
     ? state.teamDefinitions
         .map((item) => {
           const spec = dictOrEmpty(item.spec_json);
-          const members = Array.isArray(spec.members) ? spec.members : Array.isArray(spec.agents) ? spec.agents : [];
-          const entryPolicy = spec.task_entry_policy && typeof spec.task_entry_policy === "object" ? spec.task_entry_policy : {};
-          const entryAgent = String(entryPolicy.agent_id || entryPolicy.target_agent_id || spec.task_entry_agent || "").trim();
-          const terminationPolicy = spec.termination_policy && typeof spec.termination_policy === "object" ? spec.termination_policy : {};
-          const terminationMode = String(terminationPolicy.mode || "").trim().toLowerCase() || "member_finishers";
-          const finishAgents = terminationPolicy.finish_agent_ids || terminationPolicy.agent_ids || terminationPolicy.targets || [];
-          const reviewPolicyCount = (spec.review_policy_refs || []).length;
-          const sharedKbs = (spec.shared_kb_bindings || spec.shared_knowledge_base_refs || spec.shared_knowledge_bases || []).length;
-          const sharedStaticMemories = (
-            spec.shared_static_memory_bindings ||
-            spec.shared_static_memory_refs ||
-            spec.shared_static_memories ||
-            []
-          ).length;
-          const workspaceId = String(spec.workspace_id || "local-workspace");
-          const projectId = String(spec.project_id || "default-project");
-          const entryLabel = entryAgent || "系统自动";
-          const terminationLabel =
-            terminationMode === "specific_agents"
-              ? `指定 ${finishAgents.length || 0} 个`
-              : terminationMode === "entry_agent"
-                ? "入口 Agent"
-                : "成员完成标记";
-          const summaryPrimary = `成员 ${members.length} / 入口 ${entryLabel}`;
-          const summarySecondary = `完成 ${terminationLabel} / 知识库 ${sharedKbs} / 角色 ${sharedStaticMemories} / 审核 ${reviewPolicyCount}`;
+          const hierarchy = teamDefinitionHierarchySpec(spec);
+          const directChildCount = hierarchy.children.length || hierarchy.legacyMembers.length;
+          const childAgentCount = hierarchy.children.filter((child) => child.kind === "agent").length;
+          const childTeamCount = hierarchy.children.filter((child) => child.kind === "team").length;
+          const leadLabel = hierarchy.lead.source_ref ? teamDefinitionMemberSourceLabel(hierarchy.lead) : "未配置 Lead Agent 模板";
+          const summaryPrimary = hierarchy.children.length || hierarchy.lead.source_ref
+            ? `Lead: ${leadLabel}`
+            : hierarchy.legacyMembers.length
+              ? `旧版团队定义 / 成员 ${hierarchy.legacyMembers.length}`
+              : "尚未配置层级";
+          const summarySecondary = hierarchy.children.length || hierarchy.lead.source_ref
+            ? `直属 Subagent ${hierarchy.children.length} / Agent ${childAgentCount} / Team ${childTeamCount}`
+            : "重新编辑后会切换为 create_deep_agent 层级";
           return `
             <article class="provider-row team-management-row">
               <div class="provider-main">
-                <strong title="${escapeAttribute(item.name || item.key || item.id || "-")}">${escapeHtml(item.name || item.key || item.id || "-")}</strong>
-                <span title="${escapeAttribute(item.key || item.id || "-")}">${escapeHtml(`Key: ${item.key || item.id || "-"}`)}</span>
+                <strong title="${escapeAttribute(item.name || item.id || "-")}">${escapeHtml(item.name || item.id || "-")}</strong>
+                <span title="${escapeAttribute(`直属 Subagent ${directChildCount}`)}">${escapeHtml(`直属 Subagent ${directChildCount}`)}</span>
               </div>
               <div class="provider-cell">
                 <strong title="${escapeAttribute(item.description || "未填写说明")}">${escapeHtml(item.description || "未填写说明")}</strong>
-                <span title="${escapeAttribute(`${workspaceId} / ${projectId}`)}">${escapeHtml(`${workspaceId} / ${projectId}`)}</span>
+                <span title="${escapeAttribute(`${hierarchy.workspaceId} / ${hierarchy.projectId}`)}">${escapeHtml(`${hierarchy.workspaceId} / ${hierarchy.projectId}`)}</span>
               </div>
               <div class="provider-cell">
                 <strong title="${escapeAttribute(summaryPrimary)}">${escapeHtml(summaryPrimary)}</strong>
@@ -4212,14 +4238,11 @@ function resetTeamDefinitionForm({ openModal = false } = {}) {
   teamDefinitionWorkspace.value = "local-workspace";
   teamDefinitionProject.value = "default-project";
   teamDefinitionDescription.value = "";
-  teamDefinitionEntryMode.value = "auto";
+  renderTeamDefinitionLeadAgentOptions("");
+  if (teamDefinitionLeadAgentTemplate) {
+    teamDefinitionLeadAgentTemplate.value = "";
+  }
   setTeamDefinitionMembers([]);
-  populateTeamDefinitionReviewPolicyOptions();
-  setMultiSelectValues(teamDefinitionReviewPolicies, []);
-  setTeamDefinitionReviewOverrides([]);
-  populateTeamDefinitionSharedOptions();
-  setMultiSelectValues(teamDefinitionSharedKbs, []);
-  setMultiSelectValues(teamDefinitionSharedStaticMemories, []);
   if (teamDefinitionEntryAgent) {
     teamDefinitionEntryAgent.value = "";
   }
@@ -4243,62 +4266,20 @@ function resetTeamDefinitionForm({ openModal = false } = {}) {
 
 function fillTeamDefinitionForm(definition, { openModal = false } = {}) {
   const spec = clone(definition?.spec_json || {});
-  const members = Array.isArray(spec.members) ? spec.members : Array.isArray(spec.agents) ? spec.agents : [];
-  const memberOptions = members
-    .map((item) => {
-      const key = String(item?.key || "").trim();
-      if (!key) {
-        return null;
-      }
-      return { key, name: String(item?.name || key).trim() || key };
-    })
-    .filter(Boolean);
-  const taskEntryPolicy = spec.task_entry_policy && typeof spec.task_entry_policy === "object" ? spec.task_entry_policy : {};
-  const taskEntryMode =
-    String(taskEntryPolicy.mode || "").trim().toLowerCase() === "specific_agent" || String(spec.task_entry_agent || "").trim()
-      ? "specific_agent"
-      : "auto";
-  const entryAgentId = String(taskEntryPolicy.agent_id || taskEntryPolicy.target_agent_id || spec.task_entry_agent || "").trim();
-  const terminationPolicy = spec.termination_policy && typeof spec.termination_policy === "object" ? spec.termination_policy : {};
-  const terminationMode = String(terminationPolicy.mode || "").trim().toLowerCase() || "member_finishers";
-  const terminationAgents = normalizeResourceSelections(
-    terminationPolicy.finish_agent_ids || terminationPolicy.agent_ids || terminationPolicy.targets || [],
-    memberOptions,
-  );
-  const kbSelections = normalizeResourceSelections(
-    spec.shared_kb_bindings || spec.shared_knowledge_base_refs || spec.shared_knowledge_bases || [],
-    state.knowledgeBases,
-  );
-  const staticMemoryRefs = spec.shared_static_memory_bindings || spec.shared_static_memory_refs || spec.shared_static_memories || [];
-  const staticMemorySelections = normalizeResourceSelections(
-    staticMemoryRefs,
-    state.staticMemories,
-  );
+  const hierarchy = teamDefinitionHierarchySpec(spec);
 
   state.editingTeamDefinitionId = definition.id;
   state.teamDefinitionBaseSpec = clone(spec);
   teamDefinitionKey.value = definition.key || "";
   teamDefinitionName.value = definition.name || "";
-  teamDefinitionWorkspace.value = spec.workspace_id || "local-workspace";
-  teamDefinitionProject.value = spec.project_id || "default-project";
+  teamDefinitionWorkspace.value = hierarchy.workspaceId;
+  teamDefinitionProject.value = hierarchy.projectId;
   teamDefinitionDescription.value = definition.description || "";
-  setTeamDefinitionMembers(members);
-  populateTeamDefinitionReviewPolicyOptions();
-  setMultiSelectValues(teamDefinitionReviewPolicies, normalizeResourceSelections(spec.review_policy_refs || [], state.reviewPolicies));
-  setTeamDefinitionReviewOverrides(spec.review_overrides || []);
-  populateTeamDefinitionSharedOptions(staticMemoryRefs);
-  setMultiSelectValues(teamDefinitionSharedKbs, kbSelections);
-  setMultiSelectValues(teamDefinitionSharedStaticMemories, staticMemorySelections);
-  teamDefinitionEntryMode.value = taskEntryMode;
-  teamDefinitionTerminationMode.value =
-    ["member_finishers", "entry_agent", "specific_agents"].includes(terminationMode) ? terminationMode : "member_finishers";
-  if (teamDefinitionEntryAgent && entryAgentId) {
-    teamDefinitionEntryAgent.value = entryAgentId;
+  renderTeamDefinitionLeadAgentOptions(hierarchy.lead.source_ref);
+  if (teamDefinitionLeadAgentTemplate && hierarchy.lead.source_ref) {
+    teamDefinitionLeadAgentTemplate.value = hierarchy.lead.source_ref;
   }
-  if (teamDefinitionTerminationAgents) {
-    setMultiSelectValues(teamDefinitionTerminationAgents, terminationAgents);
-  }
-  syncTeamDefinitionPolicyControls();
+  setTeamDefinitionMembers(hierarchy.children);
   hideResult(teamDefinitionResult);
   hideResult(teamDefinitionModalResult);
   if (teamDefinitionModalTitle) {
@@ -4311,72 +4292,59 @@ function fillTeamDefinitionForm(definition, { openModal = false } = {}) {
 }
 
 function buildTeamDefinitionPayloadFromForm() {
-  const members = safeParseJson(teamDefinitionMembers.value, []);
-  if (!Array.isArray(members)) {
-    throw new Error("成员 JSON 必须是数组。");
+  const children = teamDefinitionMembersValue();
+  const leadAgentTemplateRef = normalizeTeamDefinitionReference("agent_template", teamDefinitionLeadAgentTemplate?.value || "");
+  if (!leadAgentTemplateRef) {
+    throw new Error("请先选择 Lead Agent 模板。");
   }
-  members.forEach((member, index) => {
-    if (!String(member?.key || "").trim()) {
-      throw new Error(`第 ${index + 1} 个成员缺少 key。`);
+  children.forEach((member, index) => {
+    if (!String(member.source_kind || "").trim()) {
+      throw new Error(`第 ${index + 1} 个 Subagent 缺少节点类型。`);
     }
-    if (!String(member?.agent_definition_ref || member?.agent_definition_id || "").trim()) {
-      throw new Error(`第 ${index + 1} 个成员缺少 Agent 绑定。`);
-    }
-    const level = Number(member?.level || 0);
-    if (!Number.isFinite(level) || level < 1 || level > 16) {
-      throw new Error(`第 ${index + 1} 个成员层级必须在 1-16。`);
+    if (!String(member.source_ref || "").trim()) {
+      throw new Error(`第 ${index + 1} 个 Subagent 缺少引用来源。`);
     }
   });
-  const reviewOverrides = teamDefinitionReviewOverridesValue();
-  if (!Array.isArray(reviewOverrides)) {
-    throw new Error("Review Overrides JSON 必须是数组。");
-  }
   const spec = clone(state.teamDefinitionBaseSpec || {});
-  const entryMode = teamDefinitionEntryMode.value || "auto";
-  const terminationMode = teamDefinitionTerminationMode.value || "member_finishers";
-  const entryAgent = String(teamDefinitionEntryAgent.value || "").trim();
-  const terminationAgents = getMultiSelectValues(teamDefinitionTerminationAgents);
-
-  if (entryMode === "specific_agent" && !entryAgent) {
-    throw new Error("指定入口 Agent 前，请先在成员 JSON 中配置成员。");
-  }
-  if (terminationMode === "specific_agents" && !terminationAgents.length) {
-    throw new Error("指定完成 Agent 模式下，至少选择一个完成 Agent。");
-  }
-
   spec.workspace_id = teamDefinitionWorkspace.value.trim() || "local-workspace";
   spec.project_id = teamDefinitionProject.value.trim() || "default-project";
-  spec.members = members;
-  if (Array.isArray(spec.agents)) {
-    spec.agents = clone(members);
-  }
-  spec.review_policy_refs = getMultiSelectValues(teamDefinitionReviewPolicies);
-  spec.review_overrides = reviewOverrides;
-  spec.shared_kb_bindings = getMultiSelectValues(teamDefinitionSharedKbs);
-  spec.shared_knowledge_base_refs = [];
-  spec.shared_knowledge_bases = [];
-  spec.shared_static_memory_bindings = getMultiSelectValues(teamDefinitionSharedStaticMemories);
-  spec.shared_static_memory_refs = [];
-  spec.shared_static_memories = [];
-  spec.task_entry_policy =
-    entryMode === "specific_agent"
+  spec.lead = {
+    kind: "agent",
+    source_kind: "agent_template",
+    agent_template_ref: leadAgentTemplateRef,
+  };
+  spec.children = children.map((member) =>
+    member.source_kind === "team_definition"
       ? {
-          mode: "specific_agent",
-          agent_id: entryAgent,
+          kind: "team",
+          source_kind: "team_definition",
+          team_definition_ref: member.source_ref,
+          ...(member.name ? { name: member.name } : {}),
         }
-      : { mode: "auto" };
-  spec.task_entry_agent = entryMode === "specific_agent" ? entryAgent : null;
-  spec.termination_policy =
-    terminationMode === "specific_agents"
-      ? {
-          mode: "specific_agents",
-          finish_agent_ids: terminationAgents,
-        }
-      : { mode: terminationMode };
+      : {
+          kind: "agent",
+          source_kind: "agent_template",
+          agent_template_ref: member.source_ref,
+          ...(member.name ? { name: member.name } : {}),
+        },
+  );
+  delete spec.root;
+  delete spec.members;
+  delete spec.agents;
+  delete spec.review_policy_refs;
+  delete spec.review_overrides;
+  delete spec.shared_kb_bindings;
+  delete spec.shared_knowledge_base_refs;
+  delete spec.shared_knowledge_bases;
+  delete spec.shared_static_memory_bindings;
+  delete spec.shared_static_memory_refs;
+  delete spec.shared_static_memories;
+  delete spec.task_entry_policy;
+  delete spec.task_entry_agent;
+  delete spec.termination_policy;
 
   return {
     id: state.editingTeamDefinitionId,
-    key: teamDefinitionKey.value.trim(),
     name: teamDefinitionName.value.trim(),
     description: teamDefinitionDescription.value.trim(),
     version: "v1",
@@ -4916,32 +4884,14 @@ async function ensureAgentDefinitionsPage(force = false) {
 }
 
 async function ensureTeamDefinitionsPage(force = false) {
-  if (!state.loaded.uiMetadata || force) {
-    await loadUiMetadata();
-    state.loaded.uiMetadata = true;
-  }
-  if (!state.loaded.agentDefinitionRefs || force) {
-    await loadAgentDefinitions();
-    state.loaded.agentDefinitionRefs = true;
-  }
-  if (!state.loaded.knowledgeBaseRefs || force) {
-    await loadKnowledgeBases();
-    state.loaded.knowledgeBaseRefs = true;
-  }
-  if (!state.loaded.staticMemoryRefs || force) {
-    await loadStaticMemories();
-    state.loaded.staticMemoryRefs = true;
-  }
-  if (!state.loaded.reviewPolicyRefs || force) {
-    await loadReviewPolicies();
-    state.loaded.reviewPolicyRefs = true;
+  if (!state.loaded.agentTemplateRefs || force) {
+    await loadAgentTemplates();
+    state.loaded.agentTemplateRefs = true;
   }
   if (!state.loaded.teamDefinitions || force) {
     await loadTeamDefinitions();
     state.loaded.teamDefinitions = true;
   }
-  populateTeamDefinitionSharedOptions();
-  populateTeamDefinitionReviewPolicyOptions();
   if (state.editingTeamDefinitionId) {
     const current = state.teamDefinitions.find((item) => item.id === state.editingTeamDefinitionId) || null;
     if (!current) {
@@ -4950,16 +4900,14 @@ async function ensureTeamDefinitionsPage(force = false) {
       if (force) {
         fillTeamDefinitionForm(current);
       } else {
+        renderTeamDefinitionLeadAgentOptions(teamDefinitionLeadAgentTemplate?.value || "");
         renderTeamDefinitionMembers();
-        populateTeamDefinitionPolicyAgentOptions();
-        renderTeamDefinitionReviewOverrides();
         renderTeamDefinitions();
       }
     }
   } else {
+    renderTeamDefinitionLeadAgentOptions(teamDefinitionLeadAgentTemplate?.value || "");
     renderTeamDefinitionMembers();
-    populateTeamDefinitionPolicyAgentOptions();
-    renderTeamDefinitionReviewOverrides();
     renderTeamDefinitions();
   }
 }

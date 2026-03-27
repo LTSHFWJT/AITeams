@@ -1488,7 +1488,7 @@ class MetadataStore:
         self,
         *,
         team_definition_id: str | None,
-        key: str,
+        key: str | None,
         name: str,
         description: str,
         version: str,
@@ -1496,6 +1496,7 @@ class MetadataStore:
         status: str = "active",
     ) -> dict[str, Any]:
         record_id = team_definition_id or make_uuid7()
+        record_key = str(key or f"team.{record_id}")
         now = utcnow_iso()
         self.execute(
             """
@@ -1510,7 +1511,7 @@ class MetadataStore:
                 status = excluded.status,
                 updated_at = excluded.updated_at
             """,
-            (record_id, key, name, description, version, json_dumps(spec), status, record_id, now, now),
+            (record_id, record_key, name, description, version, json_dumps(spec), status, record_id, now, now),
         )
         saved = self.get_team_definition(record_id)
         assert saved is not None
