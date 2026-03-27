@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from aiteams.agent_center import AgentCenterService
 from aiteams.agent.kernel import AgentKernel
+from aiteams.ai_gateway import AIGateway
 from aiteams.api.application import AITeamsHTTPServer, LOGGER, ServiceContainer, WebApplication
 from aiteams.app.settings import AppSettings
-from aiteams.memory.adapter import AIMemoryAdapter
+from aiteams.memory.adapter import LangMemAdapter
 from aiteams.plugins import PluginManager
 from aiteams.runtime.compiler import BlueprintCompiler
 from aiteams.runtime.engine import RuntimeEngine
@@ -23,14 +24,23 @@ def _build_container(settings: AppSettings) -> ServiceContainer:
         workspace_root=settings.workspace_root,
     )
     workspace = WorkspaceManager(settings.workspace_root)
-    memory = AIMemoryAdapter(str(settings.memory_root))
+    gateway = AIGateway()
+    memory = LangMemAdapter(str(settings.memory_root), gateway=gateway)
     compiler = BlueprintCompiler()
-    plugin_manager = PluginManager(store=store, install_root=settings.data_dir / "plugins")
-    agent_kernel = AgentKernel(memory=memory, plugin_manager=plugin_manager)
-    runtime = RuntimeEngine(store=store, compiler=compiler, agent_kernel=agent_kernel, workspace=workspace)
-    agent_center = AgentCenterService(store, plugin_manager=plugin_manager)
+    plugin_manager = PluginManager(store=store, install_root=settings.data_dir / "plugins", memory=memory)
+    agent_kernel = AgentKernel(memory=memory, gateway=gateway, plugin_manager=plugin_manager)
+    runtime = RuntimeEngine(
+        store=store,
+        compiler=compiler,
+        agent_kernel=agent_kernel,
+        workspace=workspace,
+        checkpoint_db_path=settings.checkpoint_db_path,
+    )
+    agent_center = AgentCenterService(store, plugin_manager=plugin_manager, gateway=gateway)
     if seed_agent_center_defaults:
         agent_center.ensure_defaults()
+    memory.configure_retrieval(agent_center.retrieval_runtime_config())
+    memory.start_background_maintenance()
     return ServiceContainer(
         store=store,
         compiler=compiler,
@@ -54,6 +64,7 @@ def run() -> None:
     LOGGER.info("AITeams control plane starting")
     LOGGER.info("Listen: http://%s:%s", settings.server_host, settings.server_port)
     LOGGER.info("Metadata DB: %s", settings.metadata_db_path)
+    LOGGER.info("Checkpoint DB: %s", settings.checkpoint_db_path)
     LOGGER.info("Memory root: %s", settings.memory_root)
     LOGGER.info("Workspace root: %s", settings.workspace_root)
     try:

@@ -3,6 +3,8 @@ from __future__ import annotations
 import contextlib
 import importlib
 import json
+import os
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -43,8 +45,18 @@ class DefaultPluginRuntime:
 
 def _load_runtime(root_path: Path) -> tuple[dict[str, Any], Any]:
     manifest = load_plugin_manifest(root_path)
+    runtime_config = _load_json_env("AITEAMS_PLUGIN_RUNTIME_CONFIG")
+    runtime_secret = _load_json_env("AITEAMS_PLUGIN_RUNTIME_SECRET")
+    runtime = _deep_merge_dicts(dict(manifest.get("runtime") or {}), runtime_config)
+    runtime = _deep_merge_dicts(runtime, runtime_secret)
+    manifest["runtime"] = runtime
+    manifest["runtime_config"] = runtime_config
+    manifest["runtime_secret"] = runtime_secret
+    _purge_bytecode(root_path)
+    importlib.invalidate_caches()
     sys.path.insert(0, str(root_path))
     module_name, object_name = str(manifest["entrypoint"]).split(":", 1)
+    sys.modules.pop(module_name, None)
     module = importlib.import_module(module_name)
     factory = getattr(module, object_name)
     if isinstance(factory, type):
@@ -54,6 +66,34 @@ def _load_runtime(root_path: Path) -> tuple[dict[str, Any], Any]:
     if runtime is None:
         runtime = DefaultPluginRuntime(manifest=manifest, root_path=root_path)
     return manifest, runtime
+
+
+def _purge_bytecode(root_path: Path) -> None:
+    for cache_dir in root_path.rglob("__pycache__"):
+        if cache_dir.is_dir():
+            shutil.rmtree(cache_dir, ignore_errors=True)
+
+
+def _load_json_env(name: str) -> dict[str, Any]:
+    raw = str(os.environ.get(name) or "").strip()
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return dict(payload) if isinstance(payload, dict) else {}
+
+
+def _deep_merge_dicts(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base or {})
+    for key, value in dict(updates or {}).items():
+        existing = merged.get(key)
+        if isinstance(existing, dict) and isinstance(value, dict):
+            merged[key] = _deep_merge_dicts(existing, value)
+        else:
+            merged[key] = value
+    return merged
 
 
 def _result(payload_id: str, ok: bool, result: dict[str, Any] | None = None, error: str | None = None) -> dict[str, Any]:

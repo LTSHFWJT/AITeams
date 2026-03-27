@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import re
 import sqlite3
 import threading
 from pathlib import Path
 from typing import Any
 
-from aiteams.utils import json_dumps, json_loads, make_id, make_uuid7, utcnow_iso
+from aiteams.utils import json_dumps, json_loads, make_id, make_uuid7, trim_text, utcnow_iso
+
+
+SEARCH_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]")
 
 
 SCHEMA = [
@@ -189,10 +193,19 @@ SCHEMA = [
         plugin_type TEXT NOT NULL,
         description TEXT,
         manifest_json TEXT NOT NULL DEFAULT '{}',
+        config_json TEXT NOT NULL DEFAULT '{}',
         install_path TEXT,
         status TEXT NOT NULL DEFAULT 'active',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS plugin_secrets (
+        plugin_id TEXT PRIMARY KEY,
+        secret_json TEXT NOT NULL DEFAULT '{}',
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(plugin_id) REFERENCES plugins(id) ON DELETE CASCADE
     )
     """,
     """
@@ -221,6 +234,149 @@ SCHEMA = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS skills (
+        id TEXT PRIMARY KEY,
+        key TEXT NOT NULL,
+        name TEXT NOT NULL,
+        description TEXT,
+        version TEXT NOT NULL DEFAULT 'v1',
+        spec_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS static_memories (
+        id TEXT PRIMARY KEY,
+        key TEXT NOT NULL,
+        name TEXT NOT NULL,
+        description TEXT,
+        version TEXT NOT NULL DEFAULT 'v1',
+        spec_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS memory_profiles (
+        id TEXT PRIMARY KEY,
+        key TEXT NOT NULL,
+        name TEXT NOT NULL,
+        description TEXT,
+        version TEXT NOT NULL DEFAULT 'v1',
+        spec_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS knowledge_bases (
+        id TEXT PRIMARY KEY,
+        key TEXT NOT NULL,
+        name TEXT NOT NULL,
+        description TEXT,
+        config_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS knowledge_documents (
+        id TEXT PRIMARY KEY,
+        knowledge_base_id TEXT NOT NULL,
+        key TEXT NOT NULL,
+        title TEXT NOT NULL,
+        source_path TEXT,
+        content_text TEXT NOT NULL DEFAULT '',
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(knowledge_base_id) REFERENCES knowledge_bases(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS review_policies (
+        id TEXT PRIMARY KEY,
+        key TEXT NOT NULL,
+        name TEXT NOT NULL,
+        description TEXT,
+        version TEXT NOT NULL DEFAULT 'v1',
+        spec_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS agent_definitions (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        role TEXT NOT NULL,
+        description TEXT,
+        version TEXT NOT NULL DEFAULT 'v1',
+        spec_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS team_definitions (
+        id TEXT PRIMARY KEY,
+        key TEXT NOT NULL,
+        name TEXT NOT NULL,
+        description TEXT,
+        version TEXT NOT NULL DEFAULT 'v1',
+        spec_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS platform_settings (
+        setting_key TEXT PRIMARY KEY,
+        value_json TEXT NOT NULL DEFAULT '{}',
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS task_threads (
+        id TEXT PRIMARY KEY,
+        team_definition_id TEXT,
+        run_id TEXT,
+        workspace_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        title TEXT,
+        status TEXT NOT NULL DEFAULT 'active',
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(team_definition_id) REFERENCES team_definitions(id) ON DELETE SET NULL,
+        FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE SET NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS message_events (
+        id TEXT PRIMARY KEY,
+        run_id TEXT,
+        thread_id TEXT,
+        source_agent_id TEXT,
+        target_agent_id TEXT,
+        message_type TEXT NOT NULL,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL DEFAULT 'delivered',
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE SET NULL,
+        FOREIGN KEY(thread_id) REFERENCES task_threads(id) ON DELETE SET NULL
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS blueprint_builds (
         id TEXT PRIMARY KEY,
         team_template_id TEXT NOT NULL,
@@ -235,6 +391,20 @@ SCHEMA = [
         FOREIGN KEY(blueprint_id) REFERENCES blueprints(id) ON DELETE SET NULL
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS team_build_snapshots (
+        id TEXT PRIMARY KEY,
+        team_definition_id TEXT,
+        run_id TEXT NOT NULL,
+        runtime_tree_snapshot_json TEXT NOT NULL DEFAULT '{}',
+        resource_lock_json TEXT NOT NULL DEFAULT '{}',
+        compiled_metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(team_definition_id) REFERENCES team_definitions(id) ON DELETE SET NULL,
+        FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
+    )
+    """,
     "CREATE INDEX IF NOT EXISTS idx_blueprints_project ON blueprints(project_id, updated_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_task_releases_project ON task_releases(project_id, updated_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id, updated_at DESC)",
@@ -243,10 +413,26 @@ SCHEMA = [
     "CREATE INDEX IF NOT EXISTS idx_approvals_run ON approvals(run_id, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_artifacts_run ON artifacts(run_id, created_at DESC)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_plugins_key_version ON plugins(key, version)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_skills_key_version ON skills(key, version)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_static_memories_key_version ON static_memories(key, version)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_profiles_key_version ON memory_profiles(key, version)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_bases_key ON knowledge_bases(key)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_review_policies_key_version ON review_policies(key, version)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_team_definitions_key_version ON team_definitions(key, version)",
     "CREATE INDEX IF NOT EXISTS idx_provider_profiles_type ON provider_profiles(provider_type, updated_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_agent_templates_role ON agent_templates(role, updated_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_team_templates_updated ON team_templates(updated_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_skills_updated ON skills(updated_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_static_memories_updated ON static_memories(updated_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_memory_profiles_updated ON memory_profiles(updated_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_knowledge_documents_kb ON knowledge_documents(knowledge_base_id, updated_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_review_policies_updated ON review_policies(updated_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_definitions_role ON agent_definitions(role, updated_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_team_definitions_updated ON team_definitions(updated_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_task_threads_team ON task_threads(team_definition_id, updated_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_message_events_thread ON message_events(thread_id, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_builds_team_template ON blueprint_builds(team_template_id, created_at DESC)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_team_build_snapshots_run ON team_build_snapshots(run_id)",
 ]
 
 
@@ -282,8 +468,28 @@ class MetadataStore:
             self._connection.execute("PRAGMA synchronous=NORMAL")
             for statement in SCHEMA:
                 self._connection.execute(statement)
+            self._apply_migrations()
             self._connection.commit()
         self.ensure_defaults()
+
+    def _apply_migrations(self) -> None:
+        self._ensure_column("plugins", "config_json", "TEXT NOT NULL DEFAULT '{}'")
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS plugin_secrets (
+                plugin_id TEXT PRIMARY KEY,
+                secret_json TEXT NOT NULL DEFAULT '{}',
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(plugin_id) REFERENCES plugins(id) ON DELETE CASCADE
+            )
+            """
+        )
+
+    def _ensure_column(self, table_name: str, column_name: str, definition: str) -> None:
+        columns = {str(item.get("name") or "") for item in self.fetch_all(f"PRAGMA table_info({table_name})")}
+        if column_name in columns:
+            return
+        self._connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
 
     def ensure_defaults(self) -> None:
         workspace = self.get_workspace(self._defaults["workspace_id"])
@@ -341,6 +547,9 @@ class MetadataStore:
             "secret_json",
             "manifest_json",
             "resource_lock_json",
+            "runtime_tree_snapshot_json",
+            "compiled_metadata_json",
+            "value_json",
         ):
             if field in item:
                 item[field] = json_loads(item.get(field), {})
@@ -590,15 +799,17 @@ class MetadataStore:
         plugin_type: str,
         description: str,
         manifest: dict[str, Any],
+        config: dict[str, Any] | None,
         install_path: str | None,
+        secret: dict[str, Any] | None = None,
         status: str = "active",
     ) -> dict[str, Any]:
         record_id = plugin_id or make_uuid7()
         now = utcnow_iso()
         self.execute(
             """
-            INSERT INTO plugins(id, key, name, version, plugin_type, description, manifest_json, install_path, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM plugins WHERE id = ?), ?), ?)
+            INSERT INTO plugins(id, key, name, version, plugin_type, description, manifest_json, config_json, install_path, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM plugins WHERE id = ?), ?), ?)
             ON CONFLICT(id) DO UPDATE SET
                 key = excluded.key,
                 name = excluded.name,
@@ -606,27 +817,64 @@ class MetadataStore:
                 plugin_type = excluded.plugin_type,
                 description = excluded.description,
                 manifest_json = excluded.manifest_json,
+                config_json = excluded.config_json,
                 install_path = excluded.install_path,
                 status = excluded.status,
                 updated_at = excluded.updated_at
             """,
-            (record_id, key, name, version, plugin_type, description, json_dumps(manifest), install_path, status, record_id, now, now),
+            (
+                record_id,
+                key,
+                name,
+                version,
+                plugin_type,
+                description,
+                json_dumps(manifest),
+                json_dumps(dict(config or {})),
+                install_path,
+                status,
+                record_id,
+                now,
+                now,
+            ),
         )
+        if secret is not None:
+            normalized_secret = {
+                str(field): value
+                for field, value in dict(secret or {}).items()
+                if str(field).strip() and value not in (None, "")
+            }
+            if normalized_secret:
+                self.execute(
+                    """
+                    INSERT INTO plugin_secrets(plugin_id, secret_json, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(plugin_id) DO UPDATE SET
+                        secret_json = excluded.secret_json,
+                        updated_at = excluded.updated_at
+                    """,
+                    (record_id, json_dumps(normalized_secret), now),
+                )
+            else:
+                self.execute("DELETE FROM plugin_secrets WHERE plugin_id = ?", (record_id,))
         plugin = self.get_plugin(record_id)
         assert plugin is not None
         return plugin
 
-    def get_plugin(self, plugin_id: str) -> dict[str, Any] | None:
-        return self._deserialize(self.fetch_one("SELECT * FROM plugins WHERE id = ?", (plugin_id,)))
+    def get_plugin(self, plugin_id: str, *, include_secret: bool = False) -> dict[str, Any] | None:
+        return self._attach_plugin_secret(
+            self._deserialize(self.fetch_one("SELECT * FROM plugins WHERE id = ?", (plugin_id,))),
+            include_secret=include_secret,
+        )
 
-    def get_plugin_by_key(self, key: str) -> dict[str, Any] | None:
+    def get_plugin_by_key(self, key: str, *, include_secret: bool = False) -> dict[str, Any] | None:
         row = self.fetch_one("SELECT * FROM plugins WHERE key = ? ORDER BY updated_at DESC LIMIT 1", (key,))
-        return self._deserialize(row)
+        return self._attach_plugin_secret(self._deserialize(row), include_secret=include_secret)
 
-    def list_plugins(self) -> list[dict[str, Any]]:
-        return self._deserialize_many(self.fetch_all("SELECT * FROM plugins ORDER BY updated_at DESC"))
+    def list_plugins(self, *, include_secret: bool = False) -> list[dict[str, Any]]:
+        return [self._attach_plugin_secret(item, include_secret=include_secret) for item in self._deserialize_many(self.fetch_all("SELECT * FROM plugins ORDER BY updated_at DESC"))]
 
-    def list_plugins_page(self, *, limit: int | None = None, offset: int = 0) -> dict[str, Any]:
+    def list_plugins_page(self, *, limit: int | None = None, offset: int = 0, include_secret: bool = False) -> dict[str, Any]:
         total = int((self.fetch_one("SELECT COUNT(*) AS count FROM plugins") or {}).get("count", 0) or 0)
         safe_offset = max(0, int(offset or 0))
         sql = "SELECT * FROM plugins ORDER BY updated_at DESC"
@@ -638,11 +886,42 @@ class MetadataStore:
         else:
             safe_limit = total or 0
         return {
-            "items": self._deserialize_many(self.fetch_all(sql, tuple(params))),
+            "items": [
+                self._attach_plugin_secret(item, include_secret=include_secret)
+                for item in self._deserialize_many(self.fetch_all(sql, tuple(params)))
+            ],
             "total": total,
             "offset": safe_offset,
             "limit": safe_limit,
         }
+
+    def _attach_plugin_secret(self, plugin: dict[str, Any] | None, *, include_secret: bool) -> dict[str, Any] | None:
+        if plugin is None:
+            return None
+        secret_row = self._deserialize(self.fetch_one("SELECT * FROM plugin_secrets WHERE plugin_id = ?", (plugin["id"],)))
+        secret = dict((secret_row or {}).get("secret_json") or {})
+        item = dict(plugin)
+        item["has_secret"] = bool(secret)
+        item["secret_field_keys"] = sorted(str(key) for key in secret.keys() if str(key).strip())
+        item["secret_field_paths"] = sorted(self._flatten_object_paths(secret))
+        if include_secret:
+            item["secret_json"] = secret
+        return item
+
+    def _flatten_object_paths(self, payload: dict[str, Any], prefix: str = "") -> list[str]:
+        paths: list[str] = []
+        for key, value in dict(payload or {}).items():
+            name = str(key).strip()
+            if not name:
+                continue
+            path = f"{prefix}.{name}" if prefix else name
+            if isinstance(value, dict):
+                nested = self._flatten_object_paths(value, prefix=path)
+                if nested:
+                    paths.extend(nested)
+                    continue
+            paths.append(path)
+        return paths
 
     def save_agent_template(
         self,
@@ -743,6 +1022,612 @@ class MetadataStore:
     def list_team_templates(self) -> list[dict[str, Any]]:
         return self._deserialize_many(self.fetch_all("SELECT * FROM team_templates ORDER BY updated_at DESC"))
 
+    def save_skill(
+        self,
+        *,
+        skill_id: str | None,
+        key: str,
+        name: str,
+        description: str,
+        version: str,
+        spec: dict[str, Any],
+        status: str = "active",
+    ) -> dict[str, Any]:
+        record_id = skill_id or make_uuid7()
+        now = utcnow_iso()
+        self.execute(
+            """
+            INSERT INTO skills(id, key, name, description, version, spec_json, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM skills WHERE id = ?), ?), ?)
+            ON CONFLICT(id) DO UPDATE SET
+                key = excluded.key,
+                name = excluded.name,
+                description = excluded.description,
+                version = excluded.version,
+                spec_json = excluded.spec_json,
+                status = excluded.status,
+                updated_at = excluded.updated_at
+            """,
+            (record_id, key, name, description, version, json_dumps(spec), status, record_id, now, now),
+        )
+        saved = self.get_skill(record_id)
+        assert saved is not None
+        return saved
+
+    def get_skill(self, skill_id: str) -> dict[str, Any] | None:
+        return self._deserialize(self.fetch_one("SELECT * FROM skills WHERE id = ?", (skill_id,)))
+
+    def get_skill_by_key(self, key: str) -> dict[str, Any] | None:
+        return self._deserialize(self.fetch_one("SELECT * FROM skills WHERE key = ? ORDER BY updated_at DESC LIMIT 1", (key,)))
+
+    def list_skills(self) -> list[dict[str, Any]]:
+        return self._deserialize_many(self.fetch_all("SELECT * FROM skills ORDER BY updated_at DESC"))
+
+    def delete_skill(self, skill_id: str) -> dict[str, Any] | None:
+        existing = self.get_skill(skill_id)
+        if existing is None:
+            return None
+        self.execute("DELETE FROM skills WHERE id = ?", (skill_id,))
+        return existing
+
+    def save_static_memory(
+        self,
+        *,
+        static_memory_id: str | None,
+        key: str,
+        name: str,
+        description: str,
+        version: str,
+        spec: dict[str, Any],
+        status: str = "active",
+    ) -> dict[str, Any]:
+        record_id = static_memory_id or make_uuid7()
+        now = utcnow_iso()
+        self.execute(
+            """
+            INSERT INTO static_memories(id, key, name, description, version, spec_json, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM static_memories WHERE id = ?), ?), ?)
+            ON CONFLICT(id) DO UPDATE SET
+                key = excluded.key,
+                name = excluded.name,
+                description = excluded.description,
+                version = excluded.version,
+                spec_json = excluded.spec_json,
+                status = excluded.status,
+                updated_at = excluded.updated_at
+            """,
+            (record_id, key, name, description, version, json_dumps(spec), status, record_id, now, now),
+        )
+        saved = self.get_static_memory(record_id)
+        assert saved is not None
+        return saved
+
+    def get_static_memory(self, static_memory_id: str) -> dict[str, Any] | None:
+        return self._deserialize(self.fetch_one("SELECT * FROM static_memories WHERE id = ?", (static_memory_id,)))
+
+    def get_static_memory_by_key(self, key: str) -> dict[str, Any] | None:
+        return self._deserialize(self.fetch_one("SELECT * FROM static_memories WHERE key = ? ORDER BY updated_at DESC LIMIT 1", (key,)))
+
+    def list_static_memories(self) -> list[dict[str, Any]]:
+        return self._deserialize_many(self.fetch_all("SELECT * FROM static_memories ORDER BY updated_at DESC"))
+
+    def list_static_memories_page(self, *, limit: int | None = None, offset: int = 0) -> dict[str, Any]:
+        total = int((self.fetch_one("SELECT COUNT(*) AS count FROM static_memories") or {}).get("count", 0) or 0)
+        safe_offset = max(0, int(offset or 0))
+        sql = "SELECT * FROM static_memories ORDER BY updated_at DESC"
+        params: list[Any] = []
+        if limit is not None:
+            safe_limit = max(1, int(limit))
+            sql += " LIMIT ? OFFSET ?"
+            params.extend([safe_limit, safe_offset])
+        else:
+            safe_limit = total or 0
+        return {
+            "items": self._deserialize_many(self.fetch_all(sql, tuple(params))),
+            "total": total,
+            "offset": safe_offset,
+            "limit": safe_limit,
+        }
+
+    def delete_static_memory(self, static_memory_id: str) -> dict[str, Any] | None:
+        existing = self.get_static_memory(static_memory_id)
+        if existing is None:
+            return None
+        self.execute("DELETE FROM static_memories WHERE id = ?", (static_memory_id,))
+        return existing
+
+    def save_memory_profile(
+        self,
+        *,
+        memory_profile_id: str | None,
+        key: str,
+        name: str,
+        description: str,
+        version: str,
+        spec: dict[str, Any],
+        status: str = "active",
+    ) -> dict[str, Any]:
+        record_id = memory_profile_id or make_uuid7()
+        now = utcnow_iso()
+        self.execute(
+            """
+            INSERT INTO memory_profiles(id, key, name, description, version, spec_json, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM memory_profiles WHERE id = ?), ?), ?)
+            ON CONFLICT(id) DO UPDATE SET
+                key = excluded.key,
+                name = excluded.name,
+                description = excluded.description,
+                version = excluded.version,
+                spec_json = excluded.spec_json,
+                status = excluded.status,
+                updated_at = excluded.updated_at
+            """,
+            (record_id, key, name, description, version, json_dumps(spec), status, record_id, now, now),
+        )
+        saved = self.get_memory_profile(record_id)
+        assert saved is not None
+        return saved
+
+    def get_memory_profile(self, memory_profile_id: str) -> dict[str, Any] | None:
+        return self._deserialize(self.fetch_one("SELECT * FROM memory_profiles WHERE id = ?", (memory_profile_id,)))
+
+    def get_memory_profile_by_key(self, key: str) -> dict[str, Any] | None:
+        return self._deserialize(self.fetch_one("SELECT * FROM memory_profiles WHERE key = ? ORDER BY updated_at DESC LIMIT 1", (key,)))
+
+    def list_memory_profiles(self) -> list[dict[str, Any]]:
+        return self._deserialize_many(self.fetch_all("SELECT * FROM memory_profiles ORDER BY updated_at DESC"))
+
+    def delete_memory_profile(self, memory_profile_id: str) -> dict[str, Any] | None:
+        existing = self.get_memory_profile(memory_profile_id)
+        if existing is None:
+            return None
+        self.execute("DELETE FROM memory_profiles WHERE id = ?", (memory_profile_id,))
+        return existing
+
+    def save_knowledge_base(
+        self,
+        *,
+        knowledge_base_id: str | None,
+        key: str,
+        name: str,
+        description: str,
+        config: dict[str, Any],
+        status: str = "active",
+    ) -> dict[str, Any]:
+        record_id = knowledge_base_id or make_uuid7()
+        now = utcnow_iso()
+        self.execute(
+            """
+            INSERT INTO knowledge_bases(id, key, name, description, config_json, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM knowledge_bases WHERE id = ?), ?), ?)
+            ON CONFLICT(id) DO UPDATE SET
+                key = excluded.key,
+                name = excluded.name,
+                description = excluded.description,
+                config_json = excluded.config_json,
+                status = excluded.status,
+                updated_at = excluded.updated_at
+            """,
+            (record_id, key, name, description, json_dumps(config), status, record_id, now, now),
+        )
+        saved = self.get_knowledge_base(record_id)
+        assert saved is not None
+        return saved
+
+    def get_knowledge_base(self, knowledge_base_id: str) -> dict[str, Any] | None:
+        return self._deserialize(self.fetch_one("SELECT * FROM knowledge_bases WHERE id = ?", (knowledge_base_id,)))
+
+    def get_knowledge_base_by_key(self, key: str) -> dict[str, Any] | None:
+        return self._deserialize(self.fetch_one("SELECT * FROM knowledge_bases WHERE key = ? ORDER BY updated_at DESC LIMIT 1", (key,)))
+
+    def list_knowledge_bases(self) -> list[dict[str, Any]]:
+        return self._deserialize_many(self.fetch_all("SELECT * FROM knowledge_bases ORDER BY updated_at DESC"))
+
+    def delete_knowledge_base(self, knowledge_base_id: str) -> dict[str, Any] | None:
+        existing = self.get_knowledge_base(knowledge_base_id)
+        if existing is None:
+            return None
+        self.execute("DELETE FROM knowledge_bases WHERE id = ?", (knowledge_base_id,))
+        return existing
+
+    def save_knowledge_document(
+        self,
+        *,
+        knowledge_document_id: str | None,
+        knowledge_base_id: str,
+        key: str,
+        title: str,
+        source_path: str | None,
+        content_text: str,
+        metadata: dict[str, Any],
+        status: str = "active",
+    ) -> dict[str, Any]:
+        record_id = knowledge_document_id or make_uuid7()
+        now = utcnow_iso()
+        self.execute(
+            """
+            INSERT INTO knowledge_documents(id, knowledge_base_id, key, title, source_path, content_text, metadata_json, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM knowledge_documents WHERE id = ?), ?), ?)
+            ON CONFLICT(id) DO UPDATE SET
+                knowledge_base_id = excluded.knowledge_base_id,
+                key = excluded.key,
+                title = excluded.title,
+                source_path = excluded.source_path,
+                content_text = excluded.content_text,
+                metadata_json = excluded.metadata_json,
+                status = excluded.status,
+                updated_at = excluded.updated_at
+            """,
+            (record_id, knowledge_base_id, key, title, source_path, content_text, json_dumps(metadata), status, record_id, now, now),
+        )
+        saved = self.get_knowledge_document(record_id)
+        assert saved is not None
+        return saved
+
+    def get_knowledge_document(self, knowledge_document_id: str) -> dict[str, Any] | None:
+        return self._deserialize(self.fetch_one("SELECT * FROM knowledge_documents WHERE id = ?", (knowledge_document_id,)))
+
+    def list_knowledge_documents(self, *, knowledge_base_id: str | None = None) -> list[dict[str, Any]]:
+        if knowledge_base_id:
+            return self._deserialize_many(
+                self.fetch_all("SELECT * FROM knowledge_documents WHERE knowledge_base_id = ? ORDER BY updated_at DESC", (knowledge_base_id,))
+            )
+        return self._deserialize_many(self.fetch_all("SELECT * FROM knowledge_documents ORDER BY updated_at DESC"))
+
+    def delete_knowledge_document(self, knowledge_document_id: str) -> dict[str, Any] | None:
+        existing = self.get_knowledge_document(knowledge_document_id)
+        if existing is None:
+            return None
+        self.execute("DELETE FROM knowledge_documents WHERE id = ?", (knowledge_document_id,))
+        return existing
+
+    def search_knowledge_documents(
+        self,
+        *,
+        query: str,
+        knowledge_base_ids: list[str] | None = None,
+        knowledge_base_keys: list[str] | None = None,
+        limit: int = 8,
+    ) -> list[dict[str, Any]]:
+        kb_ids = {str(item).strip() for item in list(knowledge_base_ids or []) if str(item).strip()}
+        for key in list(knowledge_base_keys or []):
+            record = self.get_knowledge_base_by_key(str(key))
+            if record is not None:
+                kb_ids.add(str(record["id"]))
+        clauses = ["d.status = ?", "kb.status = ?"]
+        params: list[Any] = ["active", "active"]
+        if kb_ids:
+            placeholders = ", ".join("?" for _ in kb_ids)
+            clauses.append(f"d.knowledge_base_id IN ({placeholders})")
+            params.extend(sorted(kb_ids))
+        sql = """
+        SELECT
+            d.*,
+            kb.key AS knowledge_base_key,
+            kb.name AS knowledge_base_name,
+            kb.description AS knowledge_base_description
+        FROM knowledge_documents d
+        JOIN knowledge_bases kb ON kb.id = d.knowledge_base_id
+        """
+        sql += f" WHERE {' AND '.join(clauses)} ORDER BY d.updated_at DESC LIMIT 256"
+        rows = self._deserialize_many(self.fetch_all(sql, tuple(params)))
+        query_value = str(query or "").strip().lower()
+        query_terms = [term.lower() for term in SEARCH_TOKEN_RE.findall(query_value)]
+        scored: list[tuple[float, dict[str, Any]]] = []
+        for row in rows:
+            title = str(row.get("title") or "")
+            body = str(row.get("content_text") or "")
+            title_lower = title.lower()
+            body_lower = body.lower()
+            score = 0.0
+            if query_value:
+                if query_value in title_lower:
+                    score += 12.0
+                if query_value in body_lower:
+                    score += 6.0
+                for term in query_terms:
+                    score += 4.0 * title_lower.count(term)
+                    score += 1.0 * body_lower.count(term)
+                if score <= 0:
+                    continue
+            else:
+                score = 0.1
+            snippet = self._knowledge_snippet(body or title, query_terms or ([query_value] if query_value else []))
+            scored.append(
+                (
+                    score,
+                    {
+                        "id": row.get("id"),
+                        "knowledge_base_id": row.get("knowledge_base_id"),
+                        "knowledge_base_key": row.get("knowledge_base_key"),
+                        "knowledge_base_name": row.get("knowledge_base_name"),
+                        "key": row.get("key"),
+                        "title": title,
+                        "source_path": row.get("source_path"),
+                        "metadata_json": dict(row.get("metadata_json") or {}),
+                        "score": score,
+                        "snippet": snippet,
+                        "content_text": trim_text(body, limit=1200),
+                    },
+                )
+            )
+        scored.sort(key=lambda item: (item[0], str(item[1].get("title") or "")), reverse=True)
+        return [item for _, item in scored[: max(1, limit)]]
+
+    def _knowledge_snippet(self, content: str, terms: list[str]) -> str:
+        text = " ".join(str(content or "").split())
+        if not text:
+            return ""
+        lower = text.lower()
+        start = 0
+        for term in terms:
+            term_value = str(term).strip().lower()
+            if not term_value:
+                continue
+            index = lower.find(term_value)
+            if index >= 0:
+                start = max(0, index - 72)
+                break
+        snippet = text[start : start + 320]
+        return trim_text(snippet, limit=320)
+
+    def save_review_policy(
+        self,
+        *,
+        review_policy_id: str | None,
+        key: str,
+        name: str,
+        description: str,
+        version: str,
+        spec: dict[str, Any],
+        status: str = "active",
+    ) -> dict[str, Any]:
+        record_id = review_policy_id or make_uuid7()
+        now = utcnow_iso()
+        self.execute(
+            """
+            INSERT INTO review_policies(id, key, name, description, version, spec_json, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM review_policies WHERE id = ?), ?), ?)
+            ON CONFLICT(id) DO UPDATE SET
+                key = excluded.key,
+                name = excluded.name,
+                description = excluded.description,
+                version = excluded.version,
+                spec_json = excluded.spec_json,
+                status = excluded.status,
+                updated_at = excluded.updated_at
+            """,
+            (record_id, key, name, description, version, json_dumps(spec), status, record_id, now, now),
+        )
+        saved = self.get_review_policy(record_id)
+        assert saved is not None
+        return saved
+
+    def get_review_policy(self, review_policy_id: str) -> dict[str, Any] | None:
+        return self._deserialize(self.fetch_one("SELECT * FROM review_policies WHERE id = ?", (review_policy_id,)))
+
+    def get_review_policy_by_key(self, key: str) -> dict[str, Any] | None:
+        return self._deserialize(self.fetch_one("SELECT * FROM review_policies WHERE key = ? ORDER BY updated_at DESC LIMIT 1", (key,)))
+
+    def list_review_policies(self) -> list[dict[str, Any]]:
+        return self._deserialize_many(self.fetch_all("SELECT * FROM review_policies ORDER BY updated_at DESC"))
+
+    def delete_review_policy(self, review_policy_id: str) -> dict[str, Any] | None:
+        existing = self.get_review_policy(review_policy_id)
+        if existing is None:
+            return None
+        self.execute("DELETE FROM review_policies WHERE id = ?", (review_policy_id,))
+        return existing
+
+    def save_agent_definition(
+        self,
+        *,
+        agent_definition_id: str | None,
+        name: str,
+        role: str | None,
+        description: str,
+        version: str,
+        spec: dict[str, Any],
+        status: str = "active",
+    ) -> dict[str, Any]:
+        record_id = agent_definition_id or make_uuid7()
+        role_value = trim_text(str(role or "").strip(), limit=255) or "agent"
+        now = utcnow_iso()
+        self.execute(
+            """
+            INSERT INTO agent_definitions(id, name, role, description, version, spec_json, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM agent_definitions WHERE id = ?), ?), ?)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                role = excluded.role,
+                description = excluded.description,
+                version = excluded.version,
+                spec_json = excluded.spec_json,
+                status = excluded.status,
+                updated_at = excluded.updated_at
+            """,
+            (record_id, name, role_value, description, version, json_dumps(spec), status, record_id, now, now),
+        )
+        saved = self.get_agent_definition(record_id)
+        assert saved is not None
+        return saved
+
+    def get_agent_definition(self, agent_definition_id: str) -> dict[str, Any] | None:
+        return self._deserialize(self.fetch_one("SELECT * FROM agent_definitions WHERE id = ?", (agent_definition_id,)))
+
+    def list_agent_definitions_page(self, *, limit: int | None = None, offset: int = 0) -> dict[str, Any]:
+        total = int((self.fetch_one("SELECT COUNT(*) AS count FROM agent_definitions") or {}).get("count", 0) or 0)
+        safe_offset = max(0, int(offset or 0))
+        sql = "SELECT * FROM agent_definitions ORDER BY updated_at DESC"
+        params: list[Any] = []
+        if limit is not None:
+            safe_limit = max(1, int(limit))
+            sql += " LIMIT ? OFFSET ?"
+            params.extend([safe_limit, safe_offset])
+        else:
+            safe_limit = total or 0
+        rows = self._deserialize_many(self.fetch_all(sql, tuple(params)))
+        return {
+            "items": rows,
+            "total": total,
+            "offset": safe_offset,
+            "limit": safe_limit,
+        }
+
+    def list_agent_definitions(self) -> list[dict[str, Any]]:
+        return self._deserialize_many(self.fetch_all("SELECT * FROM agent_definitions ORDER BY updated_at DESC"))
+
+    def delete_agent_definition(self, agent_definition_id: str) -> dict[str, Any] | None:
+        existing = self.get_agent_definition(agent_definition_id)
+        if existing is None:
+            return None
+        self.execute("DELETE FROM agent_definitions WHERE id = ?", (agent_definition_id,))
+        return existing
+
+    def save_team_definition(
+        self,
+        *,
+        team_definition_id: str | None,
+        key: str,
+        name: str,
+        description: str,
+        version: str,
+        spec: dict[str, Any],
+        status: str = "active",
+    ) -> dict[str, Any]:
+        record_id = team_definition_id or make_uuid7()
+        now = utcnow_iso()
+        self.execute(
+            """
+            INSERT INTO team_definitions(id, key, name, description, version, spec_json, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM team_definitions WHERE id = ?), ?), ?)
+            ON CONFLICT(id) DO UPDATE SET
+                key = excluded.key,
+                name = excluded.name,
+                description = excluded.description,
+                version = excluded.version,
+                spec_json = excluded.spec_json,
+                status = excluded.status,
+                updated_at = excluded.updated_at
+            """,
+            (record_id, key, name, description, version, json_dumps(spec), status, record_id, now, now),
+        )
+        saved = self.get_team_definition(record_id)
+        assert saved is not None
+        return saved
+
+    def get_team_definition(self, team_definition_id: str) -> dict[str, Any] | None:
+        return self._deserialize(self.fetch_one("SELECT * FROM team_definitions WHERE id = ?", (team_definition_id,)))
+
+    def get_team_definition_by_key(self, key: str) -> dict[str, Any] | None:
+        return self._deserialize(self.fetch_one("SELECT * FROM team_definitions WHERE key = ? ORDER BY updated_at DESC LIMIT 1", (key,)))
+
+    def list_team_definitions(self) -> list[dict[str, Any]]:
+        return self._deserialize_many(self.fetch_all("SELECT * FROM team_definitions ORDER BY updated_at DESC"))
+
+    def save_platform_setting(self, setting_key: str, value: dict[str, Any]) -> dict[str, Any]:
+        now = utcnow_iso()
+        self.execute(
+            """
+            INSERT INTO platform_settings(setting_key, value_json, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(setting_key) DO UPDATE SET
+                value_json = excluded.value_json,
+                updated_at = excluded.updated_at
+            """,
+            (setting_key, json_dumps(value), now),
+        )
+        record = self.get_platform_setting_record(setting_key)
+        assert record is not None
+        return record
+
+    def get_platform_setting_record(self, setting_key: str) -> dict[str, Any] | None:
+        return self._deserialize(self.fetch_one("SELECT * FROM platform_settings WHERE setting_key = ?", (setting_key,)))
+
+    def get_platform_setting(self, setting_key: str, default: dict[str, Any] | None = None) -> dict[str, Any]:
+        record = self.get_platform_setting_record(setting_key)
+        if record is None:
+            return dict(default or {})
+        return dict(record.get("value_json") or {})
+
+    def create_task_thread(
+        self,
+        *,
+        team_definition_id: str | None,
+        run_id: str | None,
+        workspace_id: str,
+        project_id: str,
+        title: str | None,
+        metadata: dict[str, Any],
+        status: str = "active",
+    ) -> dict[str, Any]:
+        record_id = make_id("thread")
+        now = utcnow_iso()
+        self.execute(
+            """
+            INSERT INTO task_threads(id, team_definition_id, run_id, workspace_id, project_id, title, status, metadata_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (record_id, team_definition_id, run_id, workspace_id, project_id, title, status, json_dumps(metadata), now, now),
+        )
+        thread = self.fetch_one("SELECT * FROM task_threads WHERE id = ?", (record_id,))
+        assert thread is not None
+        return self._deserialize(thread) or {}
+
+    def list_task_threads(self, *, team_definition_id: str | None = None, run_id: str | None = None) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if team_definition_id:
+            clauses.append("team_definition_id = ?")
+            params.append(team_definition_id)
+        if run_id:
+            clauses.append("run_id = ?")
+            params.append(run_id)
+        sql = "SELECT * FROM task_threads"
+        if clauses:
+            sql += f" WHERE {' AND '.join(clauses)}"
+        sql += " ORDER BY updated_at DESC"
+        return self._deserialize_many(self.fetch_all(sql, tuple(params)))
+
+    def add_message_event(
+        self,
+        *,
+        run_id: str | None,
+        thread_id: str | None,
+        source_agent_id: str | None,
+        target_agent_id: str | None,
+        message_type: str,
+        payload: dict[str, Any],
+        status: str = "delivered",
+    ) -> dict[str, Any]:
+        record_id = make_id("msg")
+        now = utcnow_iso()
+        self.execute(
+            """
+            INSERT INTO message_events(id, run_id, thread_id, source_agent_id, target_agent_id, message_type, payload_json, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (record_id, run_id, thread_id, source_agent_id, target_agent_id, message_type, json_dumps(payload), status, now),
+        )
+        event = self.fetch_one("SELECT * FROM message_events WHERE id = ?", (record_id,))
+        assert event is not None
+        return self._deserialize(event) or {}
+
+    def list_message_events(self, *, thread_id: str | None = None, run_id: str | None = None) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if thread_id:
+            clauses.append("thread_id = ?")
+            params.append(thread_id)
+        if run_id:
+            clauses.append("run_id = ?")
+            params.append(run_id)
+        sql = "SELECT * FROM message_events"
+        if clauses:
+            sql += f" WHERE {' AND '.join(clauses)}"
+        sql += " ORDER BY created_at ASC"
+        return self._deserialize_many(self.fetch_all(sql, tuple(params)))
+
     def save_blueprint_build(
         self,
         *,
@@ -780,6 +1665,78 @@ class MetadataStore:
 
     def list_blueprint_builds(self) -> list[dict[str, Any]]:
         return self._deserialize_many(self.fetch_all("SELECT * FROM blueprint_builds ORDER BY updated_at DESC"))
+
+    def save_team_build_snapshot(
+        self,
+        *,
+        snapshot_id: str | None,
+        team_definition_id: str | None,
+        run_id: str,
+        runtime_tree_snapshot: dict[str, Any],
+        resource_lock: dict[str, Any],
+        compiled_metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        record_id = snapshot_id or make_id("teamsnap")
+        existing = self.get_team_build_snapshot_by_run(run_id)
+        if existing is not None:
+            record_id = str(existing["id"])
+        now = utcnow_iso()
+        self.execute(
+            """
+            INSERT INTO team_build_snapshots(
+                id,
+                team_definition_id,
+                run_id,
+                runtime_tree_snapshot_json,
+                resource_lock_json,
+                compiled_metadata_json,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM team_build_snapshots WHERE id = ?), ?), ?)
+            ON CONFLICT(run_id) DO UPDATE SET
+                team_definition_id = excluded.team_definition_id,
+                runtime_tree_snapshot_json = excluded.runtime_tree_snapshot_json,
+                resource_lock_json = excluded.resource_lock_json,
+                compiled_metadata_json = excluded.compiled_metadata_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                record_id,
+                team_definition_id,
+                run_id,
+                json_dumps(runtime_tree_snapshot),
+                json_dumps(resource_lock),
+                json_dumps(compiled_metadata),
+                record_id,
+                now,
+                now,
+            ),
+        )
+        snapshot = self.get_team_build_snapshot_by_run(run_id)
+        assert snapshot is not None
+        return snapshot
+
+    def get_team_build_snapshot(self, snapshot_id: str) -> dict[str, Any] | None:
+        return self._deserialize(self.fetch_one("SELECT * FROM team_build_snapshots WHERE id = ?", (snapshot_id,)))
+
+    def get_team_build_snapshot_by_run(self, run_id: str) -> dict[str, Any] | None:
+        return self._deserialize(self.fetch_one("SELECT * FROM team_build_snapshots WHERE run_id = ?", (run_id,)))
+
+    def list_team_build_snapshots(self, *, team_definition_id: str | None = None, run_id: str | None = None) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if team_definition_id:
+            clauses.append("team_definition_id = ?")
+            params.append(team_definition_id)
+        if run_id:
+            clauses.append("run_id = ?")
+            params.append(run_id)
+        sql = "SELECT * FROM team_build_snapshots"
+        if clauses:
+            sql += f" WHERE {' AND '.join(clauses)}"
+        sql += " ORDER BY updated_at DESC"
+        return self._deserialize_many(self.fetch_all(sql, tuple(params)))
 
     def create_task_release(
         self,
@@ -1051,6 +2008,13 @@ class MetadataStore:
             "plugin_count": int((self.fetch_one("SELECT COUNT(*) AS count FROM plugins") or {}).get("count", 0) or 0),
             "agent_template_count": int((self.fetch_one("SELECT COUNT(*) AS count FROM agent_templates") or {}).get("count", 0) or 0),
             "team_template_count": int((self.fetch_one("SELECT COUNT(*) AS count FROM team_templates") or {}).get("count", 0) or 0),
+            "skill_count": int((self.fetch_one("SELECT COUNT(*) AS count FROM skills") or {}).get("count", 0) or 0),
+            "static_memory_count": int((self.fetch_one("SELECT COUNT(*) AS count FROM static_memories") or {}).get("count", 0) or 0),
+            "memory_profile_count": int((self.fetch_one("SELECT COUNT(*) AS count FROM memory_profiles") or {}).get("count", 0) or 0),
+            "knowledge_base_count": int((self.fetch_one("SELECT COUNT(*) AS count FROM knowledge_bases") or {}).get("count", 0) or 0),
+            "agent_definition_count": int((self.fetch_one("SELECT COUNT(*) AS count FROM agent_definitions") or {}).get("count", 0) or 0),
+            "team_definition_count": int((self.fetch_one("SELECT COUNT(*) AS count FROM team_definitions") or {}).get("count", 0) or 0),
+            "review_policy_count": int((self.fetch_one("SELECT COUNT(*) AS count FROM review_policies") or {}).get("count", 0) or 0),
             "build_count": int((self.fetch_one("SELECT COUNT(*) AS count FROM blueprint_builds") or {}).get("count", 0) or 0),
         }
 

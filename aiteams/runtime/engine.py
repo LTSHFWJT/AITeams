@@ -3,16 +3,27 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from typing import Any, TypedDict
+
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, interrupt
 
 from aiteams.agent.kernel import AgentKernel, AgentRunContext
 from aiteams.common import events as event_types
 from aiteams.common.expressions import evaluate_expression
+from aiteams.deepagents.runtime import DeepAgentsTeamRuntime
 from aiteams.domain.models import BlueprintSpec, NodeSpec
+from aiteams.langgraph.team_runtime import LangGraphTeamRuntime
 from aiteams.runtime.compiler import BlueprintCompiler, CompiledBlueprint
 from aiteams.storage.metadata import MetadataStore
 from aiteams.utils import pretty_json, render_template, resolve_path, trim_text, utcnow_iso
 from aiteams.workspace.manager import WorkspaceManager
+
+
+class RuntimeGraphState(TypedDict):
+    run_id: str
 
 
 @dataclass(slots=True)
@@ -30,11 +41,26 @@ class RuntimeEngine:
         compiler: BlueprintCompiler,
         agent_kernel: AgentKernel,
         workspace: WorkspaceManager,
+        checkpoint_db_path: str | Path,
     ):
         self.store = store
         self.compiler = compiler
         self.agent_kernel = agent_kernel
         self.workspace = workspace
+        self.checkpoint_db_path = Path(checkpoint_db_path).expanduser().resolve()
+        self.checkpoint_db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.team_runtime = LangGraphTeamRuntime(
+            store=store,
+            agent_kernel=agent_kernel,
+            workspace=workspace,
+            checkpoint_db_path=self.checkpoint_db_path,
+        )
+        self.deep_team_runtime = DeepAgentsTeamRuntime(
+            store=store,
+            agent_kernel=agent_kernel,
+            workspace=workspace,
+            checkpoint_db_path=self.checkpoint_db_path,
+        )
 
     async def start_task(
         self,
@@ -45,7 +71,11 @@ class RuntimeEngine:
         inputs: dict[str, Any],
         approval_mode: str,
     ) -> dict[str, Any]:
-        spec = BlueprintSpec.from_dict(blueprint["spec_json"] if "spec_json" in blueprint else blueprint)
+        blueprint_spec = blueprint["spec_json"] if "spec_json" in blueprint else blueprint
+        spec = BlueprintSpec.from_dict(blueprint_spec)
+        team_runtime = self._team_runtime_for_blueprint(blueprint_spec)
+        is_team_runtime = team_runtime is not None
+        compiled = None if is_team_runtime else self.compiler.compile(spec)
         task = self.store.create_task_release(
             blueprint_id=str(blueprint["id"]) if "id" in blueprint else "",
             workspace_id=spec.workspace_id,
@@ -55,18 +85,27 @@ class RuntimeEngine:
             inputs=inputs,
             approval_mode=approval_mode,
         )
-        state = {
-            "task": {
-                "title": title,
-                "prompt": prompt,
-                "inputs": inputs,
-                "approval_mode": approval_mode,
-            },
-            "outputs": {},
-            "loops": {},
-            "waiting": None,
-            "history": [],
-        }
+        if is_team_runtime:
+            state = team_runtime.initial_state(
+                blueprint_spec,
+                title=title,
+                prompt=prompt,
+                inputs=inputs,
+                approval_mode=approval_mode,
+            )
+        else:
+            state = {
+                "task": {
+                    "title": title,
+                    "prompt": prompt,
+                    "inputs": inputs,
+                    "approval_mode": approval_mode,
+                },
+                "outputs": {},
+                "loops": {},
+                "waiting": None,
+                "history": [],
+            }
         run = self.store.create_run(
             task_release_id=str(task["id"]),
             blueprint_id=str(blueprint["id"]),
@@ -74,79 +113,324 @@ class RuntimeEngine:
             project_id=spec.project_id,
             state=state,
         )
+        thread = None
+        if is_team_runtime:
+            thread = team_runtime.ensure_task_thread(
+                run_id=str(run["id"]),
+                blueprint_spec=blueprint_spec,
+                workspace_id=spec.workspace_id,
+                project_id=spec.project_id,
+                title=title,
+                prompt=prompt,
+            )
+            if thread is not None:
+                state["thread_id"] = thread["id"]
+        started_at = utcnow_iso()
         self.store.update_task_release(str(task["id"]), status="running")
-        self.store.add_event(run_id=str(run["id"]), event_type=event_types.RUN_CREATED, payload={"run_id": run["id"], "task_release_id": task["id"]})
-        return await self._continue_run(str(run["id"]), compiled=self.compiler.compile(spec))
+        self.store.update_run(
+            str(run["id"]),
+            status="running",
+            current_node_id=self._team_runtime_start_node(team_runtime) if is_team_runtime else compiled.start_node_id,
+            state=state,
+            started_at=started_at,
+        )
+        self.store.add_event(
+            run_id=str(run["id"]),
+            event_type=event_types.RUN_CREATED,
+            payload={"run_id": run["id"], "task_release_id": task["id"]},
+        )
+        if is_team_runtime:
+            await team_runtime.start_run(str(run["id"]))
+        else:
+            await self._invoke_graph({"run_id": str(run["id"])}, run_id=str(run["id"]))
+        bundle = self.store.get_run_bundle(str(run["id"])) or {}
+        if thread is not None:
+            bundle["task_thread"] = thread
+        return bundle
 
     async def resume_run(self, run_id: str) -> dict[str, Any]:
         run = self.store.get_run(run_id)
         if run is None:
             raise ValueError("Run does not exist.")
         bundle = self.store.get_run_bundle(run_id)
-        assert bundle is not None
-        blueprint = bundle["blueprint"]
-        if blueprint is None:
-            raise ValueError("Run blueprint does not exist.")
-        return await self._continue_run(run_id, compiled=self.compiler.compile(blueprint["spec_json"]))
-
-    async def _continue_run(self, run_id: str, *, compiled: CompiledBlueprint) -> dict[str, Any]:
-        run = self.store.get_run(run_id)
-        if run is None:
-            raise ValueError("Run does not exist.")
-        state = dict(run.get("state_json") or {})
-        waiting = state.get("waiting")
+        blueprint = (bundle or {}).get("blueprint")
+        team_runtime = self._team_runtime_for_blueprint((blueprint or {}).get("spec_json") or {})
+        if blueprint is not None and team_runtime is not None:
+            runtime_state = dict(run.get("state_json") or {})
+            waiting = runtime_state.get("waiting")
+            if waiting:
+                approval = self.store.get_approval(str(waiting["approval_id"]))
+                if approval is None or approval["status"] == "pending":
+                    bundle = self.store.get_run_bundle(run_id) or {}
+                    threads = self.store.list_task_threads(run_id=run_id)
+                    if threads:
+                        bundle["task_thread"] = threads[0]
+                    return bundle
+                resolution = approval.get("resolution_json") or {}
+                await team_runtime.resume_run(run_id, resolution)
+            else:
+                await team_runtime.resume_run(run_id)
+            bundle = self.store.get_run_bundle(run_id) or {}
+            threads = self.store.list_task_threads(run_id=run_id)
+            if threads:
+                bundle["task_thread"] = threads[0]
+            return bundle
+        runtime_state = dict(run.get("state_json") or {})
+        waiting = runtime_state.get("waiting")
         if waiting:
             approval = self.store.get_approval(str(waiting["approval_id"]))
             if approval is None or approval["status"] == "pending":
                 return self.store.get_run_bundle(run_id) or {}
-            if approval["status"] == "rejected":
-                self.store.update_run(run_id, status="failed", finished_at=utcnow_iso(), summary="Approval rejected.", state=state)
-                self.store.update_task_release(str(run["task_release_id"]), status="failed")
-                return self.store.get_run_bundle(run_id) or {}
-            pending_step = self.store.latest_step_for_node(run_id, str(waiting["node_id"]))
+            resolution = approval.get("resolution_json") or {}
+            try:
+                await self._invoke_graph(Command(resume=resolution), run_id=run_id)
+            except Exception:
+                # Fallback for cases where the process lost in-memory checkpoint state.
+                runtime_state["resume_resolution"] = resolution
+                self.store.update_run(
+                    run_id,
+                    status=run.get("status"),
+                    current_node_id=run.get("current_node_id"),
+                    state=runtime_state,
+                    started_at=run.get("started_at"),
+                    finished_at=run.get("finished_at"),
+                )
+                await self._invoke_graph({"run_id": run_id}, run_id=run_id)
+            return self.store.get_run_bundle(run_id) or {}
+        await self._invoke_graph({"run_id": run_id}, run_id=run_id)
+        return self.store.get_run_bundle(run_id) or {}
+
+    async def inject_human_message(
+        self,
+        *,
+        run_id: str,
+        target_agent_id: str,
+        body: str,
+        message_type: str = "dialogue",
+        phase: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        auto_resume: bool = True,
+    ) -> dict[str, Any]:
+        run = self.store.get_run(run_id)
+        if run is None:
+            raise ValueError("Run does not exist.")
+        bundle = self.store.get_run_bundle(run_id)
+        blueprint = (bundle or {}).get("blueprint")
+        team_runtime = self._team_runtime_for_blueprint((blueprint or {}).get("spec_json") or {})
+        if blueprint is None or team_runtime is None:
+            raise ValueError("Human message injection is only supported for team-runtime runs.")
+        injected = team_runtime.inject_human_message(
+            run_id=run_id,
+            target_agent_id=target_agent_id,
+            body=body,
+            message_type=message_type,
+            phase=phase,
+            metadata=metadata,
+        )
+        current = self.store.get_run(run_id)
+        if current is not None and str(current.get("status") or "") not in {"waiting_approval", "completed", "failed"} and auto_resume:
+            return await self.resume_run(run_id)
+        return injected
+
+    def _team_runtime_for_blueprint(self, blueprint_spec: dict[str, Any]) -> LangGraphTeamRuntime | DeepAgentsTeamRuntime | None:
+        if self.deep_team_runtime.handles(blueprint_spec):
+            return self.deep_team_runtime
+        if self.team_runtime.handles(blueprint_spec):
+            return self.team_runtime
+        return None
+
+    def _team_runtime_start_node(self, runtime: LangGraphTeamRuntime | DeepAgentsTeamRuntime | None) -> str:
+        if runtime is self.deep_team_runtime:
+            return "deepagents_orchestrate"
+        return "task_ingress"
+
+    def _build_graph(self, *, checkpointer: AsyncSqliteSaver):
+        builder = StateGraph(RuntimeGraphState)
+        builder.add_node("runner", self._graph_runner)
+        builder.add_edge(START, "runner")
+        return builder.compile(checkpointer=checkpointer)
+
+    async def _invoke_graph(self, payload: Any, *, run_id: str) -> None:
+        async with AsyncSqliteSaver.from_conn_string(str(self.checkpoint_db_path)) as checkpointer:
+            graph = self._build_graph(checkpointer=checkpointer)
+            await graph.ainvoke(payload, self._graph_config(run_id))
+
+    def _graph_config(self, run_id: str) -> dict[str, Any]:
+        return {"configurable": {"thread_id": run_id}}
+
+    def storage_info(self) -> dict[str, Any]:
+        return {
+            "checkpoint_driver": "sqlite",
+            "checkpoint_path": str(self.checkpoint_db_path),
+            "checkpoint_runtime": "langgraph.checkpoint.sqlite.aio.AsyncSqliteSaver",
+        }
+
+    async def _graph_runner(self, state: RuntimeGraphState) -> Command:
+        run_id = str(state["run_id"])
+        run = self.store.get_run(run_id)
+        if run is None:
+            return Command(update={"run_id": run_id}, goto=END)
+        compiled = self._compiled_for_run(run_id)
+        runtime_state = dict(run.get("state_json") or {})
+        if runtime_state.get("waiting"):
+            return await self._handle_waiting_approval(run_id, compiled, runtime_state)
+        current_node_id = run.get("current_node_id") or compiled.start_node_id
+        self.store.update_run(
+            run_id,
+            status="running",
+            current_node_id=current_node_id,
+            state=runtime_state,
+            started_at=run.get("started_at") or utcnow_iso(),
+        )
+        result = await self._execute_node(run_id, compiled, runtime_state, current_node_id)
+        if result.status == "waiting_approval":
+            refreshed = self.store.get_run(run_id)
+            assert refreshed is not None
+            return await self._handle_waiting_approval(run_id, compiled, dict(refreshed.get("state_json") or {}))
+        if result.next_node_id:
+            return Command(update={"run_id": run_id}, goto="runner")
+        return self._finalize_run(run_id, compiled, runtime_state)
+
+    async def _handle_waiting_approval(
+        self,
+        run_id: str,
+        compiled: CompiledBlueprint,
+        runtime_state: dict[str, Any],
+    ) -> Command:
+        waiting = dict(runtime_state.get("waiting") or {})
+        approval = self.store.get_approval(str(waiting["approval_id"]))
+        if approval is None:
+            raise RuntimeError("Approval does not exist.")
+        payload = {
+            "approval_id": approval["id"],
+            "node_id": waiting.get("node_id"),
+            "title": approval["title"],
+            "detail": approval["detail"],
+        }
+        resolution = runtime_state.pop("resume_resolution", None)
+        if resolution is None:
+            resolution = interrupt(payload)
+        approval = self.store.get_approval(str(waiting["approval_id"]))
+        if approval is None or approval["status"] == "pending":
+            if isinstance(resolution, dict) and "approved" in resolution:
+                approval = self.store.resolve_approval(
+                    str(waiting["approval_id"]),
+                    approved=bool(resolution.get("approved", True)),
+                    comment=str(resolution.get("comment") or ""),
+                    metadata=dict(resolution.get("metadata") or {}),
+                )
+            else:
+                raise RuntimeError("Approval is still pending.")
+        assert approval is not None
+        pending_step = self.store.latest_step_for_node(run_id, str(waiting["node_id"]))
+        if approval["status"] == "rejected":
             if pending_step is not None and pending_step["status"] == "blocked":
                 self.store.update_step(
                     str(pending_step["id"]),
-                    status="done",
+                    status="error",
                     output_payload={"approval_id": approval["id"], "resolution": approval["resolution_json"]},
+                    error_text="Approval rejected.",
                     finished=True,
                 )
-            state["outputs"][str(waiting["node_id"])] = {
-                "approval_id": approval["id"],
-                "status": approval["status"],
-                "resolution": approval["resolution_json"],
-            }
-            state["waiting"] = None
             self.store.add_event(
                 run_id=run_id,
+                step_id=pending_step["id"] if pending_step else None,
                 event_type=event_types.APPROVAL_RESOLVED,
                 payload={"approval_id": approval["id"], "resolution": approval["resolution_json"]},
-                step_id=pending_step["id"] if pending_step else None,
             )
-            next_node_id = str(waiting["next_node_id"])
-        else:
-            next_node_id = run.get("current_node_id") or compiled.start_node_id
-        started_at = run.get("started_at") or utcnow_iso()
-        self.store.update_run(run_id, status="running", state=state, started_at=started_at, current_node_id=next_node_id)
+            self.store.add_event(run_id=run_id, event_type=event_types.RUN_FAILED, payload={"reason": "approval_rejected"})
+            current_run = self.store.get_run(run_id)
+            if current_run is not None:
+                self.store.update_task_release(str(current_run["task_release_id"]), status="failed")
+            self.store.update_run(
+                run_id,
+                status="failed",
+                summary="Approval rejected.",
+                current_node_id=str(waiting["node_id"]),
+                state={**runtime_state, "waiting": None},
+                finished_at=utcnow_iso(),
+            )
+            return Command(update={"run_id": run_id}, goto=END)
+        if pending_step is not None and pending_step["status"] == "blocked":
+            self.store.update_step(
+                str(pending_step["id"]),
+                status="done",
+                output_payload={"approval_id": approval["id"], "resolution": approval["resolution_json"]},
+                finished=True,
+            )
+        runtime_state.setdefault("outputs", {})[str(waiting["node_id"])] = {
+            "approval_id": approval["id"],
+            "status": approval["status"],
+            "resolution": approval["resolution_json"],
+        }
+        runtime_state["waiting"] = None
+        next_node_id = str(waiting["next_node_id"])
+        self.store.add_event(
+            run_id=run_id,
+            step_id=pending_step["id"] if pending_step else None,
+            event_type=event_types.APPROVAL_RESOLVED,
+            payload={"approval_id": approval["id"], "resolution": approval["resolution_json"]},
+        )
+        self.store.update_run(
+            run_id,
+            status="running",
+            current_node_id=next_node_id,
+            state=runtime_state,
+            started_at=(self.store.get_run(run_id) or {}).get("started_at") or utcnow_iso(),
+        )
+        self.store.save_checkpoint(
+            run_id=run_id,
+            step_id=str(pending_step["id"]) if pending_step else None,
+            node_id=str(waiting["node_id"]),
+            snapshot=runtime_state,
+        )
+        return Command(update={"run_id": run_id}, goto="runner")
 
-        while next_node_id:
-            result = await self._execute_node(run_id, compiled, state, next_node_id)
-            if result.status == "waiting_approval":
-                return self.store.get_run_bundle(run_id) or {}
-            next_node_id = result.next_node_id
+    def _compiled_for_run(self, run_id: str) -> CompiledBlueprint:
+        bundle = self.store.get_run_bundle(run_id)
+        if bundle is None or bundle.get("blueprint") is None:
+            raise ValueError("Run blueprint does not exist.")
+        blueprint = bundle["blueprint"]
+        return self.compiler.compile(blueprint["spec_json"])
 
+    def _finalize_run(self, run_id: str, compiled: CompiledBlueprint, state: dict[str, Any]) -> Command:
+        run = self.store.get_run(run_id)
+        if run is None:
+            return Command(update={"run_id": run_id}, goto=END)
         summary = self._resolve_run_summary(state)
         if not self._acceptance_checks_pass(compiled.blueprint, state):
-            self.store.update_run(run_id, status="failed", summary=summary, state=state, finished_at=utcnow_iso(), result=state.get("outputs", {}))
+            self.store.update_run(
+                run_id,
+                status="failed",
+                summary=summary,
+                state=state,
+                result=state.get("outputs", {}),
+                finished_at=utcnow_iso(),
+            )
             self.store.update_task_release(str(run["task_release_id"]), status="failed")
             self.store.add_event(run_id=run_id, event_type=event_types.RUN_FAILED, payload={"summary": summary})
-            return self.store.get_run_bundle(run_id) or {}
-        self.store.update_run(run_id, status="completed", summary=summary, state=state, result=state.get("outputs", {}), finished_at=utcnow_iso())
+            return Command(update={"run_id": run_id}, goto=END)
+        self.store.update_run(
+            run_id,
+            status="completed",
+            summary=summary,
+            state=state,
+            result=state.get("outputs", {}),
+            finished_at=utcnow_iso(),
+        )
         self.store.update_task_release(str(run["task_release_id"]), status="completed")
         self.store.add_event(run_id=run_id, event_type=event_types.RUN_COMPLETED, payload={"summary": summary})
-        return self.store.get_run_bundle(run_id) or {}
+        return Command(update={"run_id": run_id}, goto=END)
 
-    async def _execute_node(self, run_id: str, compiled: CompiledBlueprint, state: dict[str, Any], node_id: str, *, stop_before_merge: bool = False) -> NodeExecutionResult:
+    async def _execute_node(
+        self,
+        run_id: str,
+        compiled: CompiledBlueprint,
+        state: dict[str, Any],
+        node_id: str,
+        *,
+        stop_before_merge: bool = False,
+    ) -> NodeExecutionResult:
         node = compiled.nodes[node_id]
         if stop_before_merge and node.type == "merge":
             return NodeExecutionResult(status="merge_boundary", merge_id=node.id, next_node_id=node.id)
@@ -160,7 +444,12 @@ class RuntimeEngine:
             attempt=attempt,
             input_payload={"state": state, "node": node.to_dict()},
         )
-        self.store.add_event(run_id=run_id, step_id=str(step["id"]), event_type=event_types.STEP_STARTED, payload={"node_id": node.id, "node_type": node.type, "attempt": attempt})
+        self.store.add_event(
+            run_id=run_id,
+            step_id=str(step["id"]),
+            event_type=event_types.STEP_STARTED,
+            payload={"node_id": node.id, "node_type": node.type, "attempt": attempt},
+        )
 
         try:
             next_node_id: str | None
@@ -170,7 +459,12 @@ class RuntimeEngine:
                 next_node_id = compiled.single_next(node.id)
             elif node.type == "agent":
                 output = await self._run_agent_node(run_id, compiled, node, state)
-                self.store.add_event(run_id=run_id, step_id=str(step["id"]), event_type=event_types.AGENT_MESSAGE, payload={"node_id": node.id, "summary": output.get("summary", "")})
+                self.store.add_event(
+                    run_id=run_id,
+                    step_id=str(step["id"]),
+                    event_type=event_types.AGENT_MESSAGE,
+                    payload={"node_id": node.id, "summary": output.get("summary", "")},
+                )
                 for plugin_result in output.get("plugin_results", []):
                     self.store.add_event(
                         run_id=run_id,
@@ -228,7 +522,12 @@ class RuntimeEngine:
                     self.store.update_step(str(step["id"]), status="blocked", output_payload={"approval_id": approval["id"]}, finished=False)
                     self.store.update_run(run_id, status="waiting_approval", current_node_id=node.id, state=state)
                     self.store.save_checkpoint(run_id=run_id, step_id=str(step["id"]), node_id=node.id, snapshot=state)
-                    self.store.add_event(run_id=run_id, step_id=str(step["id"]), event_type=event_types.APPROVAL_REQUESTED, payload={"approval_id": approval["id"], "title": approval["title"]})
+                    self.store.add_event(
+                        run_id=run_id,
+                        step_id=str(step["id"]),
+                        event_type=event_types.APPROVAL_REQUESTED,
+                        payload={"approval_id": approval["id"], "title": approval["title"]},
+                    )
                     self.store.add_event(run_id=run_id, event_type=event_types.RUN_PAUSED, payload={"reason": "waiting_approval", "approval_id": approval["id"]})
                     return NodeExecutionResult(status="waiting_approval", next_node_id=None)
             elif node.type == "artifact":
@@ -275,10 +574,17 @@ class RuntimeEngine:
 
             state.setdefault("outputs", {})[node.id] = output
             state.setdefault("history", []).append({"node_id": node.id, "node_type": node.type, "output": output})
+            if node.type == "agent":
+                self._record_agent_handoffs(run_id=run_id, compiled=compiled, node=node, next_node_id=next_node_id, output=output)
             self.store.update_step(str(step["id"]), status="done", output_payload=output, finished=True)
             self.store.update_run(run_id, status="running", current_node_id=next_node_id, state=state)
             self.store.save_checkpoint(run_id=run_id, step_id=str(step["id"]), node_id=node.id, snapshot=state)
-            self.store.add_event(run_id=run_id, step_id=str(step["id"]), event_type=event_types.STEP_COMPLETED, payload={"node_id": node.id, "node_type": node.type, "output": output})
+            self.store.add_event(
+                run_id=run_id,
+                step_id=str(step["id"]),
+                event_type=event_types.STEP_COMPLETED,
+                payload={"node_id": node.id, "node_type": node.type, "output": output},
+            )
             return NodeExecutionResult(status="ok", next_node_id=next_node_id)
         except Exception as exc:
             self.store.update_step(str(step["id"]), status="error", error_text=str(exc), output_payload={"error": str(exc)}, finished=True)
@@ -347,6 +653,8 @@ class RuntimeEngine:
                     "merge_id": result.merge_id,
                     "outputs": branch_state.get("outputs", {}),
                 }
+            if result.status == "waiting_approval":
+                raise RuntimeError("Parallel branch cannot pause for approval.")
             node_id = result.next_node_id
         raise RuntimeError(f"Parallel branch `{start_node_id}` did not converge to a merge node.")
 
@@ -421,3 +729,42 @@ class RuntimeEngine:
             if isinstance(item, dict) and item.get("summary"):
                 return str(item["summary"])
         return "Run completed."
+
+    def _record_agent_handoffs(
+        self,
+        *,
+        run_id: str,
+        compiled: CompiledBlueprint,
+        node: NodeSpec,
+        next_node_id: str | None,
+        output: dict[str, Any],
+    ) -> None:
+        if not node.agent or not next_node_id:
+            return
+        metadata = dict(compiled.blueprint.metadata or {})
+        adjacency = dict(metadata.get("adjacency") or {})
+        targets: list[str] = []
+        next_node = compiled.nodes.get(next_node_id)
+        if next_node and next_node.type == "agent" and next_node.agent:
+            targets = [str(next_node.agent)]
+        elif next_node and next_node.type == "parallel":
+            for branch_id in compiled.next_nodes(next_node_id):
+                branch_node = compiled.nodes.get(branch_id)
+                if branch_node and branch_node.type == "agent" and branch_node.agent:
+                    targets.append(str(branch_node.agent))
+        for target_agent_id in sorted(set(targets)):
+            allowed_targets = [str(item) for item in adjacency.get(str(node.agent), [])]
+            self.store.add_message_event(
+                run_id=run_id,
+                thread_id=None,
+                source_agent_id=str(node.agent),
+                target_agent_id=target_agent_id,
+                message_type="handoff",
+                payload={
+                    "node_id": node.id,
+                    "next_node_id": next_node_id,
+                    "summary": output.get("summary"),
+                    "allowed_targets": allowed_targets,
+                },
+                status="delivered" if (not allowed_targets or target_agent_id in allowed_targets) else "blocked",
+            )

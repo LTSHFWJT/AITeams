@@ -35,30 +35,48 @@
               <button type="button" class="nav-button" data-page-target="providers">
                 <strong>模型提供方</strong>
               </button>
+              <button type="button" class="nav-button" data-page-target="retrieval-config">
+                <strong>检索配置</strong>
+              </button>
               <button type="button" class="nav-button" data-page-target="plugins">
                 <strong>插件中心</strong>
               </button>
+              <button type="button" class="nav-button" data-page-target="responsibility-specs">
+                <strong>角色管理</strong>
+              </button>
+              <button type="button" class="nav-button" data-page-target="knowledge-bases">
+                <strong>知识库</strong>
+              </button>
+              <button type="button" class="nav-button" data-page-target="review-policies">
+                <strong>审核策略</strong>
+              </button>
+              <button type="button" class="nav-button" data-page-target="memory-profiles">
+                <strong>记忆画像</strong>
+              </button>
+              <button type="button" class="nav-button" data-page-target="agent-definitions">
+                <strong>Agent 管理</strong>
+              </button>
               <button type="button" class="nav-button" data-page-target="agent-templates">
-                <strong>Agent 模板</strong>
+                <strong>兼容 Agent 模板</strong>
               </button>
             </div>
             <div class="sub-menu" data-nav-panel="orchestration">
-              <button type="button" class="nav-button" data-page-target="team-templates">
-                <strong>团队模板</strong>
+              <button type="button" class="nav-button" data-page-target="team-definitions">
+                <strong>团队管理</strong>
               </button>
             </div>
             <div class="sub-menu" data-nav-panel="delivery">
-              <button type="button" class="nav-button" data-page-target="builds">
-                <strong>构建发布</strong>
-              </button>
               <button type="button" class="nav-button" data-page-target="runtime">
                 <strong>任务运行</strong>
               </button>
               <button type="button" class="nav-button" data-page-target="approvals">
                 <strong>审批中心</strong>
               </button>
+              <button type="button" class="nav-button" data-page-target="builds">
+                <strong>Legacy 构建</strong>
+              </button>
               <button type="button" class="nav-button" data-page-target="blueprints">
-                <strong>内部蓝图</strong>
+                <strong>兼容蓝图</strong>
               </button>
             </div>
           </div>
@@ -223,6 +241,77 @@
             </div>
           </section>
 
+          <section class="page-view" data-page="retrieval-config">
+            <div class="page-head">
+              <div>
+                <h2>检索配置</h2>
+              </div>
+            </div>
+            <div class="page-grid retrieval-page-grid">
+              <section class="panel panel-wide">
+                <div class="panel-title">
+                  <h3>Embedding / Rerank</h3>
+                </div>
+                <div id="retrieval-summary" class="system-banner"></div>
+                <form id="retrieval-settings-form" class="form resource-editor-form">
+                  <div class="retrieval-block">
+                    <div class="retrieval-block-head">
+                      <h4>Embedding</h4>
+                      <p class="field-note">默认走 `HashEmbedder`。切到 Provider 后会重建当前 LanceDB 索引。</p>
+                    </div>
+                    <div class="form-grid three">
+                      <label>
+                        <span>模式</span>
+                        <select id="retrieval-embedding-mode">
+                          <option value="hash">HashEmbedder</option>
+                          <option value="provider">Provider Embedding</option>
+                        </select>
+                      </label>
+                      <label>
+                        <span>Provider</span>
+                        <select id="retrieval-embedding-provider"></select>
+                      </label>
+                      <label>
+                        <span>模型</span>
+                        <select id="retrieval-embedding-model"></select>
+                      </label>
+                    </div>
+                  </div>
+
+                  <div class="retrieval-block">
+                    <div class="retrieval-block-head">
+                      <h4>Rerank</h4>
+                      <p class="field-note">可选增强阶段。关闭时仅走向量召回和词法融合。</p>
+                    </div>
+                    <div class="form-grid three">
+                      <label>
+                        <span>模式</span>
+                        <select id="retrieval-rerank-mode">
+                          <option value="disabled">关闭</option>
+                          <option value="provider">Provider Rerank</option>
+                        </select>
+                      </label>
+                      <label>
+                        <span>Provider</span>
+                        <select id="retrieval-rerank-provider"></select>
+                      </label>
+                      <label>
+                        <span>模型</span>
+                        <select id="retrieval-rerank-model"></select>
+                      </label>
+                    </div>
+                  </div>
+
+                  <pre id="retrieval-settings-result" class="result hidden"></pre>
+                  <div class="modal-actions">
+                    <button id="retrieval-settings-refresh" type="button" class="ghost">刷新</button>
+                    <button id="retrieval-settings-save" type="submit">保存</button>
+                  </div>
+                </form>
+              </section>
+            </div>
+          </section>
+
           <section class="page-view" data-page="plugins">
             <div class="page-head">
               <div>
@@ -279,6 +368,14 @@
                   <label><span>工具</span><input id="plugin-tools" placeholder="search, docs" /></label>
                   <label><span>权限</span><input id="plugin-permissions" placeholder="readonly, network_limited" /></label>
                   <label><span>说明</span><textarea id="plugin-description" rows="3" placeholder="简短说明"></textarea></label>
+                  <section id="plugin-config-panel" class="retrieval-block">
+                    <div class="retrieval-block-head">
+                      <h4>运行配置</h4>
+                      <p id="plugin-config-hint" class="field-note">从插件包 `config_schema` 渲染。修改后会在插件下次加载或当前运行实例重载时生效。</p>
+                    </div>
+                    <div id="plugin-config-schema-empty" class="detail empty compact-detail">当前插件未声明 `config_schema`，无需额外运行配置。</div>
+                    <div id="plugin-config-form" class="form"></div>
+                  </section>
                   <pre id="plugin-modal-result" class="result hidden"></pre>
                   <div class="modal-actions">
                     <button id="plugin-cancel" type="button" class="ghost">取消</button>
@@ -292,7 +389,7 @@
           <section class="page-view" data-page="agent-templates">
             <div class="page-head">
               <div>
-                <h2>Agent 模板</h2>
+                <h2>兼容 Agent 模板</h2>
               </div>
             </div>
             <div class="page-grid resource-page-grid">
@@ -337,7 +434,10 @@
                       <span>Provider</span>
                       <select id="agent-template-provider"></select>
                     </label>
-                    <label><span>模型</span><input id="agent-template-model" placeholder="mock-plan / gpt-4.1-mini" /></label>
+                    <label>
+                      <span>模型</span>
+                      <select id="agent-template-model"></select>
+                    </label>
                     <label>
                       <span>记忆策略</span>
                       <select id="agent-template-memory-policy">
@@ -348,7 +448,7 @@
                       </select>
                     </label>
                   </div>
-                  <label><span>技能</span><input id="agent-template-skills" placeholder="任务拆解, 交付规划, 风险识别" /></label>
+                  <label><span>技能</span><select id="agent-template-skills" multiple size="6"></select></label>
                   <label><span>插件</span><select id="agent-template-plugins" multiple size="6"></select></label>
                   <label><span>目标</span><textarea id="agent-template-goal" rows="3" placeholder="描述 Agent 的工作目标"></textarea></label>
                   <label><span>指令</span><textarea id="agent-template-instructions" rows="5" placeholder="系统指令模板"></textarea></label>
@@ -363,10 +463,341 @@
             </div>
           </section>
 
+          <section class="page-view" data-page="responsibility-specs">
+            <div class="page-head">
+              <div>
+                <h2>角色管理</h2>
+              </div>
+            </div>
+            <div class="page-grid provider-page-grid">
+              <section class="panel panel-wide">
+                <div class="provider-toolbar static-memory-toolbar">
+                  <div class="static-memory-toolbar-actions">
+                    <button id="responsibility-spec-open-role-create" type="button">新增</button>
+                  </div>
+                </div>
+                <div class="provider-list-head static-memory-list-head">
+                  <span>角色名称</span>
+                  <span>角色简介</span>
+                  <span>角色详情</span>
+                  <span>操作</span>
+                </div>
+                <div id="responsibility-spec-list" class="provider-list"></div>
+                <div class="provider-pagination">
+                  <div id="static-memory-pagination-meta" class="provider-pagination-meta"></div>
+                  <label class="page-size-mini">
+                    <span>每页</span>
+                    <select id="static-memory-page-size">
+                      <option value="10" selected>10</option>
+                      <option value="20">20</option>
+                      <option value="50">50</option>
+                    </select>
+                  </label>
+                </div>
+                <pre id="responsibility-spec-result" class="result hidden"></pre>
+              </section>
+            </div>
+          </section>
+
+          <div id="static-memory-modal" class="modal-shell hidden">
+            <div class="modal-backdrop" data-static-memory-modal-close></div>
+            <section class="modal-card provider-modal-card static-memory-modal-card">
+              <div class="modal-head">
+                <h3 id="static-memory-modal-title">新增角色管理项</h3>
+              </div>
+              <form id="static-memory-form" class="form provider-editor-form">
+                <label>
+                  <span id="static-memory-name-label">角色名称</span>
+                  <input id="static-memory-name" placeholder="规划负责人角色管理项" />
+                </label>
+                <label>
+                  <span id="static-memory-description-label">角色简介</span>
+                  <textarea id="static-memory-description" rows="3" placeholder="说明这份角色管理项覆盖的职责边界"></textarea>
+                </label>
+                <label class="static-memory-detail-field">
+                  <span id="static-memory-panel-title">角色详情</span>
+                  <textarea id="static-memory-system-prompt" rows="12" placeholder="说明这个角色如何处理任务、哪些边界不能越过、何时必须升级。"></textarea>
+                </label>
+                <pre id="static-memory-modal-result" class="result hidden"></pre>
+                <div class="modal-actions">
+                  <button id="static-memory-cancel" type="button" class="ghost">取消</button>
+                  <button id="static-memory-save" type="submit">保存</button>
+                </div>
+              </form>
+            </section>
+          </div>
+
+          <section class="page-view" data-page="knowledge-bases">
+            <div class="page-head">
+              <div>
+                <h2>知识库</h2>
+              </div>
+            </div>
+            <div class="page-grid resource-page-grid">
+              <section class="panel">
+                <div class="panel-title">
+                  <h3>Knowledge Base</h3>
+                </div>
+                <form id="knowledge-base-form" class="form resource-editor-form">
+                  <div class="form-grid two">
+                    <label><span>Key</span><input id="knowledge-base-key" placeholder="kb.platform.delivery" /></label>
+                    <label><span>名称</span><input id="knowledge-base-name" placeholder="平台交付知识库" /></label>
+                  </div>
+                  <label><span>说明</span><textarea id="knowledge-base-description" rows="3" placeholder="说明知识库覆盖的内容范围"></textarea></label>
+
+                  <div class="member-toolbar">
+                    <span class="section-mini-title">文档</span>
+                    <div class="member-toolbar-actions">
+                      <button id="knowledge-base-document-add" type="button" class="ghost">添加文档</button>
+                    </div>
+                  </div>
+                  <div class="field-note">保存知识库时会同步保存文档，供内置 `kb.retrieve` 检索插件使用。</div>
+                  <div id="knowledge-base-document-list" class="member-list"></div>
+                  <textarea id="knowledge-base-documents" class="hidden" aria-hidden="true"></textarea>
+
+                  <div class="modal-actions">
+                    <button id="knowledge-base-reset" type="button" class="ghost">新建</button>
+                    <button id="knowledge-base-save" type="submit">保存</button>
+                  </div>
+                </form>
+                <pre id="knowledge-base-result" class="result hidden"></pre>
+              </section>
+
+              <section class="panel panel-wide">
+                <div class="panel-title">
+                  <h3>列表</h3>
+                </div>
+                <div id="knowledge-base-list" class="list"></div>
+              </section>
+            </div>
+          </section>
+
+          <section class="page-view" data-page="review-policies">
+            <div class="page-head">
+              <div>
+                <h2>审核策略</h2>
+              </div>
+            </div>
+            <div class="page-grid resource-page-grid">
+              <section class="panel">
+                <div class="panel-title">
+                  <h3>Review Policy</h3>
+                </div>
+                <form id="review-policy-form" class="form resource-editor-form">
+                  <div class="form-grid two">
+                    <label><span>Key</span><input id="review-policy-key" placeholder="review.high_risk_tools" /></label>
+                    <label><span>名称</span><input id="review-policy-name" placeholder="高风险工具审核" /></label>
+                  </div>
+                  <label><span>说明</span><textarea id="review-policy-description" rows="3" placeholder="说明何时触发人工审核"></textarea></label>
+                  <div class="form-grid two">
+                    <label><span>触发器</span><select id="review-policy-triggers" multiple size="7"></select></label>
+                    <label><span>动作</span><select id="review-policy-actions" multiple size="7"></select></label>
+                  </div>
+                  <div class="form-grid three">
+                    <label><span>插件 Keys</span><select id="review-policy-plugin-keys" multiple size="7"></select></label>
+                    <label><span>权限 / 风险标签</span><textarea id="review-policy-risk-tags" rows="5" placeholder="每行一个"></textarea></label>
+                    <label><span>消息类型</span><select id="review-policy-message-types" multiple size="7"></select></label>
+                  </div>
+                  <div class="form-grid two">
+                    <label><span>记忆作用域</span><select id="review-policy-memory-scopes" multiple size="7"></select></label>
+                    <label><span>记忆类型</span><select id="review-policy-memory-kinds" multiple size="7"></select></label>
+                  </div>
+                  <div class="modal-actions">
+                    <button id="review-policy-reset" type="button" class="ghost">新建</button>
+                    <button id="review-policy-save" type="submit">保存</button>
+                  </div>
+                </form>
+                <pre id="review-policy-result" class="result hidden"></pre>
+              </section>
+
+              <section class="panel panel-wide">
+                <div class="panel-title">
+                  <h3>列表</h3>
+                </div>
+                <div id="review-policy-list" class="list"></div>
+              </section>
+            </div>
+          </section>
+
+          <section class="page-view" data-page="memory-profiles">
+            <div class="page-head">
+              <div>
+                <h2>记忆画像</h2>
+              </div>
+            </div>
+            <div class="page-grid resource-page-grid">
+              <section class="panel">
+                <div class="panel-title">
+                  <h3>Memory Profile</h3>
+                </div>
+                <form id="memory-profile-form" class="form resource-editor-form">
+                  <div class="form-grid two">
+                    <label><span>Key</span><input id="memory-profile-key" placeholder="memory.default.collab" /></label>
+                    <label><span>名称</span><input id="memory-profile-name" placeholder="默认协作记忆" /></label>
+                  </div>
+                  <label><span>说明</span><textarea id="memory-profile-description" rows="3" placeholder="说明此记忆画像适合哪些 Agent"></textarea></label>
+
+                  <div class="retrieval-block">
+                    <div class="retrieval-block-head">
+                      <h4>短期记忆</h4>
+                    </div>
+                    <div class="form-grid three">
+                      <label class="toggle-chip">
+                        <input id="memory-profile-short-term-enabled" type="checkbox" checked />
+                        <span>启用短期记忆</span>
+                      </label>
+                      <label><span>压缩触发 Tokens</span><input id="memory-profile-summary-trigger-tokens" type="number" min="128" value="1800" /></label>
+                      <label><span>摘要最大 Tokens</span><input id="memory-profile-summary-max-tokens" type="number" min="64" value="320" /></label>
+                    </div>
+                  </div>
+
+                  <div class="retrieval-block">
+                    <div class="retrieval-block-head">
+                      <h4>长期记忆</h4>
+                    </div>
+                    <div class="form-grid three">
+                      <label class="toggle-chip">
+                        <input id="memory-profile-long-term-enabled" type="checkbox" checked />
+                        <span>启用长期记忆</span>
+                      </label>
+                      <label><span>命名空间策略</span><input id="memory-profile-namespace-strategy" value="agent_team_project" /></label>
+                      <label><span>TTL 天数</span><input id="memory-profile-ttl-days" type="number" min="1" value="30" /></label>
+                    </div>
+                  </div>
+
+                  <div class="retrieval-block">
+                    <div class="retrieval-block-head">
+                      <h4>后台反思</h4>
+                    </div>
+                    <div class="form-grid two">
+                      <label class="toggle-chip">
+                        <input id="memory-profile-background-enabled" type="checkbox" checked />
+                        <span>启用后台反思</span>
+                      </label>
+                      <label><span>防抖秒数</span><input id="memory-profile-debounce-seconds" type="number" min="0" value="30" /></label>
+                    </div>
+                  </div>
+
+                  <div class="form-grid two">
+                    <label><span>读取作用域</span><select id="memory-profile-read-scopes" multiple size="6"></select></label>
+                    <label><span>写入作用域</span><select id="memory-profile-write-scopes" multiple size="6"></select></label>
+                  </div>
+
+                  <div class="modal-actions">
+                    <button id="memory-profile-reset" type="button" class="ghost">新建</button>
+                    <button id="memory-profile-save" type="submit">保存</button>
+                  </div>
+                </form>
+                <pre id="memory-profile-result" class="result hidden"></pre>
+              </section>
+
+              <section class="panel panel-wide">
+                <div class="panel-title">
+                  <h3>列表</h3>
+                </div>
+                <div id="memory-profile-list" class="list"></div>
+              </section>
+            </div>
+          </section>
+
+          <section class="page-view" data-page="agent-definitions">
+            <div class="page-head">
+              <div>
+                <h2>Agent 管理</h2>
+              </div>
+            </div>
+            <div class="page-grid provider-page-grid">
+              <section class="panel panel-wide">
+                <div class="provider-toolbar static-memory-toolbar">
+                  <div class="static-memory-toolbar-actions">
+                    <button id="agent-definition-open-create" type="button">新增</button>
+                  </div>
+                </div>
+                <div class="provider-list-head agent-management-list-head">
+                  <span>Agent 名称</span>
+                  <span>说明</span>
+                  <span>配置概览</span>
+                  <span>操作</span>
+                </div>
+                <div id="agent-definition-list" class="provider-list"></div>
+                <div class="provider-pagination">
+                  <div id="agent-definition-pagination-meta" class="provider-pagination-meta"></div>
+                  <label class="page-size-mini">
+                    <span>每页</span>
+                    <select id="agent-definition-page-size">
+                      <option value="10" selected>10</option>
+                      <option value="20">20</option>
+                      <option value="50">50</option>
+                    </select>
+                  </label>
+                </div>
+                <pre id="agent-definition-result" class="result hidden"></pre>
+              </section>
+            </div>
+          </section>
+
+          <div id="agent-definition-modal" class="modal-shell hidden">
+            <div class="modal-backdrop" data-agent-definition-modal-close></div>
+            <section class="modal-card resource-modal-card agent-definition-modal-card">
+              <div class="modal-head">
+                <h3 id="agent-definition-modal-title">新增 Agent 管理项</h3>
+              </div>
+              <form id="agent-definition-form" class="form resource-editor-form">
+                <div class="field-note">主链路：在这里组合 Provider / Plugin / Skill / 角色管理 / KB，形成完整可编队的 Agent。内部唯一索引会自动生成，无需手填。</div>
+                <div class="form-grid two">
+                  <label><span>名称</span><input id="agent-definition-name" placeholder="规划负责人" /></label>
+                  <label>
+                    <span>Provider</span>
+                    <select id="agent-definition-provider"></select>
+                  </label>
+                  <label>
+                    <span>模型</span>
+                    <select id="agent-definition-model"></select>
+                  </label>
+                  <label>
+                    <span>角色管理</span>
+                    <select id="agent-definition-static-memory"></select>
+                  </label>
+                </div>
+                <div class="form-grid two">
+                  <label class="tag-multi-select-field">
+                    <span>插件</span>
+                    <div
+                      class="tag-multi-select"
+                      data-tag-select="agent-definition-plugins"
+                      data-placeholder="搜索插件后点击选择"
+                      data-empty-selection-label="可多选，也可以不选"
+                      data-empty-list-label="暂无可选插件"
+                    ></div>
+                    <select id="agent-definition-plugins" multiple class="hidden" aria-hidden="true" tabindex="-1"></select>
+                  </label>
+                  <label class="tag-multi-select-field">
+                    <span>技能</span>
+                    <div
+                      class="tag-multi-select"
+                      data-tag-select="agent-definition-skills"
+                      data-placeholder="搜索技能后点击选择"
+                      data-empty-selection-label="可多选，也可以不选"
+                      data-empty-list-label="暂无可选技能"
+                    ></div>
+                    <select id="agent-definition-skills" multiple class="hidden" aria-hidden="true" tabindex="-1"></select>
+                  </label>
+                  <label><span>知识库</span><select id="agent-definition-knowledge-bases"></select></label>
+                  <label><span>审核策略</span><select id="agent-definition-review-policies"></select></label>
+                </div>
+                <pre id="agent-definition-modal-result" class="result hidden"></pre>
+                <div class="modal-actions">
+                  <button id="agent-definition-cancel" type="button" class="ghost">取消</button>
+                  <button id="agent-definition-save" type="submit">保存</button>
+                </div>
+              </form>
+            </section>
+          </div>
+
           <section class="page-view" data-page="team-templates">
             <div class="page-head">
               <div>
-                <h2>团队模板</h2>
+                <h2>Legacy 团队模板</h2>
               </div>
             </div>
             <div class="page-grid team-studio-grid">
@@ -493,10 +924,150 @@
             </div>
           </section>
 
+          <section class="page-view" data-page="team-definitions">
+            <div class="page-head">
+              <div>
+                <h2>团队管理</h2>
+              </div>
+            </div>
+            <div class="page-grid provider-page-grid">
+              <section class="panel panel-wide">
+                <div class="provider-toolbar static-memory-toolbar">
+                  <div class="static-memory-toolbar-actions">
+                    <button id="team-definition-open-create" type="button">新增</button>
+                  </div>
+                </div>
+                <div class="provider-list-head team-management-list-head">
+                  <span>团队名称</span>
+                  <span>说明</span>
+                  <span>配置概览</span>
+                  <span>操作</span>
+                </div>
+                <div id="team-definition-list" class="provider-list"></div>
+                <pre id="team-definition-result" class="result hidden"></pre>
+              </section>
+            </div>
+          </section>
+
+          <div id="team-definition-modal" class="modal-shell hidden">
+            <div class="modal-backdrop" data-team-definition-modal-close></div>
+            <section class="modal-card resource-modal-card team-definition-modal-card">
+              <div class="modal-head">
+                <h3 id="team-definition-modal-title">新增团队管理项</h3>
+              </div>
+              <form id="team-definition-form" class="form resource-editor-form">
+                <div class="field-note">主路径：选择已组合好的 Agent，然后配置层级、入口/完成权限、共享资源和边审批策略。</div>
+                <div class="form-grid two">
+                  <label><span>Key</span><input id="team-definition-key" placeholder="delivery_team_v2" /></label>
+                  <label><span>名称</span><input id="team-definition-name" placeholder="软件交付团队定义" /></label>
+                  <label><span>工作区</span><input id="team-definition-workspace" value="local-workspace" /></label>
+                  <label><span>项目</span><input id="team-definition-project" value="default-project" /></label>
+                </div>
+                <label><span>说明</span><textarea id="team-definition-description" rows="3" placeholder="简短说明"></textarea></label>
+
+                <div class="member-toolbar">
+                  <span class="section-mini-title">团队成员</span>
+                  <div class="member-toolbar-actions">
+                    <button id="team-definition-member-add" type="button" class="ghost">添加成员</button>
+                  </div>
+                </div>
+                <div class="field-note">选择已组合好的 Agent，然后配置层级、入口/完成权限。相邻层级可自动互相对话。</div>
+                <div id="team-definition-member-list" class="member-list"></div>
+
+                <div class="retrieval-block">
+                  <div class="retrieval-block-head">
+                    <h4>任务入口策略</h4>
+                    <p class="field-note">决定人下达任务后，优先把任务送到哪个 Agent。</p>
+                  </div>
+                  <div class="form-grid two">
+                    <label>
+                      <span>模式</span>
+                      <select id="team-definition-entry-mode">
+                        <option value="auto">系统自动选择</option>
+                        <option value="specific_agent">指定入口 Agent</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>入口 Agent</span>
+                      <select id="team-definition-entry-agent"></select>
+                    </label>
+                  </div>
+                </div>
+
+                <div class="retrieval-block">
+                  <div class="retrieval-block-head">
+                    <h4>共享资源绑定</h4>
+                    <p class="field-note">团队所有成员共享可见的知识库和角色管理项。</p>
+                  </div>
+                  <div class="form-grid two">
+                    <label><span>共享知识库</span><select id="team-definition-shared-kbs" multiple size="6"></select></label>
+                    <label><span>角色管理</span><select id="team-definition-shared-static-memories" multiple size="6"></select></label>
+                  </div>
+                </div>
+
+                <div class="retrieval-block">
+                  <div class="retrieval-block-head">
+                    <h4>审核策略绑定</h4>
+                    <p class="field-note">把已有 Review Policy 作为团队默认审核策略显式绑定，不再手写 refs。</p>
+                  </div>
+                  <label><span>Review Policies</span><select id="team-definition-review-policies" multiple size="6"></select></label>
+                </div>
+
+                <div class="retrieval-block">
+                  <div class="retrieval-block-head">
+                    <h4>终止策略</h4>
+                    <p class="field-note">决定团队在哪些 Agent 产出上行结果后可视为完成。</p>
+                  </div>
+                  <div class="form-grid two">
+                    <label>
+                      <span>模式</span>
+                      <select id="team-definition-termination-mode">
+                        <option value="member_finishers">沿用成员完成标记</option>
+                        <option value="entry_agent">入口 Agent 完成即终止</option>
+                        <option value="specific_agents">指定完成 Agent</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>完成 Agent</span>
+                      <select id="team-definition-termination-agents" multiple size="6"></select>
+                    </label>
+                  </div>
+                </div>
+
+                <div class="retrieval-block">
+                  <div class="retrieval-block-head">
+                    <h4>Team Edge 审批策略</h4>
+                    <p class="field-note">可视化配置“某两个 Agent 之间的消息必须人工前审”。</p>
+                  </div>
+                  <div class="member-toolbar">
+                    <span class="section-mini-title">Review Overrides</span>
+                    <div class="member-toolbar-actions">
+                      <button id="team-definition-review-override-add" type="button" class="ghost">添加策略</button>
+                    </div>
+                  </div>
+                  <div id="team-definition-review-override-list" class="member-list"></div>
+                  <textarea id="team-definition-review-overrides" class="hidden" aria-hidden="true"></textarea>
+                </div>
+
+                <details class="advanced-editor">
+                  <summary>内部调试 JSON</summary>
+                  <div class="field-note">`members` 与 `review_policy_refs` 已切到上方显式可视化编辑；这里只保留隐藏兼容状态字段。</div>
+                </details>
+                <textarea id="team-definition-members" class="hidden" aria-hidden="true"></textarea>
+
+                <pre id="team-definition-modal-result" class="result hidden"></pre>
+                <div class="modal-actions">
+                  <button id="team-definition-cancel" type="button" class="ghost">取消</button>
+                  <button id="team-definition-save" type="submit">保存</button>
+                </div>
+              </form>
+            </section>
+          </div>
+
           <section class="page-view" data-page="builds">
             <div class="page-head">
               <div>
-                <h2>构建发布</h2>
+                <h2>Legacy 构建发布</h2>
               </div>
             </div>
             <div class="page-grid runtime-grid">
@@ -538,8 +1109,10 @@
                   <h3>启动 Run</h3>
                 </div>
                 <form id="task-form" class="form">
-                  <label><span>Build</span><select id="task-build"></select></label>
-                  <label><span>内部蓝图</span><select id="task-blueprint"></select></label>
+                  <label><span>TeamDefinition</span><select id="task-team-definition"></select></label>
+                  <div class="field-note">主路径直接从 TeamDefinition 启动任务。Build / 蓝图仅保留为兼容旧链路。</div>
+                  <label><span>兼容 Build</span><select id="task-build"></select></label>
+                  <label><span>兼容内部蓝图</span><select id="task-blueprint"></select></label>
                   <label><span>任务标题</span><input id="task-title" placeholder="输入标题" /></label>
                   <label>
                     <span>审批模式</span>
@@ -587,7 +1160,7 @@
           <section class="page-view" data-page="blueprints">
             <div class="page-head">
               <div>
-                <h2>内部蓝图</h2>
+                <h2>兼容内部蓝图</h2>
               </div>
             </div>
             <div class="page-grid runtime-grid">

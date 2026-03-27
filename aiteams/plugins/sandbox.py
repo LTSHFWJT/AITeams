@@ -23,6 +23,8 @@ class PluginSandbox:
     plugin_id: str
     manifest: dict[str, Any]
     root_path: Path
+    runtime_config: dict[str, Any] = field(default_factory=dict)
+    runtime_secret: dict[str, Any] = field(default_factory=dict)
     stdout_timeout: float = 10.0
     process: subprocess.Popen[str] | None = None
     started_at: str | None = None
@@ -41,8 +43,11 @@ class PluginSandbox:
                 return
             env = {
                 "PYTHONIOENCODING": "utf-8",
+                "PYTHONDONTWRITEBYTECODE": "1",
                 "AITEAMS_PLUGIN_ID": self.plugin_id,
                 "AITEAMS_PLUGIN_ROOT": str(self.root_path),
+                "AITEAMS_PLUGIN_RUNTIME_CONFIG": json_dumps(self.runtime_config or {}),
+                "AITEAMS_PLUGIN_RUNTIME_SECRET": json_dumps(self.runtime_secret or {}),
             }
             project_root = str(Path(__file__).resolve().parents[2])
             existing_pythonpath = os.environ.get("PYTHONPATH", "")

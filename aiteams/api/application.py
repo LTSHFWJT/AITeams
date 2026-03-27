@@ -16,10 +16,11 @@ from aiteams.agent_center import AgentCenterService
 from aiteams.domain.models import BlueprintSpec
 from aiteams.domain.templates import built_in_blueprint_templates
 from aiteams.plugins import PluginManager
+from aiteams.role_specs import normalize_role_spec
 from aiteams.runtime.compiler import BlueprintCompiler
 from aiteams.runtime.engine import RuntimeEngine
 from aiteams.storage.metadata import MetadataStore
-from aiteams.utils import pretty_json, trim_text
+from aiteams.utils import make_id, pretty_json, slugify, trim_text, utcnow_iso
 from aiteams.workspace.manager import WorkspaceManager
 
 
@@ -87,17 +88,27 @@ class WebApplication:
             if method == "GET" and path == "/api/health":
                 return self._json(200, {"status": "ok"})
             if method == "GET" and path == "/api/control-plane":
+                agent_memory = getattr(self.container.runtime.agent_kernel, "memory", None)
+                memory_storage = agent_memory.storage_info() if hasattr(agent_memory, "storage_info") else {}
+                runtime_storage = self.container.runtime.storage_info() if hasattr(self.container.runtime, "storage_info") else {}
                 return self._json(
                     200,
                     {
                         "summary": self.container.store.dashboard_summary(),
-                        "storage": self.container.store.storage_info(),
+                        "storage": {
+                            **self.container.store.storage_info(),
+                            **runtime_storage,
+                            "memory_stack": memory_storage,
+                            "graph_runtime": "langgraph-official",
+                        },
                         "provider_types": self.container.agent_center.provider_types(),
                         "recent_builds": self.container.store.list_blueprint_builds()[:10],
                         "recent_runs": self.container.store.list_runs()[:10],
                         "pending_approvals": self.container.store.list_approvals(status="pending")[:10],
                     },
                 )
+            if method == "GET" and path == "/api/control-plane/requirements-report":
+                return self._json(200, self._requirements_report())
             if method == "GET" and path == "/api/workspaces":
                 return self._json(200, {"items": self.container.store.list_workspaces()})
             if method == "POST" and path == "/api/workspaces":
@@ -126,6 +137,8 @@ class WebApplication:
                 return self._json(200, project)
             if method == "GET" and path == "/api/agent-center/provider-types":
                 return self._json(200, {"items": self.container.agent_center.provider_types()})
+            if method == "GET" and path == "/api/agent-center/ui-metadata":
+                return self._json(200, self.container.agent_center.ui_metadata())
             if method == "GET" and path == "/api/agent-center/providers":
                 limit = self._optional_int(query.get("limit"))
                 offset = self._optional_int(query.get("offset")) or 0
@@ -148,6 +161,23 @@ class WebApplication:
             if method == "POST" and path == "/api/agent-center/providers/test-model":
                 payload = self._parse_json(body)
                 return self._json(200, self.container.agent_center.test_provider_model(payload))
+            if method == "GET" and path == "/api/agent-center/retrieval-settings":
+                return self._json(200, self.container.agent_center.get_retrieval_settings())
+            if method == "PUT" and path == "/api/agent-center/retrieval-settings":
+                payload = self._parse_json(body)
+                saved = self.container.agent_center.save_retrieval_settings(payload)
+                try:
+                    applied = self.container.runtime.agent_kernel.memory.configure_retrieval(saved.get("runtime"))
+                except Exception as exc:
+                    raise AppError(400, f"Retrieval settings saved but could not be applied: {exc}") from exc
+                return self._json(
+                    200,
+                    {
+                        "settings": saved.get("settings"),
+                        "updated_at": saved.get("updated_at"),
+                        "applied": applied,
+                    },
+                )
             if path.startswith("/api/agent-center/providers/"):
                 provider_id = path.rsplit("/", 1)[-1]
                 provider = self.container.agent_center.normalize_provider_profile(self.container.store.get_provider_profile(provider_id, include_secret=True))
@@ -182,6 +212,8 @@ class WebApplication:
                         "limit": page["limit"],
                     },
                 )
+            if method == "GET" and path == "/api/agent-center/plugins/builtins":
+                return self._json(200, {"items": self.container.plugins.builtin_catalog()})
             if method == "POST" and path == "/api/agent-center/plugins/validate-package":
                 payload = self._parse_json(body)
                 self._require_fields(payload, "path")
@@ -231,7 +263,7 @@ class WebApplication:
                 return self._json(200, self.container.store.list_agent_templates_page(limit=limit, offset=offset))
             if method == "POST" and path == "/api/agent-center/agent-templates":
                 payload = self._parse_json(body)
-                template = self._save_agent_template(payload, template_id=self._optional_str(payload.get("id")))
+                template = self._save_agent_template(payload, template_id=None)
                 return self._json(200, template)
             if path.startswith("/api/agent-center/agent-templates/"):
                 template_id = path.rsplit("/", 1)[-1]
@@ -249,6 +281,227 @@ class WebApplication:
                     if deleted is None:
                         raise AppError(404, "Agent template does not exist.")
                     return self._json(200, {"deleted": True, "id": template_id})
+            if method == "GET" and path == "/api/agent-center/skills":
+                return self._json(200, {"items": self.container.store.list_skills()})
+            if method == "POST" and path == "/api/agent-center/skills":
+                payload = self._parse_json(body)
+                return self._json(200, self._save_skill(payload, skill_id=self._optional_str(payload.get("id"))))
+            if path.startswith("/api/agent-center/skills/"):
+                skill_id = path.rsplit("/", 1)[-1]
+                skill = self.container.store.get_skill(skill_id)
+                if skill is None:
+                    raise AppError(404, "Skill does not exist.")
+                if method == "GET":
+                    return self._json(200, skill)
+                if method == "PUT":
+                    payload = self._parse_json(body)
+                    return self._json(200, self._save_skill(payload, skill_id=skill_id))
+                if method == "DELETE":
+                    deleted = self.container.store.delete_skill(skill_id)
+                    if deleted is None:
+                        raise AppError(404, "Skill does not exist.")
+                    return self._json(200, {"deleted": True, "id": skill_id})
+            if method == "GET" and path == "/api/agent-center/static-memories":
+                limit = self._optional_int(query.get("limit"))
+                offset = self._optional_int(query.get("offset")) or 0
+                page = self.container.store.list_static_memories_page(limit=limit, offset=offset)
+                return self._json(
+                    200,
+                    {
+                        "items": [self._static_memory_resource(item) for item in page["items"]],
+                        "total": page["total"],
+                        "offset": page["offset"],
+                        "limit": page["limit"],
+                    },
+                )
+            if method == "POST" and path == "/api/agent-center/static-memories":
+                payload = self._parse_json(body)
+                return self._json(200, self._save_static_memory(payload, static_memory_id=self._optional_str(payload.get("id"))))
+            if path.startswith("/api/agent-center/static-memories/"):
+                static_memory_id = path.rsplit("/", 1)[-1]
+                static_memory = self.container.store.get_static_memory(static_memory_id)
+                if static_memory is None:
+                    raise AppError(404, "Static memory does not exist.")
+                if method == "GET":
+                    return self._json(200, self._static_memory_resource(static_memory))
+                if method == "PUT":
+                    payload = self._parse_json(body)
+                    return self._json(200, self._save_static_memory(payload, static_memory_id=static_memory_id))
+                if method == "DELETE":
+                    deleted = self.container.store.delete_static_memory(static_memory_id)
+                    if deleted is None:
+                        raise AppError(404, "Static memory does not exist.")
+                    return self._json(200, {"deleted": True, "id": static_memory_id})
+            if method == "GET" and path == "/api/agent-center/memory-profiles":
+                return self._json(200, {"items": self.container.store.list_memory_profiles()})
+            if method == "POST" and path == "/api/agent-center/memory-profiles":
+                payload = self._parse_json(body)
+                return self._json(200, self._save_memory_profile(payload, memory_profile_id=self._optional_str(payload.get("id"))))
+            if path.startswith("/api/agent-center/memory-profiles/"):
+                memory_profile_id = path.rsplit("/", 1)[-1]
+                memory_profile = self.container.store.get_memory_profile(memory_profile_id)
+                if memory_profile is None:
+                    raise AppError(404, "Memory profile does not exist.")
+                if method == "GET":
+                    return self._json(200, memory_profile)
+                if method == "PUT":
+                    payload = self._parse_json(body)
+                    return self._json(200, self._save_memory_profile(payload, memory_profile_id=memory_profile_id))
+                if method == "DELETE":
+                    deleted = self.container.store.delete_memory_profile(memory_profile_id)
+                    if deleted is None:
+                        raise AppError(404, "Memory profile does not exist.")
+                    return self._json(200, {"deleted": True, "id": memory_profile_id})
+            if method == "GET" and path == "/api/agent-center/knowledge-bases":
+                return self._json(200, {"items": self.container.store.list_knowledge_bases()})
+            if method == "POST" and path == "/api/agent-center/knowledge-bases":
+                payload = self._parse_json(body)
+                return self._json(200, self._save_knowledge_base(payload, knowledge_base_id=self._optional_str(payload.get("id"))))
+            if path.startswith("/api/agent-center/knowledge-bases/"):
+                knowledge_base_id = path.rsplit("/", 1)[-1]
+                knowledge_base = self.container.store.get_knowledge_base(knowledge_base_id)
+                if knowledge_base is None:
+                    raise AppError(404, "Knowledge base does not exist.")
+                if method == "GET":
+                    return self._json(200, knowledge_base)
+                if method == "PUT":
+                    payload = self._parse_json(body)
+                    return self._json(200, self._save_knowledge_base(payload, knowledge_base_id=knowledge_base_id))
+                if method == "DELETE":
+                    deleted = self.container.store.delete_knowledge_base(knowledge_base_id)
+                    if deleted is None:
+                        raise AppError(404, "Knowledge base does not exist.")
+                    return self._json(200, {"deleted": True, "id": knowledge_base_id})
+            if method == "GET" and path == "/api/agent-center/knowledge-documents":
+                return self._json(
+                    200,
+                    {
+                        "items": self.container.store.list_knowledge_documents(
+                            knowledge_base_id=self._optional_str(query.get("knowledge_base_id"))
+                        )
+                    },
+                )
+            if method == "POST" and path == "/api/agent-center/knowledge-documents":
+                payload = self._parse_json(body)
+                return self._json(200, self._save_knowledge_document(payload, knowledge_document_id=self._optional_str(payload.get("id"))))
+            if path.startswith("/api/agent-center/knowledge-documents/"):
+                knowledge_document_id = path.rsplit("/", 1)[-1]
+                knowledge_document = self.container.store.get_knowledge_document(knowledge_document_id)
+                if knowledge_document is None:
+                    raise AppError(404, "Knowledge document does not exist.")
+                if method == "GET":
+                    return self._json(200, knowledge_document)
+                if method == "PUT":
+                    payload = self._parse_json(body)
+                    return self._json(200, self._save_knowledge_document(payload, knowledge_document_id=knowledge_document_id))
+                if method == "DELETE":
+                    deleted = self.container.store.delete_knowledge_document(knowledge_document_id)
+                    if deleted is None:
+                        raise AppError(404, "Knowledge document does not exist.")
+                    return self._json(200, {"deleted": True, "id": knowledge_document_id})
+            if method == "GET" and path == "/api/agent-center/review-policies":
+                return self._json(200, {"items": self.container.store.list_review_policies()})
+            if method == "POST" and path == "/api/agent-center/review-policies":
+                payload = self._parse_json(body)
+                return self._json(200, self._save_review_policy(payload, review_policy_id=self._optional_str(payload.get("id"))))
+            if path.startswith("/api/agent-center/review-policies/"):
+                review_policy_id = path.rsplit("/", 1)[-1]
+                review_policy = self.container.store.get_review_policy(review_policy_id)
+                if review_policy is None:
+                    raise AppError(404, "Review policy does not exist.")
+                if method == "GET":
+                    return self._json(200, review_policy)
+                if method == "PUT":
+                    payload = self._parse_json(body)
+                    return self._json(200, self._save_review_policy(payload, review_policy_id=review_policy_id))
+                if method == "DELETE":
+                    deleted = self.container.store.delete_review_policy(review_policy_id)
+                    if deleted is None:
+                        raise AppError(404, "Review policy does not exist.")
+                    return self._json(200, {"deleted": True, "id": review_policy_id})
+            if method == "GET" and path == "/api/agent-center/agent-definitions":
+                limit = self._optional_int(query.get("limit"))
+                offset = self._optional_int(query.get("offset")) or 0
+                return self._json(200, self.container.store.list_agent_definitions_page(limit=limit, offset=offset))
+            if method == "POST" and path == "/api/agent-center/agent-definitions":
+                payload = self._parse_json(body)
+                return self._json(200, self._save_agent_definition(payload, definition_id=None))
+            if path.startswith("/api/agent-center/agent-definitions/"):
+                definition_id = path.rsplit("/", 1)[-1]
+                definition = self.container.store.get_agent_definition(definition_id)
+                if definition is None:
+                    raise AppError(404, "Agent definition does not exist.")
+                if method == "GET":
+                    return self._json(200, definition)
+                if method == "PUT":
+                    payload = self._parse_json(body)
+                    return self._json(200, self._save_agent_definition(payload, definition_id=definition_id))
+                if method == "DELETE":
+                    deleted = self.container.store.delete_agent_definition(definition_id)
+                    if deleted is None:
+                        raise AppError(404, "Agent definition does not exist.")
+                    return self._json(200, {"deleted": True, "id": definition_id})
+            if method == "GET" and path == "/api/agent-center/team-definitions":
+                return self._json(200, {"items": self.container.store.list_team_definitions()})
+            if method == "POST" and path == "/api/agent-center/team-definitions":
+                payload = self._parse_json(body)
+                return self._json(200, self._save_team_definition(payload, definition_id=self._optional_str(payload.get("id"))))
+            if path.startswith("/api/agent-center/team-definitions/") and path.endswith("/compile") and method == "POST":
+                definition_id = path.split("/")[4]
+                return self._json(200, self.container.agent_center.compile_team_definition(definition_id))
+            if path.startswith("/api/agent-center/team-definitions/") and path.endswith("/build") and method == "POST":
+                definition_id = path.split("/")[4]
+                payload = self._parse_json(body)
+                build = self.container.agent_center.build_team_definition(definition_id, blueprint_name=self._optional_str(payload.get("name")))
+                blueprint = build.get("blueprint")
+                if blueprint:
+                    self.container.workspace.write_blueprint(
+                        workspace_id=str(blueprint["workspace_id"]),
+                        project_id=str(blueprint["project_id"]),
+                        blueprint_id=str(blueprint["id"]),
+                        raw_text=str(blueprint.get("raw_text") or pretty_json(blueprint.get("spec_json") or {})),
+                        raw_format=str(blueprint.get("raw_format") or "json"),
+                    )
+                return self._json(200, build)
+            if path.startswith("/api/agent-center/team-definitions/") and path.endswith("/tasks") and method == "POST":
+                definition_id = path.split("/")[4]
+                payload = self._parse_json(body)
+                self._require_fields(payload, "prompt")
+                build = self.container.agent_center.build_team_definition(definition_id, blueprint_name=self._optional_str(payload.get("name")))
+                blueprint = dict(build.get("blueprint") or {})
+                bundle = asyncio.run(
+                    self.container.runtime.start_task(
+                        blueprint=blueprint,
+                        title=self._optional_str(payload.get("title")),
+                        prompt=str(payload["prompt"]),
+                        inputs=dict(payload.get("inputs") or {}),
+                        approval_mode=str(payload.get("approval_mode") or "auto"),
+                    )
+                )
+                if not bundle.get("task_thread"):
+                    thread_metadata = {"team_definition_id": definition_id, "adjacency": build.get("adjacency") or {}}
+                    if build.get("hierarchy"):
+                        thread_metadata["hierarchy"] = build.get("hierarchy")
+                    thread = self.container.store.create_task_thread(
+                        team_definition_id=definition_id,
+                        run_id=str(bundle["run"]["id"]),
+                        workspace_id=str(bundle["run"]["workspace_id"]),
+                        project_id=str(bundle["run"]["project_id"]),
+                        title=self._optional_str(payload.get("title")) or str(payload["prompt"])[:80],
+                        metadata=thread_metadata,
+                    )
+                    bundle["task_thread"] = thread
+                return self._json(200, bundle)
+            if path.startswith("/api/agent-center/team-definitions/"):
+                definition_id = path.rsplit("/", 1)[-1]
+                definition = self.container.store.get_team_definition(definition_id)
+                if definition is None:
+                    raise AppError(404, "Team definition does not exist.")
+                if method == "GET":
+                    return self._json(200, definition)
+                if method == "PUT":
+                    payload = self._parse_json(body)
+                    return self._json(200, self._save_team_definition(payload, definition_id=definition_id))
             if method == "GET" and path == "/api/agent-center/team-templates":
                 return self._json(200, {"items": self.container.store.list_team_templates()})
             if method == "POST" and path == "/api/agent-center/team-templates/graph/normalize":
@@ -437,9 +690,45 @@ class WebApplication:
                 run_id = path.split("/")[3]
                 bundle = asyncio.run(self.container.runtime.resume_run(run_id))
                 return self._json(200, bundle)
+            if path.startswith("/api/runs/") and path.endswith("/messages") and method == "POST":
+                run_id = path.split("/")[3]
+                payload = self._parse_json(body)
+                self._require_fields(payload, "target_agent_id", "body")
+                bundle = asyncio.run(
+                    self.container.runtime.inject_human_message(
+                        run_id=run_id,
+                        target_agent_id=str(payload["target_agent_id"]),
+                        body=str(payload["body"]),
+                        message_type=str(payload.get("message_type") or "dialogue"),
+                        phase=self._optional_str(payload.get("phase")),
+                        metadata=dict(payload.get("metadata") or {}),
+                        auto_resume=bool(payload.get("auto_resume", True)),
+                    )
+                )
+                return self._json(200, bundle)
             if path.startswith("/api/runs/") and path.endswith("/events") and method == "GET":
                 run_id = path.split("/")[3]
                 return self._json(200, {"items": self.container.store.list_events(run_id)})
+            if method == "GET" and path == "/api/task-threads":
+                return self._json(
+                    200,
+                    {
+                        "items": self.container.store.list_task_threads(
+                            team_definition_id=self._optional_str(query.get("team_definition_id")),
+                            run_id=self._optional_str(query.get("run_id")),
+                        )
+                    },
+                )
+            if method == "GET" and path == "/api/message-events":
+                return self._json(
+                    200,
+                    {
+                        "items": self.container.store.list_message_events(
+                            thread_id=self._optional_str(query.get("thread_id")),
+                            run_id=self._optional_str(query.get("run_id")),
+                        )
+                    },
+                )
             if path.startswith("/api/runs/") and method == "GET":
                 run_id = path.rsplit("/", 1)[-1]
                 bundle = self.container.store.get_run_bundle(run_id)
@@ -477,16 +766,25 @@ class WebApplication:
                 project_id = self._optional_str(query.get("project_id"))
                 run_id = self._optional_str(query.get("run_id"))
                 agent_id = self._optional_str(query.get("agent_id"))
+                team_id = self._optional_str(query.get("team_id"))
                 if not workspace_id or not project_id or not run_id or not agent_id:
                     raise AppError(400, "workspace_id, project_id, run_id and agent_id are required.")
                 from aiteams.memory.scope import MemoryScopes
 
-                scope_builder = MemoryScopes(workspace_id=workspace_id, project_id=project_id, run_id=run_id, agent_id=agent_id)
+                scope_builder = MemoryScopes(
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    run_id=run_id,
+                    agent_id=agent_id,
+                    team_id=team_id,
+                )
                 scope_mode = str(query.get("scope") or "combined").strip().lower()
                 if scope_mode == "project_shared":
                     scopes = [scope_builder.project_shared()]
                 elif scope_mode == "agent_private":
                     scopes = [scope_builder.agent_private()]
+                elif scope_mode == "team_shared":
+                    scopes = [scope_builder.team_shared()]
                 elif scope_mode == "run_retrospective":
                     scopes = [scope_builder.run_retrospective()]
                 else:
@@ -582,18 +880,40 @@ class WebApplication:
 
     def _save_plugin(self, payload: dict[str, Any], *, plugin_id: str | None) -> dict[str, Any]:
         self._require_fields(payload, "key", "name")
+        existing = self.container.store.get_plugin(plugin_id, include_secret=True) if plugin_id else None
         install_path = self._optional_str(payload.get("install_path"))
-        manifest = dict(payload.get("manifest") or {})
+        incoming_manifest = dict(payload.get("manifest") or {})
+        manifest = dict((existing or {}).get("manifest_json") or {})
+        manifest.update(incoming_manifest)
         if install_path:
             try:
                 package = self.container.plugins.validate_package(install_path)
                 package_manifest = dict(package.get("manifest") or {})
-                merged_manifest = dict(package_manifest)
-                merged_manifest.update(manifest)
-                manifest = merged_manifest
+                manifest = dict(package_manifest)
+                for field in ("workbench_key", "tools", "permissions", "description"):
+                    if field in incoming_manifest:
+                        manifest[field] = incoming_manifest[field]
             except Exception:
                 pass
-        return self.container.store.save_plugin(
+        config = payload.get("config")
+        if config is None:
+            config = dict((existing or {}).get("config_json") or {})
+        else:
+            config = dict(config or {})
+
+        secret_payload = payload.get("secret")
+        secret: dict[str, Any] | None = None
+        if secret_payload is not None:
+            secret = dict((existing or {}).get("secret_json") or {})
+            for field, value in dict(secret_payload or {}).items():
+                field_name = str(field).strip()
+                if not field_name:
+                    continue
+                if value in (None, ""):
+                    continue
+                secret[field_name] = value
+
+        saved = self.container.store.save_plugin(
             plugin_id=plugin_id,
             key=str(payload["key"]),
             name=str(payload["name"]),
@@ -601,8 +921,16 @@ class WebApplication:
             plugin_type=str(payload.get("plugin_type") or "toolset"),
             description=str(payload.get("description") or ""),
             manifest=manifest,
+            config=config,
             install_path=install_path,
+            secret=secret,
         )
+        if saved.get("id") and self.container.plugins.snapshot(str(saved["id"])).get("running"):
+            self.container.plugins.reload_plugin(str(saved["id"]))
+            refreshed = self.container.store.get_plugin(str(saved["id"]))
+            if refreshed is not None:
+                saved = refreshed
+        return saved
 
     def _save_agent_template(self, payload: dict[str, Any], *, template_id: str | None) -> dict[str, Any]:
         self._require_fields(payload, "name", "role")
@@ -611,6 +939,8 @@ class WebApplication:
         incoming_spec = dict(payload.get("spec") or {})
         spec = dict(existing_spec)
         spec.update(incoming_spec)
+        plugin_refs = list(spec.get("plugin_refs") or spec.get("tool_plugin_refs") or [])
+        spec["plugin_refs"] = self.container.agent_center.ensure_default_plugin_refs(plugin_refs)
         metadata = dict(existing_spec.get("metadata") or {})
         metadata.update(dict(incoming_spec.get("metadata") or {}))
         if metadata:
@@ -636,6 +966,130 @@ class WebApplication:
             description=str(payload.get("description") or ""),
             version=str(payload.get("version") or "v1"),
             spec=validation["normalized_spec"],
+        )
+
+    def _save_skill(self, payload: dict[str, Any], *, skill_id: str | None) -> dict[str, Any]:
+        self._require_fields(payload, "key", "name")
+        return self.container.store.save_skill(
+            skill_id=skill_id,
+            key=str(payload["key"]),
+            name=str(payload["name"]),
+            description=str(payload.get("description") or ""),
+            version=str(payload.get("version") or "v1"),
+            spec=dict(payload.get("spec") or {}),
+        )
+
+    def _save_static_memory(self, payload: dict[str, Any], *, static_memory_id: str | None) -> dict[str, Any]:
+        self._require_fields(payload, "name")
+        existing = self.container.store.get_static_memory(static_memory_id) if static_memory_id else None
+        generated_key = f"role_spec.{slugify(str(payload.get('name') or 'role_spec'), fallback='role-spec')}.{make_id('rs').split('_')[-1]}"
+        saved = self.container.store.save_static_memory(
+            static_memory_id=static_memory_id,
+            key=str(payload.get("key") or (existing or {}).get("key") or generated_key),
+            name=str(payload["name"]),
+            description=str(payload.get("description") or ""),
+            version=str(payload.get("version") or "v1"),
+            spec=normalize_role_spec(dict(payload.get("spec") or {})),
+        )
+        return self._static_memory_resource(saved)
+
+    def _static_memory_resource(self, record: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(record)
+        payload["spec_json"] = normalize_role_spec(dict(record.get("spec_json") or {}))
+        return payload
+
+    def _save_memory_profile(self, payload: dict[str, Any], *, memory_profile_id: str | None) -> dict[str, Any]:
+        self._require_fields(payload, "key", "name")
+        return self.container.store.save_memory_profile(
+            memory_profile_id=memory_profile_id,
+            key=str(payload["key"]),
+            name=str(payload["name"]),
+            description=str(payload.get("description") or ""),
+            version=str(payload.get("version") or "v1"),
+            spec=dict(payload.get("spec") or {}),
+        )
+
+    def _save_knowledge_base(self, payload: dict[str, Any], *, knowledge_base_id: str | None) -> dict[str, Any]:
+        self._require_fields(payload, "key", "name")
+        return self.container.store.save_knowledge_base(
+            knowledge_base_id=knowledge_base_id,
+            key=str(payload["key"]),
+            name=str(payload["name"]),
+            description=str(payload.get("description") or ""),
+            config=dict(payload.get("config") or {}),
+        )
+
+    def _save_knowledge_document(self, payload: dict[str, Any], *, knowledge_document_id: str | None) -> dict[str, Any]:
+        self._require_fields(payload, "knowledge_base_id", "key", "title")
+        return self.container.store.save_knowledge_document(
+            knowledge_document_id=knowledge_document_id,
+            knowledge_base_id=str(payload["knowledge_base_id"]),
+            key=str(payload["key"]),
+            title=str(payload["title"]),
+            source_path=self._optional_str(payload.get("source_path")),
+            content_text=str(payload.get("content_text") or ""),
+            metadata=dict(payload.get("metadata") or {}),
+        )
+
+    def _save_review_policy(self, payload: dict[str, Any], *, review_policy_id: str | None) -> dict[str, Any]:
+        self._require_fields(payload, "key", "name")
+        return self.container.store.save_review_policy(
+            review_policy_id=review_policy_id,
+            key=str(payload["key"]),
+            name=str(payload["name"]),
+            description=str(payload.get("description") or ""),
+            version=str(payload.get("version") or "v1"),
+            spec=dict(payload.get("spec") or {}),
+        )
+
+    def _save_agent_definition(self, payload: dict[str, Any], *, definition_id: str | None) -> dict[str, Any]:
+        if "key" in payload:
+            raise AppError(400, "Agent definition no longer accepts `key`; use the server-generated `id`.")
+        self._require_fields(payload, "name")
+        existing = self.container.store.get_agent_definition(definition_id) if definition_id else None
+        existing_spec = dict((existing or {}).get("spec_json") or {})
+        spec = dict(existing_spec)
+        spec.update(dict(payload.get("spec") or {}))
+        plugin_refs = [str(item).strip() for item in list(spec.get("tool_plugin_refs") or spec.get("plugin_refs") or []) if str(item).strip()]
+        spec["tool_plugin_refs"] = list(dict.fromkeys(plugin_refs))
+        static_memory_ref = self._optional_str(
+            spec.get("role_spec_ref") or spec.get("role_spec_id") or spec.get("static_memory_ref") or spec.get("static_memory_id")
+        )
+        derived_role = None
+        if static_memory_ref:
+            static_memory = self.container.store.get_static_memory(static_memory_ref) or self.container.store.get_static_memory_by_key(static_memory_ref)
+            if static_memory is not None:
+                derived_role = self._optional_str(static_memory.get("name")) or self._optional_str(static_memory.get("key"))
+        return self.container.store.save_agent_definition(
+            agent_definition_id=definition_id,
+            name=str(payload["name"]),
+            role=self._optional_str(payload.get("role")) or derived_role or self._optional_str((existing or {}).get("role")),
+            description=str(payload.get("description") or ""),
+            version=str(payload.get("version") or "v1"),
+            spec=spec,
+        )
+
+    def _save_team_definition(self, payload: dict[str, Any], *, definition_id: str | None) -> dict[str, Any]:
+        self._require_fields(payload, "key", "name")
+        existing = self.container.store.get_team_definition(definition_id) if definition_id else None
+        spec = dict((existing or {}).get("spec_json") or {})
+        spec.update(dict(payload.get("spec") or {}))
+        has_tree_root = isinstance(spec.get("root"), dict) or isinstance(spec.get("lead"), dict)
+        if has_tree_root:
+            spec.pop("members", None)
+            spec.pop("agents", None)
+        else:
+            members = [dict(item or {}) for item in list(spec.get("members") or spec.get("agents") or [])]
+            if not members:
+                raise AppError(400, "Team definition requires at least one member or a root lead.")
+            spec["members"] = members
+        return self.container.store.save_team_definition(
+            team_definition_id=definition_id,
+            key=str(payload["key"]),
+            name=str(payload["name"]),
+            description=str(payload.get("description") or ""),
+            version=str(payload.get("version") or "v1"),
+            spec=spec,
         )
 
     def _write_build_blueprint(self, build: dict[str, Any]) -> None:
@@ -690,6 +1144,159 @@ class WebApplication:
             "spec": spec,
             "raw_format": "yaml",
             "raw_text": yaml.safe_dump(spec, allow_unicode=True, sort_keys=False),
+        }
+
+    def _requirements_report(self) -> dict[str, Any]:
+        summary = self.container.store.dashboard_summary()
+        agent_memory = getattr(self.container.runtime.agent_kernel, "memory", None)
+        memory_storage = agent_memory.storage_info() if hasattr(agent_memory, "storage_info") else {}
+        runtime_storage = self.container.runtime.storage_info() if hasattr(self.container.runtime, "storage_info") else {}
+        builtin_plugins = self.container.plugins.builtin_catalog()
+        builtin_keys = {str(item.get("key") or "") for item in builtin_plugins}
+        requirement_items = [
+            {
+                "id": "R1",
+                "title": "资源目录与自由组装 Agent/Team",
+                "status": "partial",
+                "coverage": [
+                    "Provider / Plugin / Skill / Static Memory / Knowledge Base / Memory Profile CRUD 已提供控制面接口",
+                    "AgentDefinition / TeamDefinition 编译链路已可用，支持按配置显式绑定插件、技能、知识库、审核策略与记忆画像",
+                    "TeamDefinition 前端已支持显式配置团队成员、层级、入口/终止策略和共享资源绑定",
+                ],
+                "gaps": [
+                    "前端仍缺 Skill / Static Memory / Knowledge Base / Memory Profile / Review Policy / AgentDefinition 的完整显式管理页，目前主要依赖后端 API。",
+                    "builtin plugin 目前以平台内置能力存在，不走安装型插件生命周期；适合内置能力，不适合把所有 builtin 完全等同为可安装插件包。",
+                ],
+                "evidence": {
+                    "resource_counts": {
+                        "providers": summary.get("provider_profile_count"),
+                        "plugins": summary.get("plugin_count"),
+                        "skills": summary.get("skill_count"),
+                        "static_memories": summary.get("static_memory_count"),
+                        "knowledge_bases": summary.get("knowledge_base_count"),
+                        "memory_profiles": summary.get("memory_profile_count"),
+                        "agent_definitions": summary.get("agent_definition_count"),
+                        "team_definitions": summary.get("team_definition_count"),
+                    },
+                    "builtin_plugin_keys": sorted(builtin_keys),
+                },
+            },
+            {
+                "id": "R2",
+                "title": "相邻占用级别点对点对话",
+                "status": "implemented",
+                "coverage": [
+                    "Team 编译时按 occupied-level adjacency 计算相邻关系",
+                    "Dialogue Router 对 team.message.send / team.message.reply 做显式路由校验",
+                    "human 作为特殊 actor 不受相邻级别约束",
+                    "TeamDefinition 前端已支持按成员配置 Agent 和 level，而不是必须手写 members JSON",
+                ],
+                "gaps": [
+                    "Agent 自主决定何时发起点对点消息，目前除 provider-native tool-calling 外，仍保留部分 runtime_plugin_actions / heuristics 兼容路径。",
+                ],
+                "evidence": {
+                    "adjacency_policy": "occupied-level ordered adjacency",
+                    "router_builtins": [key for key in sorted(builtin_keys) if key.startswith("team.message")],
+                },
+            },
+            {
+                "id": "R3",
+                "title": "人审介入任意关键行为",
+                "status": "implemented",
+                "coverage": [
+                    "review_gate 可拦截任务入站、Agent 间消息和最终交付",
+                    "before_tool_call / before_memory_write 已支持审批暂停与恢复",
+                    "human.escalate 可由 Agent 显式请求人工介入",
+                    "team-edge review_overrides 可对指定 Agent 对话链路强制前审",
+                    "人类可通过运行时消息注入 API 直接向任意运行中 Agent 插话",
+                ],
+                "gaps": [
+                    "Review Policy 的风险标签等高级条件仍允许自由文本输入，尚未完全规则化。",
+                ],
+                "evidence": {
+                    "pending_approvals": len(self.container.store.list_approvals(status="pending")),
+                    "human_escalation_builtin": "human.escalate" in builtin_keys,
+                },
+            },
+            {
+                "id": "R4",
+                "title": "配置完成后可直接下达任务",
+                "status": "implemented",
+                "coverage": [
+                    "TeamDefinition 可直接发起 task release，前端任务页已支持直接选择 TeamDefinition",
+                    "Blueprint、Build 仍保留为兼容旧链路的 task release 入口",
+                    "Team event-driven runtime 已接 task_ingress / dispatch_next / finish_or_wait",
+                ],
+                "gaps": [],
+                "evidence": {
+                    "task_release_count": summary.get("task_count"),
+                    "run_count": summary.get("run_count"),
+                },
+            },
+            {
+                "id": "R5",
+                "title": "长短期记忆自动压缩、失效、新增、查询",
+                "status": "partial",
+                "coverage": [
+                    "短期记忆已切到 LangMem summarization / background reflection",
+                    "memory.search / memory.manage / memory.background_reflection 已是可执行 builtin",
+                    "长期记忆支持 TTL、去重合并、搜索、写入和删除",
+                    "平台已支持单独配置 retrieval embedding/rerank 模型，并驱动实际检索链路",
+                ],
+                "gaps": [
+                    "TTL 目前仍依赖应用内后台 sweep，不是独立的外部调度服务。",
+                    "当前 retrieval 仍以单机 SQLite 为主，若要支撑多实例共享检索索引，建议进一步迁移到服务化 store。",
+                ],
+                "evidence": {
+                    "memory_runtime": memory_storage.get("memory_runtime"),
+                    "kv_driver": (memory_storage.get("kv") or {}).get("driver"),
+                    "vector_driver": (memory_storage.get("vector") or {}).get("driver"),
+                },
+            },
+            {
+                "id": "R6",
+                "title": "SQLite 统一存储方案评估",
+                "status": "implemented",
+                "coverage": [
+                    "当前项目已使用 SQLite 做 LangGraph checkpointer",
+                    "长期记忆与 working memory 已统一切到 SQLite",
+                    "deepagents 文件 backend 已直接挂官方 LangGraph SqliteStore",
+                ],
+                "gaps": [
+                    "当前方案更适合单机/单实例控制面；多实例生产建议迁移到 Postgres checkpointer/store。",
+                    "provider embedding / rerank 当前仍在应用层完成，超大记忆规模下需要进一步引入外部向量检索服务。",
+                ],
+                "evidence": {
+                    "checkpoint_driver": runtime_storage.get("checkpoint_driver"),
+                    "checkpoint_runtime": runtime_storage.get("checkpoint_runtime"),
+                    "memory_stack": memory_storage,
+                },
+            },
+        ]
+        counts = {
+            "implemented": sum(1 for item in requirement_items if item["status"] == "implemented"),
+            "partial": sum(1 for item in requirement_items if item["status"] == "partial"),
+            "missing": sum(1 for item in requirement_items if item["status"] == "missing"),
+        }
+        return {
+            "generated_at": utcnow_iso(),
+            "overall": counts | {"total": len(requirement_items)},
+            "requirements": requirement_items,
+            "storage_assessment": {
+                "proposal": {
+                    "primary_store": "sqlite",
+                    "langgraph_checkpointer": "sqlite",
+                    "kv": "sqlite",
+                    "vector": "sqlite",
+                },
+                "current": {
+                    "metadata": self.container.store.storage_info(),
+                    "runtime": runtime_storage,
+                    "memory": memory_storage,
+                },
+                "fit": "official_sqlite_store",
+                "recommendation": "当前链路已统一到 SQLite；如需多实例和更强运维能力，优先切到 Postgres checkpointer/store。",
+            },
         }
 
     def _require_run(self, run_id: str | None) -> dict[str, Any]:

@@ -7,6 +7,8 @@ from aiteams.domain.models import BlueprintSpec
 from aiteams.storage.metadata import MetadataStore
 from aiteams.utils import slugify
 
+DEFAULT_MEMORY_PLUGIN_KEY = "memory_core"
+
 
 class BuildResolver:
     def __init__(self, store: MetadataStore):
@@ -113,7 +115,13 @@ class BuildResolver:
                 },
             }
             locked_templates.append({"id": template["id"], "name": template["name"], "version": template["version"]})
-            locked_providers.append({"id": provider["id"], "name": provider["name"], "provider_type": provider["provider_type"]})
+            locked_providers.append(
+                {
+                    "id": provider["id"],
+                    "name": provider["name"],
+                    "provider_type": provider["provider_type"],
+                }
+            )
 
         blueprint_payload = {
             "name": slugify(name, fallback="team_build"),
@@ -179,6 +187,10 @@ class BuildResolver:
     def _resolve_plugins(self, member: dict[str, Any], template_spec: dict[str, Any]) -> list[dict[str, Any]]:
         references = list(template_spec.get("plugin_refs", []))
         references.extend(list(member.get("plugin_refs", [])))
+        memory_plugin = self.store.get_plugin_by_key(DEFAULT_MEMORY_PLUGIN_KEY)
+        memory_reference = str(memory_plugin["id"]) if memory_plugin is not None else DEFAULT_MEMORY_PLUGIN_KEY
+        if not any(str(item or "").strip() in {DEFAULT_MEMORY_PLUGIN_KEY, memory_reference} for item in references):
+            references.insert(0, memory_reference)
         resolved: list[dict[str, Any]] = []
         seen: set[str] = set()
         for ref in references:

@@ -31,6 +31,19 @@ def default_provider_profiles() -> list[dict[str, Any]]:
 def default_plugins() -> list[dict[str, Any]]:
     return [
         {
+            "key": "memory_core",
+            "name": "记忆核心插件",
+            "version": "v1",
+            "plugin_type": "toolset",
+            "description": "短期上下文、长期记忆检索与记忆治理。",
+            "manifest": {
+                "workbench_key": "memory_core",
+                "tools": ["memory.context", "memory.search", "memory.manage", "memory.background_reflection"],
+                "permissions": ["memory_read", "memory_write"],
+                "description": "Agent 默认挂载的长短期记忆与后台反思工具集。",
+            },
+        },
+        {
             "key": "research_kit",
             "name": "研究工作台",
             "version": "v1",
@@ -231,6 +244,308 @@ def default_agent_templates() -> list[dict[str, Any]]:
                 "metadata": {"department": "synthesis"},
             },
         },
+    ]
+
+
+def default_skills() -> list[dict[str, Any]]:
+    return [
+        {
+            "key": "planning_skill",
+            "name": "任务拆解",
+            "description": "将目标拆解为阶段、依赖和里程碑。",
+            "version": "v1",
+            "spec": {
+                "instructions": [
+                    "优先识别目标、约束、里程碑、依赖和风险。",
+                    "输出结构化阶段计划和验收标准。",
+                ],
+                "recommended_plugins": ["memory_core", "research_kit"],
+            },
+        },
+        {
+            "key": "architecture_skill",
+            "name": "架构设计",
+            "description": "定义模块边界、接口和关键约束。",
+            "version": "v1",
+            "spec": {
+                "instructions": [
+                    "说明模块边界、数据流和接口契约。",
+                    "明确关键技术选型和取舍。",
+                ],
+                "recommended_plugins": ["memory_core", "codebase_kit"],
+            },
+        },
+        {
+            "key": "delivery_skill",
+            "name": "交付执行",
+            "description": "规划实施步骤、验证手段和交付边界。",
+            "version": "v1",
+            "spec": {
+                "instructions": [
+                    "输出实现顺序、文件边界和验证步骤。",
+                    "优先保证可以交付和可以回滚。",
+                ],
+                "recommended_plugins": ["memory_core", "terminal_kit"],
+            },
+        },
+        {
+            "key": "review_skill",
+            "name": "质量审查",
+            "description": "根据验收条件作出通过或返工判断。",
+            "version": "v1",
+            "spec": {
+                "instructions": [
+                    "优先输出发现、风险、是否通过和返工方向。",
+                    "结论要和验收条件对应。",
+                ],
+                "recommended_plugins": ["memory_core", "qa_kit"],
+            },
+        },
+    ]
+
+
+def default_static_memories() -> list[dict[str, Any]]:
+    return [
+        {
+            "key": "static.planner.role",
+            "name": "规划负责人角色规范",
+            "description": "负责任务拆解和上层协调。",
+            "version": "v1",
+            "spec": {
+                "system_prompt": (
+                    "你是规划负责人，负责拆解任务、规划阶段并协调上下级。\n"
+                    "优先明确里程碑、任务拆分和优先级建议。\n"
+                    "遇到范围变更、高风险决策或关键审批点时必须升级。"
+                ),
+            },
+        },
+        {
+            "key": "static.architect.role",
+            "name": "架构负责人角色规范",
+            "description": "负责边界和技术约束。",
+            "version": "v1",
+            "spec": {
+                "system_prompt": (
+                    "你是架构负责人，负责模块边界、接口设计和技术约束。\n"
+                    "聚焦接口、模块划分和技术方案建议。\n"
+                    "遇到跨系统影响、安全风险或性能瓶颈时必须升级。"
+                ),
+            },
+        },
+        {
+            "key": "static.engineer.role",
+            "name": "交付工程师角色规范",
+            "description": "负责实施执行。",
+            "version": "v1",
+            "spec": {
+                "system_prompt": (
+                    "你是交付工程师，负责实现、验证和交付整理。\n"
+                    "你可以决定实现顺序、文件修改和验证步骤。\n"
+                    "遇到需求冲突、关键失败或外部副作用时必须升级。"
+                ),
+            },
+        },
+        {
+            "key": "static.reviewer.role",
+            "name": "审查员角色规范",
+            "description": "负责验收和返工判断。",
+            "version": "v1",
+            "spec": {
+                "system_prompt": (
+                    "你是审查员，负责审查、验收和风险标注。\n"
+                    "你可以判断是否通过以及返工方向。\n"
+                    "遇到高风险发布、关键外部动作或最终交付时必须升级。"
+                ),
+            },
+        },
+    ]
+
+
+def default_memory_profiles() -> list[dict[str, Any]]:
+    return [
+        {
+            "key": "memory.default.collab",
+            "name": "默认协作记忆",
+            "description": "适用于大多数协作型 Agent 的读写记忆策略。",
+            "version": "v1",
+            "spec": {
+                "short_term": {"enabled": True, "summary_trigger_tokens": 1800, "summary_max_tokens": 400},
+                "long_term": {"enabled": True, "namespace_strategy": "agent_team_project", "ttl_days": 30},
+                "background_reflection": {"enabled": True, "debounce_seconds": 30},
+                "read_scopes": ["agent", "team", "project"],
+                "write_scopes": ["agent", "team"],
+            },
+        },
+        {
+            "key": "memory.default.reviewer",
+            "name": "审查共享记忆",
+            "description": "适用于需要沉淀跨任务验收经验的审查 Agent。",
+            "version": "v1",
+            "spec": {
+                "short_term": {"enabled": True, "summary_trigger_tokens": 1600, "summary_max_tokens": 320},
+                "long_term": {"enabled": True, "namespace_strategy": "agent_team_project", "ttl_days": 90},
+                "background_reflection": {"enabled": True, "debounce_seconds": 15},
+                "read_scopes": ["agent", "team", "project"],
+                "write_scopes": ["agent", "team", "project"],
+            },
+        },
+    ]
+
+
+def default_review_policies() -> list[dict[str, Any]]:
+    return [
+        {
+            "key": "review.high_risk_tools",
+            "name": "高风险工具审核",
+            "description": "关键工具调用前需要人工审核。",
+            "version": "v1",
+            "spec": {
+                "triggers": ["before_tool_call", "before_external_side_effect"],
+                "conditions": {
+                    "plugin_keys": ["terminal_kit"],
+                    "risk_tags": ["workspace_write", "terminal_safe"],
+                },
+                "actions": ["approve", "reject", "edit_payload"],
+            },
+        },
+        {
+            "key": "review.cross_level_message",
+            "name": "跨层消息审核",
+            "description": "跨层级升级消息可配置为人工审核。",
+            "version": "v1",
+            "spec": {
+                "triggers": ["before_agent_to_agent_message", "before_escalation_to_upper_level"],
+                "conditions": {"message_types": ["handoff", "escalation"]},
+                "actions": ["approve", "reject", "reroute"],
+            },
+        },
+        {
+            "key": "review.shared_memory_write",
+            "name": "共享记忆写入审核",
+            "description": "团队或项目共享记忆写入前可配置为人工审核。",
+            "version": "v1",
+            "spec": {
+                "triggers": ["before_memory_write"],
+                "conditions": {
+                    "memory_scopes": ["team", "project"],
+                    "risk_tags": ["memory_mutation", "shared_memory"],
+                },
+                "actions": ["approve", "reject", "edit_records"],
+            },
+        },
+    ]
+
+
+DEFAULT_AGENT_DEFINITION_IDS = {
+    "planner": "0196078f-5f00-7000-8000-000000000001",
+    "architect": "0196078f-5f00-7000-8000-000000000002",
+    "engineer": "0196078f-5f00-7000-8000-000000000003",
+    "reviewer": "0196078f-5f00-7000-8000-000000000004",
+}
+
+
+def default_agent_definitions() -> list[dict[str, Any]]:
+    return [
+        {
+            "id": DEFAULT_AGENT_DEFINITION_IDS["planner"],
+            "name": "规划负责人",
+            "role": "planner",
+            "description": "组合规划技能、静态记忆和默认记忆插件的规划 Agent。",
+            "version": "v1",
+            "spec": {
+                "provider_ref": "mock_local",
+                "model": "mock-plan",
+                "goal": "拆解复杂任务并协调上下级。",
+                "instructions": "优先输出计划、依赖、风险和升级节点。",
+                "tool_plugin_refs": ["memory_core", "research_kit"],
+                "skill_refs": ["planning_skill"],
+                "static_memory_ref": "static.planner.role",
+                "knowledge_base_refs": [],
+                "memory_profile_ref": "memory.default.collab",
+                "review_policy_refs": ["review.cross_level_message"],
+            },
+        },
+        {
+            "id": DEFAULT_AGENT_DEFINITION_IDS["architect"],
+            "name": "架构负责人",
+            "role": "architect",
+            "description": "组合架构技能和静态记忆的架构 Agent。",
+            "version": "v1",
+            "spec": {
+                "provider_ref": "mock_local",
+                "model": "mock-arch",
+                "goal": "定义模块边界、接口和关键约束。",
+                "instructions": "聚焦边界、依赖、约束和技术方案。",
+                "tool_plugin_refs": ["memory_core", "codebase_kit"],
+                "skill_refs": ["architecture_skill"],
+                "static_memory_ref": "static.architect.role",
+                "knowledge_base_refs": [],
+                "memory_profile_ref": "memory.default.collab",
+                "review_policy_refs": ["review.cross_level_message"],
+            },
+        },
+        {
+            "id": DEFAULT_AGENT_DEFINITION_IDS["engineer"],
+            "name": "交付工程师",
+            "role": "developer",
+            "description": "组合交付技能、终端工具和记忆治理的工程 Agent。",
+            "version": "v1",
+            "spec": {
+                "provider_ref": "mock_local",
+                "model": "mock-dev",
+                "goal": "执行交付方案并给出验证结果。",
+                "instructions": "输出实施步骤、验证结果和风险。",
+                "tool_plugin_refs": ["memory_core", "terminal_kit"],
+                "skill_refs": ["delivery_skill"],
+                "static_memory_ref": "static.engineer.role",
+                "knowledge_base_refs": [],
+                "memory_profile_ref": "memory.default.collab",
+                "review_policy_refs": ["review.high_risk_tools"],
+            },
+        },
+        {
+            "id": DEFAULT_AGENT_DEFINITION_IDS["reviewer"],
+            "name": "质量审查员",
+            "role": "reviewer",
+            "description": "组合审查技能和静态记忆的审查 Agent。",
+            "version": "v1",
+            "spec": {
+                "provider_ref": "mock_local",
+                "model": "mock-review",
+                "goal": "判断交付是否通过并指出缺口。",
+                "instructions": "以验收条件为准，给出明确通过结论。",
+                "tool_plugin_refs": ["memory_core", "qa_kit"],
+                "skill_refs": ["review_skill"],
+                "static_memory_ref": "static.reviewer.role",
+                "knowledge_base_refs": [],
+                "memory_profile_ref": "memory.default.reviewer",
+                "review_policy_refs": ["review.cross_level_message"],
+            },
+        },
+    ]
+
+
+def default_team_definitions() -> list[dict[str, Any]]:
+    return [
+        {
+            "key": "team.software_delivery.v1",
+            "name": "软件交付团队",
+            "description": "按层级组织的默认多 Agent 交付团队。",
+            "version": "v1",
+            "spec": {
+                "workspace_id": "local-workspace",
+                "project_id": "default-project",
+                "task_entry_agent": "planner",
+                "members": [
+                    {"key": "planner", "name": "规划负责人", "agent_definition_ref": DEFAULT_AGENT_DEFINITION_IDS["planner"], "level": 10, "can_receive_task": True, "can_finish_task": True},
+                    {"key": "architect", "name": "架构负责人", "agent_definition_ref": DEFAULT_AGENT_DEFINITION_IDS["architect"], "level": 8},
+                    {"key": "engineer", "name": "交付工程师", "agent_definition_ref": DEFAULT_AGENT_DEFINITION_IDS["engineer"], "level": 5},
+                    {"key": "reviewer", "name": "质量审查员", "agent_definition_ref": DEFAULT_AGENT_DEFINITION_IDS["reviewer"], "level": 1},
+                ],
+                "communication_policy": {"type": "adjacent_level_all"},
+                "review_policy_refs": ["review.high_risk_tools", "review.cross_level_message"],
+            },
+        }
     ]
 
 
