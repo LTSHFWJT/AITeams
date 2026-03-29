@@ -374,6 +374,7 @@
             </div>
           </section>
 
+          <!--
           <section class="page-view" data-page="skills">
             <div class="page-head">
               <div>
@@ -462,7 +463,7 @@
                 <div id="skill-import-panel" class="skill-import-panel">
                   <input id="skill-import-directory-input" type="file" class="hidden" aria-hidden="true" tabindex="-1" webkitdirectory directory multiple />
                   <div id="skill-import-dropzone" class="skill-import-dropzone" role="button" tabindex="0" aria-label="点击选择 Skill 文件夹，或将文件夹拖到这里">
-                    <div class="skill-import-dropzone-icon" aria-hidden="true">
+                    "><div class="skill-import-dropzone-icon" aria-hidden="true">
                       <svg viewBox="0 0 24 24" fill="none">
                         <path d="M12 15.5V7.25" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
                         <path d="M8.75 10.5 12 7.25l3.25 3.25" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
@@ -512,6 +513,210 @@
                   <h3 id="skill-preview-title">Skill 预览</h3>
                   <p id="skill-preview-subtitle" class="field-note"></p>
                   </div>
+                </div>
+                <button type="button" class="ghost" data-skill-preview-close>关闭</button>
+              </div>
+              <div id="skill-preview-summary" class="skill-preview-summary"></div>
+              <div class="skill-preview-body">
+                <section class="skill-preview-panel">
+                  <div class="skill-preview-panel-head">
+                    <h4>Skill 内容</h4>
+                    <span id="skill-preview-body-meta" class="field-note"></span>
+                  </div>
+                  <div id="skill-preview-content" class="skill-preview-content"></div>
+                </section>
+                <section class="skill-preview-panel skill-file-viewer-panel">
+                  <div class="skill-preview-panel-head">
+                    <h4>文件查看器</h4>
+                    <span id="skill-preview-file-meta" class="field-note"></span>
+                  </div>
+                  <div class="skill-file-viewer-shell">
+                    <aside id="skill-preview-file-list" class="skill-preview-file-list"></aside>
+                    <section class="skill-preview-file-stage">
+                      <div id="skill-preview-file-title" class="skill-preview-file-title"></div>
+                      <div id="skill-preview-file-content" class="skill-preview-file-content"></div>
+                    </section>
+                  </div>
+                </section>
+              </div>
+            </section>
+          </div>
+
+          <div id="skill-group-modal" class="modal-shell hidden">
+            <div class="modal-backdrop" data-skill-group-modal-close></div>
+            <section class="modal-card resource-modal-card skill-group-modal-card">
+              <div class="modal-head">
+                <h3 id="skill-group-modal-title">新增分组</h3>
+              </div>
+              <form id="skill-group-form" class="form resource-editor-form">
+                <div class="form-grid">
+                  <label><span>分组名称</span><input id="skill-group-management-name" placeholder="规划设计" /></label>
+                </div>
+                <label><span>分组简介</span><textarea id="skill-group-management-description" rows="5" placeholder="说明这一组 Skill 负责的能力域"></textarea></label>
+                <div class="tag-multi-select-field">
+                  <span>Skill</span>
+                  <div
+                    class="tag-multi-select"
+                    data-tag-select="skill-group-skills"
+                    data-placeholder="搜索 Skill 后点击选择"
+                    data-empty-selection-label="可多选，也可以不选"
+                    data-empty-list-label="暂无可选 Skill"
+                  ></div>
+                  <select id="skill-group-skills" multiple class="hidden" aria-hidden="true" tabindex="-1"></select>
+                </div>
+                <pre id="skill-group-modal-result" class="result hidden"></pre>
+                <div class="modal-actions">
+                  <button id="skill-group-cancel" type="button" class="ghost">取消</button>
+                  <button id="skill-group-save" type="submit">保存分组</button>
+                </div>
+              </form>
+            </section>
+          </div>
+          -->
+
+          <section class="page-view" data-page="skills">
+            <div class="page-head">
+              <div>
+                <h2>Skill 管理</h2>
+              </div>
+            </div>
+            <div class="page-grid provider-page-grid">
+              <section class="panel panel-wide">
+                <div class="provider-toolbar skill-toolbar">
+                  <form id="skill-search-form" class="skill-toolbar-form">
+                    <label class="skill-search-field">
+                      <span>搜索</span>
+                      <input id="skill-search-input" placeholder="按名称、简介或分组搜索" />
+                    </label>
+                    <button id="skill-search-submit" type="submit" class="ghost">搜索</button>
+                    <button id="skill-search-reset" type="button" class="ghost">重置</button>
+                  </form>
+                  <div class="skill-toolbar-actions">
+                    <div class="skill-view-switch">
+                      <button id="skill-view-skills" type="button" class="skill-view-toggle active">Skill 列表</button>
+                      <button id="skill-view-groups" type="button" class="skill-view-toggle ghost">分组管理</button>
+                    </div>
+                    <button id="skill-open-create" type="button">新增</button>
+                  </div>
+                </div>
+                <div id="skill-management-skills-view" class="skill-management-view">
+                  <div id="skill-group-list" class="skill-group-strip"></div>
+                  <div class="provider-list-head skill-management-list-head">
+                    <span>Skill</span>
+                    <span>分组</span>
+                    <span>Skill简介</span>
+                    <span>操作</span>
+                  </div>
+                  <div id="skill-list" class="provider-list"></div>
+                  <div class="provider-pagination">
+                    <div id="skill-pagination-meta" class="provider-pagination-meta"></div>
+                    <label class="page-size-mini">
+                      <span>每页</span>
+                      <select id="skill-page-size">
+                        <option value="10" selected>10</option>
+                        <option value="20">20</option>
+                        <option value="50">50</option>
+                      </select>
+                    </label>
+                  </div>
+                </div>
+                <div id="skill-management-groups-view" class="skill-management-view hidden">
+                  <div class="skill-group-manager">
+                    <section class="skill-group-manager-list-panel">
+                      <div class="skill-group-manager-toolbar">
+                        <h4>Skill 分组</h4>
+                      </div>
+                      <div class="provider-list-head skill-group-management-list-head">
+                        <span>分组</span>
+                        <span>简介</span>
+                        <span>技能数</span>
+                        <span>操作</span>
+                      </div>
+                      <div id="skill-group-management-list" class="provider-list"></div>
+                      <div class="provider-pagination">
+                        <div id="skill-group-pagination-meta" class="provider-pagination-meta"></div>
+                        <label class="page-size-mini">
+                          <span>每页</span>
+                          <select id="skill-group-page-size">
+                            <option value="10" selected>10</option>
+                            <option value="20">20</option>
+                            <option value="50">50</option>
+                          </select>
+                        </label>
+                      </div>
+                      <pre id="skill-group-result" class="result hidden"></pre>
+                    </section>
+                  </div>
+                </div>
+              </section>
+            </div>
+          </section>
+
+          <div id="skill-modal" class="modal-shell hidden">
+            <div class="modal-backdrop" data-skill-modal-close></div>
+            <section class="modal-card resource-modal-card skill-modal-card">
+              <div class="modal-head">
+                <h3 id="skill-modal-title">导入 Skill</h3>
+              </div>
+              <form id="skill-form" class="form resource-editor-form">
+                <div id="skill-import-panel" class="skill-import-panel">
+                  <input id="skill-import-directory-input" type="file" class="hidden" aria-hidden="true" tabindex="-1" webkitdirectory directory multiple />
+                  <div
+                    id="skill-import-dropzone"
+                    class="skill-import-dropzone"
+                    role="button"
+                    tabindex="0"
+                    aria-label="点击选择 Skill 文件夹，或将文件夹拖到这里"
+                  >
+                    <div class="skill-import-dropzone-icon" aria-hidden="true">
+                      <svg viewBox="0 0 24 24" fill="none">
+                        <path d="M12 15.5V7.25" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+                        <path d="M8.75 10.5 12 7.25l3.25 3.25" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+                        <path d="M8 17.25h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+                        <path d="M7.5 19.5h9a4.5 4.5 0 0 0 1-8.89A6 6 0 0 0 6.32 9.2 4 4 0 0 0 7.5 19.5Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"></path>
+                      </svg>
+                    </div>
+                    <strong id="skill-import-dropzone-title">点击上传文件夹</strong>
+                    <span id="skill-import-dropzone-hint">或拖拽文件夹到这里</span>
+                    <span id="skill-import-dropzone-trigger" class="skill-import-dropzone-trigger">选择文件夹</span>
+                  </div>
+                  <div id="skill-import-selection" class="skill-import-selection empty" aria-live="polite">
+                    <span class="skill-import-selection-placeholder">未选择文件夹</span>
+                  </div>
+                  <div class="tag-multi-select-field">
+                    <span>所属分组</span>
+                    <div
+                      class="tag-multi-select"
+                      data-tag-select="skill-import-groups"
+                      data-placeholder="搜索分组后点击选择"
+                      data-empty-selection-label="可多选，也可以不选"
+                      data-empty-list-label="暂无可选分组"
+                    ></div>
+                    <select id="skill-import-groups" multiple class="hidden" aria-hidden="true" tabindex="-1"></select>
+                    <div class="skill-group-picker">
+                      <button id="skill-group-open-manage-inline" type="button" class="ghost">管理分组</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="skill-modal-footer">
+                  <div id="skill-modal-result" class="result skill-modal-result hidden" data-result-format="skill-modal"></div>
+                  <div class="modal-actions skill-modal-actions">
+                    <button id="skill-cancel" type="button" class="ghost">取消</button>
+                    <button id="skill-validate" type="button" class="ghost">校验结构</button>
+                    <button id="skill-save" type="submit">导入 Skill</button>
+                  </div>
+                </div>
+              </form>
+            </section>
+          </div>
+
+          <div id="skill-preview-modal" class="modal-shell hidden">
+            <div class="modal-backdrop" data-skill-preview-close></div>
+            <section class="modal-card resource-modal-card skill-preview-modal-card">
+              <div class="modal-head skill-preview-modal-head">
+                <div class="skill-preview-heading">
+                  <h3 id="skill-preview-title">Skill 预览</h3>
+                  <p id="skill-preview-subtitle" class="field-note"></p>
                 </div>
                 <button type="button" class="ghost" data-skill-preview-close>关闭</button>
               </div>
