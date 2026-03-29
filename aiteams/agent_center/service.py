@@ -8,23 +8,16 @@ from urllib.parse import urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 from aiteams.agent_center.defaults import (
-    default_agent_templates,
     default_agent_definitions,
-    default_memory_profiles,
     default_review_policies,
     default_plugins,
     default_provider_profiles,
-    default_skills,
     default_static_memories,
-    default_team_templates,
     default_team_definitions,
 )
-from aiteams.agent_center.resolver import BuildResolver
-from aiteams.agent_center.team_graph import normalize_team_template_spec, validate_team_template_spec
 from aiteams.ai_gateway import AIGateway, ProviderRequestError
 from aiteams.catalog import list_provider_presets, preset_for
 from aiteams.deepagents import DeepAgentsTeamCompiler
-from aiteams.deepagents.compiler import is_deepagents_team_spec
 from aiteams.langgraph import LangGraphTeamCompiler
 from aiteams.plugins import PluginManager
 from aiteams.storage.metadata import MetadataStore
@@ -33,6 +26,12 @@ from aiteams.utils import pretty_json, trim_text
 MODEL_TYPES = {"chat", "embedding", "rerank"}
 DEFAULT_MEMORY_PLUGIN_KEY = "memory_core"
 RETRIEVAL_SETTINGS_KEY = "retrieval_models"
+LEGACY_DEFAULT_SKILL_KEYS = {
+    "planning_skill",
+    "architecture_skill",
+    "delivery_skill",
+    "review_skill",
+}
 AGENT_CENTER_UI_METADATA = {
     "review_policy": {
         "triggers": [
@@ -108,7 +107,6 @@ AGENT_CENTER_UI_METADATA = {
 class AgentCenterService:
     def __init__(self, store: MetadataStore, plugin_manager: PluginManager | None = None, gateway: AIGateway | None = None):
         self.store = store
-        self.resolver = BuildResolver(store)
         self.team_compiler = LangGraphTeamCompiler(store)
         self.deep_team_compiler = DeepAgentsTeamCompiler(store)
         self.plugin_manager = plugin_manager
@@ -169,41 +167,8 @@ class AgentCenterService:
                     )
             plugin_id_map[str(plugin["key"])] = str(saved["id"])
 
-        agent_template_id_map: dict[str, str] = {}
-        for template in default_agent_templates():
-            existing = self._find_default_agent_template(template)
-            saved = existing
-            if saved is None:
-                saved = self.store.save_agent_template(
-                    agent_template_id=None,
-                    name=str(template["name"]),
-                    role=str(template["role"]),
-                    description=str(template.get("description") or ""),
-                    version="v1",
-                    spec=self._default_agent_template_spec(template, provider_id_map=provider_id_map, plugin_id_map=plugin_id_map),
-                )
-            agent_template_id_map[str(template["builtin_ref"])] = str(saved["id"])
-
-        for team in default_team_templates():
-            if self._find_default_team_template(team) is None:
-                self.store.save_team_template(
-                    team_template_id=None,
-                    name=str(team["name"]),
-                    description=str(team.get("description") or ""),
-                    version="v1",
-                    spec=self._default_team_template_spec(team, agent_template_id_map=agent_template_id_map),
-                )
-
-        for skill in default_skills():
-            if self.store.get_skill_by_key(str(skill["key"])) is None:
-                self.store.save_skill(
-                    skill_id=None,
-                    key=str(skill["key"]),
-                    name=str(skill["name"]),
-                    description=str(skill.get("description") or ""),
-                    version=str(skill.get("version") or "v1"),
-                    spec=dict(skill.get("spec") or {}),
-                )
+        self._cleanup_legacy_default_skills()
+        self.store.sync_skill_groups_from_skills()
 
         for static_memory in default_static_memories():
             if self.store.get_static_memory_by_key(str(static_memory["key"])) is None:
@@ -215,21 +180,6 @@ class AgentCenterService:
                     version=str(static_memory.get("version") or "v1"),
                     spec=dict(static_memory.get("spec") or {}),
                 )
-
-        memory_profile_id_map: dict[str, str] = {}
-        for memory_profile in default_memory_profiles():
-            existing = self.store.get_memory_profile_by_key(str(memory_profile["key"]))
-            saved = existing
-            if saved is None:
-                saved = self.store.save_memory_profile(
-                    memory_profile_id=None,
-                    key=str(memory_profile["key"]),
-                    name=str(memory_profile["name"]),
-                    description=str(memory_profile.get("description") or ""),
-                    version=str(memory_profile.get("version") or "v1"),
-                    spec=dict(memory_profile.get("spec") or {}),
-                )
-            memory_profile_id_map[str(memory_profile["key"])] = str(saved["id"])
 
         for policy in default_review_policies():
             if self.store.get_review_policy_by_key(str(policy["key"])) is None:
@@ -254,7 +204,6 @@ class AgentCenterService:
                         agent_definition,
                         provider_id_map=provider_id_map,
                         plugin_id_map=plugin_id_map,
-                        memory_profile_id_map=memory_profile_id_map,
                     ),
                 )
 
@@ -273,7 +222,9 @@ class AgentCenterService:
         return list_provider_presets()
 
     def ui_metadata(self) -> dict[str, Any]:
-        return json.loads(json.dumps(AGENT_CENTER_UI_METADATA))
+        payload = json.loads(json.dumps(AGENT_CENTER_UI_METADATA))
+        payload.pop("memory_profile", None)
+        return payload
 
     def list_provider_profiles(
         self,
@@ -462,194 +413,6 @@ class AgentCenterService:
         _normalized, runtime, _warnings = self._normalize_retrieval_settings(settings, strict=False)
         return runtime
 
-    def normalize_team_spec(self, spec: dict[str, Any] | None) -> dict[str, Any]:
-        payload = dict(spec or {})
-        if is_deepagents_team_spec(payload):
-            normalized = json.loads(json.dumps(payload, ensure_ascii=False))
-            normalized.setdefault("workspace_id", "local-workspace")
-            normalized.setdefault("project_id", "default-project")
-            return normalized
-        return normalize_team_template_spec(spec)
-
-    def validate_team_spec(self, spec: dict[str, Any] | None) -> dict[str, Any]:
-        normalized = self.normalize_team_spec(spec)
-        if is_deepagents_team_spec(normalized):
-            pseudo_definition = {
-                "id": "preview_deep_team_definition",
-                "key": str(normalized.get("key") or "preview_deep_team"),
-                "name": str(normalized.get("name") or "Preview Deep Team"),
-                "description": "",
-                "version": "draft",
-                "spec_json": normalized,
-            }
-            try:
-                compiled = self.deep_team_compiler.compile(pseudo_definition)
-            except Exception as exc:
-                return {
-                    "valid": False,
-                    "errors": [str(exc)],
-                    "warnings": [],
-                    "summary": {"hierarchy_mode": "strict_tree"},
-                    "normalized_spec": normalized,
-                    "communication": {},
-                }
-            return {
-                "valid": True,
-                "errors": [],
-                "warnings": [],
-                "summary": {
-                    "agent_count": compiled.agent_count,
-                    "team_count": compiled.team_count,
-                    "node_count": len((compiled.blueprint.get("flow") or {}).get("nodes", [])),
-                    "edge_count": len((compiled.blueprint.get("flow") or {}).get("edges", [])),
-                    "execution_mode": (compiled.blueprint.get("metadata") or {}).get("execution_mode"),
-                    "hierarchy_mode": "strict_tree",
-                },
-                "normalized_spec": normalized,
-                "communication": {},
-                "resource_lock": compiled.resource_lock,
-                "hierarchy": compiled.root,
-            }
-        return validate_team_template_spec(spec)
-
-    def team_graph_payload(self, team_template_id: str) -> dict[str, Any]:
-        team_template = self.store.get_team_template(team_template_id)
-        if team_template is None:
-            raise ValueError("Team template does not exist.")
-        validation = self.validate_team_spec(team_template.get("spec_json") or {})
-        return {
-            "team_template": team_template,
-            "spec": validation["normalized_spec"],
-            "validation": validation,
-        }
-
-    def preview_team_spec(self, spec: dict[str, Any], *, team_template_id: str | None = None, name: str | None = None) -> dict[str, Any]:
-        normalized = self.normalize_team_spec(spec)
-        validation = self.validate_team_spec(normalized)
-        if is_deepagents_team_spec(normalized):
-            if validation["errors"]:
-                return {
-                    "valid": False,
-                    "errors": validation["errors"],
-                    "warnings": validation["warnings"],
-                    "summary": validation["summary"],
-                }
-            return {
-                "valid": True,
-                "errors": [],
-                "warnings": validation["warnings"],
-                "summary": validation["summary"],
-                "preview": {
-                    "agent_count": validation["summary"].get("agent_count", 0),
-                    "team_count": validation["summary"].get("team_count", 0),
-                    "node_count": validation["summary"].get("node_count", 0),
-                    "edge_count": validation["summary"].get("edge_count", 0),
-                    "execution_mode": validation["summary"].get("execution_mode"),
-                    "hierarchy_mode": validation["summary"].get("hierarchy_mode", "strict_tree"),
-                },
-                "resource_lock": validation.get("resource_lock") or {},
-                "hierarchy": validation.get("hierarchy"),
-            }
-        if validation["errors"]:
-            return {
-                "valid": False,
-                "errors": validation["errors"],
-                "warnings": validation["warnings"],
-                "summary": validation["summary"],
-            }
-        pseudo_template = {
-            "id": team_template_id or "preview_team_template",
-            "name": name or "Preview Team Template",
-            "version": "draft",
-            "description": "",
-            "spec_json": validation["normalized_spec"],
-        }
-        blueprint_spec, resource_lock = self.resolver.build(pseudo_template)
-        return {
-            "valid": True,
-            "errors": [],
-            "warnings": validation["warnings"],
-            "summary": validation["summary"],
-            "preview": {
-                "role_template_count": len(blueprint_spec.get("role_templates", {})),
-                "agent_count": len(blueprint_spec.get("agents", {})),
-                "node_count": len((blueprint_spec.get("flow") or {}).get("nodes", [])),
-                "edge_count": len((blueprint_spec.get("flow") or {}).get("edges", [])),
-                "communication_policy": str((blueprint_spec.get("metadata") or {}).get("communication_policy") or "graph-ancestor-scoped"),
-            },
-            "resource_lock": resource_lock,
-        }
-
-    def build_team_template(self, team_template_id: str, *, build_name: str | None = None) -> dict[str, Any]:
-        team_template = self.store.get_team_template(team_template_id)
-        if team_template is None:
-            raise ValueError("Team template does not exist.")
-        if is_deepagents_team_spec(team_template.get("spec_json") or {}):
-            pseudo_definition = {
-                "id": f"team_template::{team_template['id']}",
-                "key": str((team_template.get("spec_json") or {}).get("key") or team_template["id"]),
-                "name": str(team_template.get("name") or "Deep Team Template"),
-                "description": str(team_template.get("description") or ""),
-                "version": str(team_template.get("version") or "draft"),
-                "spec_json": dict(team_template.get("spec_json") or {}),
-            }
-            compiled = self.deep_team_compiler.compile(pseudo_definition)
-            spec = compiled.blueprint
-            resource_lock = json.loads(json.dumps(compiled.resource_lock, ensure_ascii=False))
-            resource_lock.setdefault("team_templates", [])
-            template_lock = {"id": team_template["id"], "name": team_template["name"], "version": team_template.get("version")}
-            if template_lock not in resource_lock["team_templates"]:
-                resource_lock["team_templates"].append(template_lock)
-            build_title = build_name or f"{team_template['name']} Build"
-            blueprint = self.store.save_blueprint(
-                blueprint_id=None,
-                workspace_id=str(spec["workspace_id"]),
-                project_id=str(spec["project_id"]),
-                name=build_title,
-                description=trim_text(str(team_template.get("description") or ""), limit=280),
-                version="build",
-                raw_format="json",
-                raw_text=pretty_json(spec),
-                spec=spec,
-                is_template=False,
-            )
-            return self.store.save_blueprint_build(
-                build_id=None,
-                team_template_id=str(team_template["id"]),
-                name=build_title,
-                description=str(team_template.get("description") or ""),
-                spec=spec,
-                resource_lock=resource_lock,
-                blueprint_id=str(blueprint["id"]),
-            )
-        validation = self.validate_team_spec(team_template.get("spec_json") or {})
-        if validation["errors"]:
-            raise ValueError("; ".join(validation["errors"]))
-        spec, resource_lock = self.resolver.build(team_template)
-        build_title = build_name or f"{team_template['name']} Build"
-        blueprint = self.store.save_blueprint(
-            blueprint_id=None,
-            workspace_id=str(spec["workspace_id"]),
-            project_id=str(spec["project_id"]),
-            name=build_title,
-            description=trim_text(str(team_template.get("description") or ""), limit=280),
-            version="build",
-            raw_format="json",
-            raw_text=pretty_json(spec),
-            spec=spec,
-            is_template=False,
-        )
-        build = self.store.save_blueprint_build(
-            build_id=None,
-            team_template_id=str(team_template["id"]),
-            name=build_title,
-            description=str(team_template.get("description") or ""),
-            spec=spec,
-            resource_lock=resource_lock,
-            blueprint_id=str(blueprint["id"]),
-        )
-        return build
-
     def compile_team_definition(self, team_definition_id: str) -> dict[str, Any]:
         team_definition = self.store.get_team_definition(team_definition_id)
         if team_definition is None:
@@ -725,37 +488,36 @@ class AgentCenterService:
         payload["config"] = config
         return payload
 
-    def _default_agent_template_spec(
-        self,
-        template: dict[str, Any],
-        *,
-        provider_id_map: dict[str, str],
-        plugin_id_map: dict[str, str],
-    ) -> dict[str, Any]:
-        spec = json.loads(json.dumps(template.get("spec") or {}, ensure_ascii=False))
-        provider_ref = str(spec.get("provider_ref") or "").strip()
-        if provider_ref:
-            spec["provider_ref"] = provider_id_map.get(provider_ref, provider_ref)
-        spec["plugin_refs"] = [plugin_id_map.get(str(item), str(item)) for item in spec.get("plugin_refs", [])]
-        metadata = dict(spec.get("metadata") or {})
-        metadata["builtin_ref"] = str(template.get("builtin_ref") or "")
-        spec["metadata"] = metadata
-        return spec
+    def _cleanup_legacy_default_skills(self) -> None:
+        self._remove_legacy_skill_refs(LEGACY_DEFAULT_SKILL_KEYS)
+        for skill in self.store.list_skills():
+            skill_name = str(skill.get("name") or "").strip()
+            if skill_name not in LEGACY_DEFAULT_SKILL_KEYS:
+                continue
+            self.store.delete_skill(str(skill.get("id") or ""))
 
-    def _default_team_template_spec(self, team: dict[str, Any], *, agent_template_id_map: dict[str, str]) -> dict[str, Any]:
-        spec = json.loads(json.dumps(team.get("spec") or {}, ensure_ascii=False))
-        agents = []
-        for item in spec.get("agents", []):
-            agent = dict(item or {})
-            reference = str(agent.get("agent_template_ref") or "").strip()
-            if reference:
-                agent["agent_template_ref"] = agent_template_id_map.get(reference, reference)
-            agents.append(agent)
-        spec["agents"] = agents
-        metadata = dict(spec.get("metadata") or {})
-        metadata["builtin_ref"] = str(team.get("builtin_ref") or "")
-        spec["metadata"] = metadata
-        return spec
+    def _remove_legacy_skill_refs(self, skill_keys: set[str]) -> None:
+        if not skill_keys:
+            return
+        for agent_definition in self.store.list_agent_definitions():
+            spec = dict(agent_definition.get("spec_json") or {})
+            current_refs = [str(item).strip() for item in list(spec.get("skill_refs") or []) if str(item).strip()]
+            next_refs = [item for item in current_refs if item not in skill_keys]
+            if len(next_refs) == len(current_refs):
+                continue
+            if next_refs:
+                spec["skill_refs"] = next_refs
+            else:
+                spec.pop("skill_refs", None)
+            self.store.save_agent_definition(
+                agent_definition_id=str(agent_definition.get("id") or ""),
+                name=str(agent_definition.get("name") or ""),
+                role=str(agent_definition.get("role") or ""),
+                description=str(agent_definition.get("description") or ""),
+                version=str(agent_definition.get("version") or "v1"),
+                spec=spec,
+                status=str(agent_definition.get("status") or "active"),
+            )
 
     def _default_agent_definition_spec(
         self,
@@ -763,16 +525,15 @@ class AgentCenterService:
         *,
         provider_id_map: dict[str, str],
         plugin_id_map: dict[str, str],
-        memory_profile_id_map: dict[str, str],
     ) -> dict[str, Any]:
         spec = json.loads(json.dumps(definition.get("spec") or {}, ensure_ascii=False))
         provider_ref = str(spec.get("provider_ref") or "").strip()
         if provider_ref:
             spec["provider_ref"] = provider_id_map.get(provider_ref, provider_ref)
         spec["tool_plugin_refs"] = self._ensure_default_plugin_refs([plugin_id_map.get(str(item), str(item)) for item in spec.get("tool_plugin_refs", [])])
-        memory_profile_ref = str(spec.get("memory_profile_ref") or "").strip()
-        if memory_profile_ref:
-            spec["memory_profile_ref"] = memory_profile_id_map.get(memory_profile_ref, memory_profile_ref)
+        spec.pop("memory_profile_ref", None)
+        spec.pop("memory_profile_id", None)
+        spec.pop("memory_profile", None)
         return spec
 
     def _default_team_definition_spec(self, team_definition: dict[str, Any]) -> dict[str, Any]:
@@ -833,31 +594,6 @@ class AgentCenterService:
             if builtin_ref and str(config.get("builtin_ref") or "").strip() == builtin_ref:
                 return item
             if str(item.get("provider_type") or "").strip() == provider_type and str(item.get("name") or "").strip() == name:
-                return item
-        return None
-
-    def _find_default_agent_template(self, template: dict[str, Any]) -> dict[str, Any] | None:
-        builtin_ref = str(template.get("builtin_ref") or "").strip()
-        role = str(template.get("role") or "").strip()
-        name = str(template.get("name") or "").strip()
-        for item in self.store.list_agent_templates():
-            spec = dict(item.get("spec_json") or {})
-            metadata = dict(spec.get("metadata") or {})
-            if builtin_ref and str(metadata.get("builtin_ref") or "").strip() == builtin_ref:
-                return item
-            if str(item.get("role") or "").strip() == role and str(item.get("name") or "").strip() == name:
-                return item
-        return None
-
-    def _find_default_team_template(self, team: dict[str, Any]) -> dict[str, Any] | None:
-        builtin_ref = str(team.get("builtin_ref") or "").strip()
-        name = str(team.get("name") or "").strip()
-        for item in self.store.list_team_templates():
-            spec = dict(item.get("spec_json") or {})
-            metadata = dict(spec.get("metadata") or {})
-            if builtin_ref and str(metadata.get("builtin_ref") or "").strip() == builtin_ref:
-                return item
-            if str(item.get("name") or "").strip() == name:
                 return item
         return None
 

@@ -98,7 +98,7 @@ def default_plugins() -> list[dict[str, Any]]:
     ]
 
 
-def default_agent_templates() -> list[dict[str, Any]]:
+def _legacy_default_agent_templates_removed() -> list[dict[str, Any]]:
     return [
         {
             "builtin_ref": "strategy_planner",
@@ -255,6 +255,12 @@ def default_skills() -> list[dict[str, Any]]:
             "description": "将目标拆解为阶段、依赖和里程碑。",
             "version": "v1",
             "spec": {
+                "group_refs": [
+                    {
+                        "key": "planning",
+                        "name": "规划设计",
+                    }
+                ],
                 "instructions": [
                     "优先识别目标、约束、里程碑、依赖和风险。",
                     "输出结构化阶段计划和验收标准。",
@@ -268,6 +274,12 @@ def default_skills() -> list[dict[str, Any]]:
             "description": "定义模块边界、接口和关键约束。",
             "version": "v1",
             "spec": {
+                "group_refs": [
+                    {
+                        "key": "planning",
+                        "name": "规划设计",
+                    }
+                ],
                 "instructions": [
                     "说明模块边界、数据流和接口契约。",
                     "明确关键技术选型和取舍。",
@@ -281,6 +293,12 @@ def default_skills() -> list[dict[str, Any]]:
             "description": "规划实施步骤、验证手段和交付边界。",
             "version": "v1",
             "spec": {
+                "group_refs": [
+                    {
+                        "key": "delivery",
+                        "name": "交付执行",
+                    }
+                ],
                 "instructions": [
                     "输出实现顺序、文件边界和验证步骤。",
                     "优先保证可以交付和可以回滚。",
@@ -294,6 +312,12 @@ def default_skills() -> list[dict[str, Any]]:
             "description": "根据验收条件作出通过或返工判断。",
             "version": "v1",
             "spec": {
+                "group_refs": [
+                    {
+                        "key": "quality",
+                        "name": "质量保障",
+                    }
+                ],
                 "instructions": [
                     "优先输出发现、风险、是否通过和返工方向。",
                     "结论要和验收条件对应。",
@@ -458,10 +482,9 @@ def default_agent_definitions() -> list[dict[str, Any]]:
                 "goal": "拆解复杂任务并协调上下级。",
                 "instructions": "优先输出计划、依赖、风险和升级节点。",
                 "tool_plugin_refs": ["memory_core", "research_kit"],
-                "skill_refs": ["planning_skill"],
+                "skill_refs": [],
                 "static_memory_ref": "static.planner.role",
                 "knowledge_base_refs": [],
-                "memory_profile_ref": "memory.default.collab",
                 "review_policy_refs": ["review.cross_level_message"],
             },
         },
@@ -477,10 +500,9 @@ def default_agent_definitions() -> list[dict[str, Any]]:
                 "goal": "定义模块边界、接口和关键约束。",
                 "instructions": "聚焦边界、依赖、约束和技术方案。",
                 "tool_plugin_refs": ["memory_core", "codebase_kit"],
-                "skill_refs": ["architecture_skill"],
+                "skill_refs": [],
                 "static_memory_ref": "static.architect.role",
                 "knowledge_base_refs": [],
-                "memory_profile_ref": "memory.default.collab",
                 "review_policy_refs": ["review.cross_level_message"],
             },
         },
@@ -496,10 +518,9 @@ def default_agent_definitions() -> list[dict[str, Any]]:
                 "goal": "执行交付方案并给出验证结果。",
                 "instructions": "输出实施步骤、验证结果和风险。",
                 "tool_plugin_refs": ["memory_core", "terminal_kit"],
-                "skill_refs": ["delivery_skill"],
+                "skill_refs": [],
                 "static_memory_ref": "static.engineer.role",
                 "knowledge_base_refs": [],
-                "memory_profile_ref": "memory.default.collab",
                 "review_policy_refs": ["review.high_risk_tools"],
             },
         },
@@ -515,10 +536,9 @@ def default_agent_definitions() -> list[dict[str, Any]]:
                 "goal": "判断交付是否通过并指出缺口。",
                 "instructions": "以验收条件为准，给出明确通过结论。",
                 "tool_plugin_refs": ["memory_core", "qa_kit"],
-                "skill_refs": ["review_skill"],
+                "skill_refs": [],
                 "static_memory_ref": "static.reviewer.role",
                 "knowledge_base_refs": [],
-                "memory_profile_ref": "memory.default.reviewer",
                 "review_policy_refs": ["review.cross_level_message"],
             },
         },
@@ -537,27 +557,27 @@ def default_team_definitions() -> list[dict[str, Any]]:
                 "project_id": "default-project",
                 "lead": {
                     "kind": "agent",
-                    "source_kind": "agent_template",
-                    "agent_template_ref": "strategy_planner",
+                    "source_kind": "agent_definition",
+                    "agent_definition_ref": DEFAULT_AGENT_DEFINITION_IDS["planner"],
                     "name": "规划负责人",
                 },
                 "children": [
                     {
                         "kind": "agent",
-                        "source_kind": "agent_template",
-                        "agent_template_ref": "solution_architect",
+                        "source_kind": "agent_definition",
+                        "agent_definition_ref": DEFAULT_AGENT_DEFINITION_IDS["architect"],
                         "name": "架构负责人",
                     },
                     {
                         "kind": "agent",
-                        "source_kind": "agent_template",
-                        "agent_template_ref": "implementation_engineer",
+                        "source_kind": "agent_definition",
+                        "agent_definition_ref": DEFAULT_AGENT_DEFINITION_IDS["engineer"],
                         "name": "交付工程师",
                     },
                     {
                         "kind": "agent",
-                        "source_kind": "agent_template",
-                        "agent_template_ref": "quality_reviewer",
+                        "source_kind": "agent_definition",
+                        "agent_definition_ref": DEFAULT_AGENT_DEFINITION_IDS["reviewer"],
                         "name": "质量审查员",
                     },
                 ],
@@ -566,7 +586,7 @@ def default_team_definitions() -> list[dict[str, Any]]:
     ]
 
 
-def default_team_templates() -> list[dict[str, Any]]:
+def _legacy_default_team_templates_removed() -> list[dict[str, Any]]:
     return [
         {
             "builtin_ref": "software_delivery_team",

@@ -42,13 +42,18 @@ class RuntimeEngine:
         agent_kernel: AgentKernel,
         workspace: WorkspaceManager,
         checkpoint_db_path: str | Path,
+        deepagents_skill_root: str | Path | None = None,
     ):
         self.store = store
         self.compiler = compiler
         self.agent_kernel = agent_kernel
         self.workspace = workspace
         self.checkpoint_db_path = Path(checkpoint_db_path).expanduser().resolve()
+        self.deepagents_skill_root = Path(
+            deepagents_skill_root or (self.checkpoint_db_path.parent / "deepagents-skills")
+        ).expanduser().resolve()
         self.checkpoint_db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.deepagents_skill_root.mkdir(parents=True, exist_ok=True)
         self.team_runtime = LangGraphTeamRuntime(
             store=store,
             agent_kernel=agent_kernel,
@@ -60,6 +65,7 @@ class RuntimeEngine:
             agent_kernel=agent_kernel,
             workspace=workspace,
             checkpoint_db_path=self.checkpoint_db_path,
+            skill_storage_root=self.deepagents_skill_root,
         )
 
     async def start_task(
@@ -70,6 +76,7 @@ class RuntimeEngine:
         prompt: str,
         inputs: dict[str, Any],
         approval_mode: str,
+        session_thread_id: str | None = None,
     ) -> dict[str, Any]:
         blueprint_spec = blueprint["spec_json"] if "spec_json" in blueprint else blueprint
         spec = BlueprintSpec.from_dict(blueprint_spec)
@@ -92,6 +99,7 @@ class RuntimeEngine:
                 prompt=prompt,
                 inputs=inputs,
                 approval_mode=approval_mode,
+                session_thread_id=session_thread_id,
             )
         else:
             state = {
@@ -122,6 +130,7 @@ class RuntimeEngine:
                 project_id=spec.project_id,
                 title=title,
                 prompt=prompt,
+                session_thread_id=str(state.get("session_thread_id") or "") or None,
             )
             if thread is not None:
                 state["thread_id"] = thread["id"]

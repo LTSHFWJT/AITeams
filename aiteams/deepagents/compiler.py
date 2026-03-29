@@ -200,34 +200,22 @@ class DeepAgentsTeamCompiler:
         visited_team_refs: set[str],
     ) -> dict[str, Any]:
         definition_reference = payload.get("team_definition_ref") or payload.get("team_definition_id")
-        template_reference = payload.get("team_template_ref") or payload.get("team_template_id")
-        if definition_reference is None and template_reference is None:
+        legacy_template_keys = tuple(key for key in payload if key.startswith("team_template_") and payload.get(key) is not None)
+        if legacy_template_keys:
+            raise ValueError("Nested team templates are no longer supported; use team_definition_ref instead.")
+        if definition_reference is None:
             return dict(payload)
-        source_record: dict[str, Any]
-        reference: Any
-        source_kind: str
-        if definition_reference is not None:
-            reference = definition_reference
-            source_kind = "definition"
-            source_record = self.store.get_team_definition(str(reference)) or self.store.get_team_definition_by_key(str(reference))
-            if source_record is None:
-                raise ValueError(f"Unknown team definition `{reference}`.")
-            source_id = str(source_record.get("id") or source_record.get("key") or reference)
-            visit_key = f"definition:{source_id}"
-            if visit_key in visited_team_refs:
-                raise ValueError(f"Nested team definition cycle detected at `{reference}`.")
-            visited_team_refs.add(visit_key)
-            self._lock_resource(resource_lock, "team_definitions", source_record, fields=("id", "key", "version"))
-        else:
-            reference = template_reference
-            source_kind = "template"
-            source_record = self._resolve_team_template(reference)
-            source_id = str(source_record.get("id") or source_record.get("name") or reference)
-            visit_key = f"template:{source_id}"
-            if visit_key in visited_team_refs:
-                raise ValueError(f"Nested team template cycle detected at `{reference}`.")
-            visited_team_refs.add(visit_key)
-            self._lock_resource(resource_lock, "team_templates", source_record, fields=("id", "name", "version"))
+        reference = definition_reference
+        source_kind = "definition"
+        source_record = self.store.get_team_definition(str(reference)) or self.store.get_team_definition_by_key(str(reference))
+        if source_record is None:
+            raise ValueError(f"Unknown team definition `{reference}`.")
+        source_id = str(source_record.get("id") or source_record.get("key") or reference)
+        visit_key = f"definition:{source_id}"
+        if visit_key in visited_team_refs:
+            raise ValueError(f"Nested team definition cycle detected at `{reference}`.")
+        visited_team_refs.add(visit_key)
+        self._lock_resource(resource_lock, "team_definitions", source_record, fields=("id", "key", "version"))
         source_spec = dict(source_record.get("spec_json") or {})
         if not is_deepagents_team_spec(source_spec):
             raise ValueError(f"Nested team {source_kind} `{reference}` is not a deepagents hierarchy spec.")
@@ -237,7 +225,7 @@ class DeepAgentsTeamCompiler:
             {
                 key: value
                 for key, value in payload.items()
-                if key not in {"team_definition_ref", "team_definition_id", "team_template_ref", "team_template_id"}
+                if key not in {"team_definition_ref", "team_definition_id", *legacy_template_keys}
             }
         )
         if "lead" not in payload and "lead" in base:
@@ -267,10 +255,7 @@ class DeepAgentsTeamCompiler:
         )
         self._lock_resource(resource_lock, "provider_profiles", provider, fields=("id", "name", "provider_type"))
         source_kind = str(source.get("source_kind") or "agent_definition")
-        if source_kind == "agent_definition":
-            self._lock_resource(resource_lock, "agent_definitions", source["record"], fields=("id", "version"))
-        else:
-            self._lock_resource(resource_lock, "agent_templates", source["record"], fields=("id", "name", "version"))
+        self._lock_resource(resource_lock, "agent_definitions", source["record"], fields=("id", "version"))
 
         plugin_refs = self._resolve_plugins(
             [*list(source.get("plugin_refs") or []), *list(payload.get("plugin_refs") or [])],
@@ -296,12 +281,6 @@ class DeepAgentsTeamCompiler:
             or payload.get("static_memory_id")
             or source.get("role_spec_ref")
             or source.get("static_memory_ref"),
-            resource_lock=resource_lock,
-        )
-        memory_profile = self._resolve_memory_profile(
-            payload.get("memory_profile_ref")
-            or payload.get("memory_profile_id")
-            or source.get("memory_profile_ref"),
             resource_lock=resource_lock,
         )
         runtime_key = self._runtime_key(*team_path, str(payload.get("key") or source.get("key") or source.get("name") or source["record"].get("id") or "agent"))
@@ -354,7 +333,6 @@ class DeepAgentsTeamCompiler:
             "knowledge_bases": knowledge_bases,
             "plugins": plugin_refs,
             "review_policies": review_policies,
-            "memory_profile": memory_profile,
             "source": {
                 "kind": source_kind,
                 "id": source["record"].get("id"),
@@ -364,81 +342,29 @@ class DeepAgentsTeamCompiler:
 
     def _resolve_agent_source(self, payload: dict[str, Any], *, resource_lock: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
         agent_definition_ref = payload.get("agent_definition_ref") or payload.get("agent_definition_id")
-        if agent_definition_ref is not None:
-            record = self.store.get_agent_definition(str(agent_definition_ref))
-            if record is None:
-                raise ValueError(f"Unknown agent definition `{agent_definition_ref}`.")
-            spec = dict(record.get("spec_json") or {})
-            return {
-                "source_kind": "agent_definition",
-                "record": record,
-                "name": record.get("name"),
-                "description": record.get("description"),
-                "role": record.get("role"),
-                "goal": spec.get("goal"),
-                "instructions": spec.get("instructions"),
-                "provider_ref": spec.get("provider_ref") or spec.get("provider_profile_id"),
-                "plugin_refs": list(spec.get("tool_plugin_refs") or spec.get("plugin_refs") or []),
-                "skill_refs": list(spec.get("skill_refs") or []),
-                "inline_skills": list(spec.get("skills") or []),
-                "static_memory_ref": spec.get("role_spec_ref") or spec.get("role_spec_id") or spec.get("static_memory_ref") or spec.get("static_memory_id"),
-                "knowledge_base_refs": list(spec.get("knowledge_base_refs") or []),
-                "memory_profile_ref": spec.get("memory_profile_ref") or spec.get("memory_profile_id"),
-                "review_policy_refs": list(spec.get("review_policy_refs") or []),
-                "model": spec.get("model"),
-            }
-        agent_template_ref = payload.get("agent_template_ref") or payload.get("agent_template_id")
-        if agent_template_ref is None:
-            raise ValueError(f"Agent node `{payload.get('key') or 'unknown'}` requires agent_definition_ref or agent_template_ref.")
-        record = self._resolve_agent_template(agent_template_ref)
+        if agent_definition_ref is None:
+            raise ValueError(f"Agent node `{payload.get('key') or 'unknown'}` requires agent_definition_ref.")
+        record = self.store.get_agent_definition(str(agent_definition_ref))
+        if record is None:
+            raise ValueError(f"Unknown agent definition `{agent_definition_ref}`.")
         spec = dict(record.get("spec_json") or {})
         return {
-            "source_kind": "agent_template",
+            "source_kind": "agent_definition",
             "record": record,
-            "key": record.get("id"),
             "name": record.get("name"),
             "description": record.get("description"),
             "role": record.get("role"),
             "goal": spec.get("goal"),
             "instructions": spec.get("instructions"),
             "provider_ref": spec.get("provider_ref") or spec.get("provider_profile_id"),
-            "plugin_refs": list(spec.get("plugin_refs") or []),
+            "plugin_refs": list(spec.get("tool_plugin_refs") or spec.get("plugin_refs") or []),
             "skill_refs": list(spec.get("skill_refs") or []),
             "inline_skills": list(spec.get("skills") or []),
             "static_memory_ref": spec.get("role_spec_ref") or spec.get("role_spec_id") or spec.get("static_memory_ref") or spec.get("static_memory_id"),
             "knowledge_base_refs": list(spec.get("knowledge_base_refs") or []),
-            "memory_profile_ref": spec.get("memory_profile_ref") or spec.get("memory_profile_id"),
             "review_policy_refs": list(spec.get("review_policy_refs") or []),
             "model": spec.get("model"),
         }
-
-    def _resolve_agent_template(self, reference: Any) -> dict[str, Any]:
-        value = str(reference)
-        template = self.store.get_agent_template(value)
-        if template is not None:
-            return template
-        for item in self.store.list_agent_templates():
-            spec = dict(item.get("spec_json") or {})
-            metadata = dict(spec.get("metadata") or {})
-            if str(metadata.get("builtin_ref") or "") == value:
-                return item
-            if str(item.get("name") or "") == value:
-                return item
-        raise ValueError(f"Unknown agent template `{reference}`.")
-
-    def _resolve_team_template(self, reference: Any) -> dict[str, Any]:
-        value = str(reference)
-        template = self.store.get_team_template(value)
-        if template is not None:
-            return template
-        for item in self.store.list_team_templates():
-            spec = dict(item.get("spec_json") or {})
-            metadata = dict(spec.get("metadata") or {})
-            if str(metadata.get("builtin_ref") or "") == value:
-                return item
-            if str(item.get("name") or "") == value:
-                return item
-        raise ValueError(f"Unknown team template `{reference}`.")
 
     def _resolve_provider(self, reference: Any) -> dict[str, Any]:
         provider = self.store.get_provider_profile(str(reference), include_secret=True)
@@ -484,7 +410,7 @@ class DeepAgentsTeamCompiler:
             value = str(ref or "").strip()
             if not value:
                 continue
-            skill = self.store.get_skill(value) or self.store.get_skill_by_key(value)
+            skill = self.store.get_skill(value) or self.store.get_skill_by_name(value) or self.store.get_skill_by_key(value)
             if skill is None:
                 raise ValueError(f"Unknown skill `{ref}`.")
             identity = str(skill.get("id") or value)
@@ -494,19 +420,19 @@ class DeepAgentsTeamCompiler:
             resolved.append(
                 {
                     "id": skill.get("id"),
-                    "key": skill.get("key"),
                     "name": skill.get("name"),
-                    "instructions": list((skill.get("spec_json") or {}).get("instructions") or []),
+                    "description": skill.get("description"),
+                    "storage_path": skill.get("storage_path"),
                     "source": "catalog",
                 }
             )
-            self._lock_resource(resource_lock, "skills", skill, fields=("id", "key", "version"))
+            self._lock_resource(resource_lock, "skills", skill, fields=("id", "name", "storage_path"))
         for item in inline:
             text = str(item or "").strip()
             if not text or text in seen:
                 continue
             seen.add(text)
-            resolved.append({"id": None, "key": text, "name": text, "instructions": [text], "source": "inline"})
+            resolved.append({"id": None, "name": text, "description": text, "instructions": [text], "source": "inline"})
         return resolved
 
     def _resolve_knowledge_bases(self, refs: list[Any], *, resource_lock: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
@@ -554,20 +480,6 @@ class DeepAgentsTeamCompiler:
             "description": record.get("description"),
             "version": record.get("version"),
             "spec": normalize_role_spec(dict(record.get("spec_json") or {})),
-        }
-
-    def _resolve_memory_profile(self, reference: Any, *, resource_lock: dict[str, list[dict[str, Any]]]) -> dict[str, Any] | None:
-        if not reference:
-            return None
-        record = self.store.get_memory_profile(str(reference)) or self.store.get_memory_profile_by_key(str(reference))
-        if record is None:
-            raise ValueError(f"Unknown memory profile `{reference}`.")
-        self._lock_resource(resource_lock, "memory_profiles", record, fields=("id", "key", "version"))
-        return {
-            "id": record.get("id"),
-            "key": record.get("key"),
-            "name": record.get("name"),
-            "config": dict(record.get("spec_json") or {}),
         }
 
     def _resolve_review_policies(
@@ -635,8 +547,10 @@ class DeepAgentsTeamCompiler:
         if skills:
             lines.append("Skills:")
             for skill in skills:
-                skill_text = " ".join(str(item) for item in list(skill.get("instructions") or []) if str(item).strip())
-                lines.append(f"- {skill.get('name') or skill.get('key')}: {skill_text or skill.get('key')}")
+                skill_text = str(skill.get("description") or "").strip()
+                if not skill_text:
+                    skill_text = " ".join(str(item) for item in list(skill.get("instructions") or []) if str(item).strip())
+                lines.append(f"- {skill.get('name') or skill.get('id')}: {skill_text or skill.get('name')}")
         if knowledge_bases:
             lines.append("Bound knowledge bases:")
             for item in knowledge_bases:
@@ -713,10 +627,9 @@ class DeepAgentsTeamCompiler:
                 "workbenches": self._workbench_keys(agent, workbenches),
                 "memory_policy": "agent_private_plus_project",
                 "metadata": {
-                    "skills": [item.get("key") for item in list(agent.get("skills") or [])],
+                    "skills": [item.get("name") or item.get("id") for item in list(agent.get("skills") or [])],
                     "role_spec": dict(agent.get("role_spec") or {}) if agent.get("role_spec") else None,
                     "knowledge_bases": [dict(item) for item in list(agent.get("knowledge_bases") or [])],
-                    "memory_profile": dict(agent.get("memory_profile") or {}) if agent.get("memory_profile") else None,
                     "plugins": [self._plugin_payload(item) for item in list(agent.get("plugins") or [])],
                     "review_policies": [dict(item) for item in list(agent.get("review_policies") or [])],
                 },
@@ -795,15 +708,12 @@ class DeepAgentsTeamCompiler:
     def _empty_resource_lock(self) -> dict[str, list[dict[str, Any]]]:
         return {
             "team_definitions": [],
-            "team_templates": [],
             "agent_definitions": [],
-            "agent_templates": [],
             "provider_profiles": [],
             "plugins": [],
             "skills": [],
             "static_memories": [],
             "knowledge_bases": [],
-            "memory_profiles": [],
             "review_policies": [],
         }
 

@@ -13,6 +13,7 @@ class AppSettings:
     memory_root: Path
     workspace_root: Path
     static_dir: Path
+    deepagents_skill_root: Path | None = None
     checkpoint_db_path: Path | None = None
     default_workspace_id: str = "local-workspace"
     default_workspace_name: str = "Local Workspace"
@@ -26,7 +27,12 @@ class AppSettings:
             self.checkpoint_db_path = (self.data_dir / "langgraph-checkpoints.sqlite").expanduser().resolve()
         else:
             self.checkpoint_db_path = Path(self.checkpoint_db_path).expanduser().resolve()
+        if self.deepagents_skill_root is None:
+            self.deepagents_skill_root = (self.data_dir / "deepagents-skills").expanduser().resolve()
+        else:
+            self.deepagents_skill_root = Path(self.deepagents_skill_root).expanduser().resolve()
         self.checkpoint_db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.deepagents_skill_root.mkdir(parents=True, exist_ok=True)
 
     @classmethod
     def load(cls) -> "AppSettings":
@@ -35,6 +41,7 @@ class AppSettings:
         metadata_db_path = Path(os.getenv("AITEAMS_METADATA_DB", data_dir / "platform.db")).expanduser().resolve()
         memory_root = Path(os.getenv("AITEAMS_MEMORY_DIR", data_dir / "aimemory")).expanduser().resolve()
         workspace_root = Path(os.getenv("AITEAMS_WORKSPACE_DIR", data_dir / "workspaces")).expanduser().resolve()
+        deepagents_skill_root = Path(os.getenv("AITEAMS_DEEPAGENTS_SKILL_DIR", data_dir / "deepagents-skills")).expanduser().resolve()
         checkpoint_db_path = Path(os.getenv("AITEAMS_CHECKPOINT_DB", data_dir / "langgraph-checkpoints.sqlite")).expanduser().resolve()
         static_dir = Path(__file__).resolve().parents[1] / "static"
 
@@ -42,6 +49,7 @@ class AppSettings:
         metadata_db_path.parent.mkdir(parents=True, exist_ok=True)
         memory_root.mkdir(parents=True, exist_ok=True)
         workspace_root.mkdir(parents=True, exist_ok=True)
+        deepagents_skill_root.mkdir(parents=True, exist_ok=True)
         checkpoint_db_path.parent.mkdir(parents=True, exist_ok=True)
 
         return cls(
@@ -50,6 +58,7 @@ class AppSettings:
             metadata_db_path=metadata_db_path,
             memory_root=memory_root,
             workspace_root=workspace_root,
+            deepagents_skill_root=deepagents_skill_root,
             checkpoint_db_path=checkpoint_db_path,
             static_dir=static_dir,
             default_workspace_id=os.getenv("AITEAMS_DEFAULT_WORKSPACE_ID", "local-workspace"),

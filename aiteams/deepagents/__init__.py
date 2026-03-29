@@ -1,5 +1,5 @@
 from aiteams.deepagents.builder import AgentLeafCompiler, CompiledTeamTree, DynamicTeamBuilder, TeamBuildContext, TeamCompositeCompiler
-from aiteams.deepagents.compiler import DeepAgentsTeamCompiler, DeepAgentsCompiledTeamDefinition
+from aiteams.deepagents.compiler import DeepAgentsCompiledTeamDefinition, DeepAgentsTeamCompiler
 from aiteams.deepagents.runtime import DeepAgentsTeamRuntime
 
 __all__ = [

@@ -160,11 +160,6 @@ class AgentKernel:
         return recalled[:8]
 
     def _read_scope_names(self, agent: AgentSpec) -> set[str]:
-        memory_profile = dict((agent.metadata or {}).get("memory_profile") or {})
-        config = dict(memory_profile.get("config") or {})
-        read_scopes = {str(item).strip().lower() for item in list(config.get("read_scopes") or []) if str(item).strip()}
-        if read_scopes:
-            return read_scopes
         if agent.memory_policy == "agent_private":
             return {"agent"}
         if agent.memory_policy == "project_shared":
@@ -1080,7 +1075,6 @@ class AgentKernel:
         )
 
     def _memory_runtime(self, agent: AgentSpec) -> dict[str, Any]:
-        memory_profile = dict((agent.metadata or {}).get("memory_profile") or {})
         return {
             "provider": {
                 "provider_type": agent.provider_type,
@@ -1094,8 +1088,6 @@ class AgentKernel:
                 "temperature": agent.temperature,
                 "max_tokens": agent.max_tokens,
             },
-            "memory_profile": memory_profile,
-            "short_term": dict((memory_profile.get("config") or {}).get("short_term") or {}),
         }
 
     async def _invoke_plugin(

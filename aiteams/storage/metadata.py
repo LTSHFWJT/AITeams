@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import re
+import shutil
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from aiteams.utils import json_dumps, json_loads, make_id, make_uuid7, trim_text, utcnow_iso
 
@@ -209,58 +210,38 @@ SCHEMA = [
     )
     """,
     """
-    CREATE TABLE IF NOT EXISTS agent_templates (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        role TEXT NOT NULL,
-        description TEXT,
-        version TEXT NOT NULL DEFAULT 'v1',
-        spec_json TEXT NOT NULL DEFAULT '{}',
-        status TEXT NOT NULL DEFAULT 'active',
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS team_templates (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        description TEXT,
-        version TEXT NOT NULL DEFAULT 'v1',
-        spec_json TEXT NOT NULL DEFAULT '{}',
-        status TEXT NOT NULL DEFAULT 'active',
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-    )
-    """,
-    """
     CREATE TABLE IF NOT EXISTS skills (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT,
+        storage_path TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS skill_groups (
         id TEXT PRIMARY KEY,
         key TEXT NOT NULL,
         name TEXT NOT NULL,
         description TEXT,
-        version TEXT NOT NULL DEFAULT 'v1',
-        spec_json TEXT NOT NULL DEFAULT '{}',
-        status TEXT NOT NULL DEFAULT 'active',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS skill_group_members (
+        skill_id TEXT NOT NULL,
+        skill_group_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(skill_id, skill_group_id),
+        FOREIGN KEY(skill_id) REFERENCES skills(id) ON DELETE CASCADE,
+        FOREIGN KEY(skill_group_id) REFERENCES skill_groups(id) ON DELETE CASCADE
     )
     """,
     """
     CREATE TABLE IF NOT EXISTS static_memories (
-        id TEXT PRIMARY KEY,
-        key TEXT NOT NULL,
-        name TEXT NOT NULL,
-        description TEXT,
-        version TEXT NOT NULL DEFAULT 'v1',
-        spec_json TEXT NOT NULL DEFAULT '{}',
-        status TEXT NOT NULL DEFAULT 'active',
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS memory_profiles (
         id TEXT PRIMARY KEY,
         key TEXT NOT NULL,
         name TEXT NOT NULL,
@@ -377,21 +358,6 @@ SCHEMA = [
     )
     """,
     """
-    CREATE TABLE IF NOT EXISTS blueprint_builds (
-        id TEXT PRIMARY KEY,
-        team_template_id TEXT NOT NULL,
-        name TEXT NOT NULL,
-        description TEXT,
-        spec_json TEXT NOT NULL DEFAULT '{}',
-        resource_lock_json TEXT NOT NULL DEFAULT '{}',
-        blueprint_id TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        FOREIGN KEY(team_template_id) REFERENCES team_templates(id) ON DELETE CASCADE,
-        FOREIGN KEY(blueprint_id) REFERENCES blueprints(id) ON DELETE SET NULL
-    )
-    """,
-    """
     CREATE TABLE IF NOT EXISTS team_build_snapshots (
         id TEXT PRIMARY KEY,
         team_definition_id TEXT,
@@ -413,25 +379,23 @@ SCHEMA = [
     "CREATE INDEX IF NOT EXISTS idx_approvals_run ON approvals(run_id, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_artifacts_run ON artifacts(run_id, created_at DESC)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_plugins_key_version ON plugins(key, version)",
-    "CREATE UNIQUE INDEX IF NOT EXISTS idx_skills_key_version ON skills(key, version)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_skills_name ON skills(name)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_groups_key ON skill_groups(key)",
+    "CREATE INDEX IF NOT EXISTS idx_skill_group_members_group ON skill_group_members(skill_group_id, updated_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_skill_group_members_skill ON skill_group_members(skill_id, updated_at DESC)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_static_memories_key_version ON static_memories(key, version)",
-    "CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_profiles_key_version ON memory_profiles(key, version)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_bases_key ON knowledge_bases(key)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_review_policies_key_version ON review_policies(key, version)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_team_definitions_key_version ON team_definitions(key, version)",
     "CREATE INDEX IF NOT EXISTS idx_provider_profiles_type ON provider_profiles(provider_type, updated_at DESC)",
-    "CREATE INDEX IF NOT EXISTS idx_agent_templates_role ON agent_templates(role, updated_at DESC)",
-    "CREATE INDEX IF NOT EXISTS idx_team_templates_updated ON team_templates(updated_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_skills_updated ON skills(updated_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_static_memories_updated ON static_memories(updated_at DESC)",
-    "CREATE INDEX IF NOT EXISTS idx_memory_profiles_updated ON memory_profiles(updated_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_knowledge_documents_kb ON knowledge_documents(knowledge_base_id, updated_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_review_policies_updated ON review_policies(updated_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_agent_definitions_role ON agent_definitions(role, updated_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_team_definitions_updated ON team_definitions(updated_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_task_threads_team ON task_threads(team_definition_id, updated_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_message_events_thread ON message_events(thread_id, created_at DESC)",
-    "CREATE INDEX IF NOT EXISTS idx_builds_team_template ON blueprint_builds(team_template_id, created_at DESC)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_team_build_snapshots_run ON team_build_snapshots(run_id)",
 ]
 
@@ -453,6 +417,7 @@ class MetadataStore:
         self._connection = sqlite3.connect(str(self.path), check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._workspace_root = str(Path(workspace_root).expanduser().resolve())
+        self._skill_storage_root = (self.path.parent / "deepagents-skills").expanduser().resolve()
         self._defaults = {
             "workspace_id": default_workspace_id,
             "workspace_name": default_workspace_name,
@@ -484,6 +449,352 @@ class MetadataStore:
             )
             """
         )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS skill_groups (
+                id TEXT PRIMARY KEY,
+                key TEXT NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        self._ensure_skill_group_members_table()
+        self._migrate_skills_table()
+        self._normalize_skill_storage_layout()
+        self._migrate_agent_templates_to_definitions()
+        self._connection.execute("DROP INDEX IF EXISTS idx_agent_templates_role")
+        self._connection.execute("DROP INDEX IF EXISTS idx_skills_key_version")
+        self._connection.execute("DROP INDEX IF EXISTS idx_skill_groups_sort")
+        self._connection.execute("DROP TABLE IF EXISTS agent_templates")
+        self._connection.execute("DROP INDEX IF EXISTS idx_memory_profiles_key_version")
+        self._connection.execute("DROP INDEX IF EXISTS idx_memory_profiles_updated")
+        self._connection.execute("DROP TABLE IF EXISTS memory_profiles")
+
+    def _table_exists(self, table_name: str) -> bool:
+        return self.fetch_one("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", (table_name,)) is not None
+
+    def _ensure_skill_group_members_table(self) -> None:
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS skill_group_members (
+                skill_id TEXT NOT NULL,
+                skill_group_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(skill_id, skill_group_id),
+                FOREIGN KEY(skill_id) REFERENCES skills(id) ON DELETE CASCADE,
+                FOREIGN KEY(skill_group_id) REFERENCES skill_groups(id) ON DELETE CASCADE
+            )
+            """
+        )
+
+    def _normalize_skill_storage_path(self, raw_path: Any) -> str:
+        text = str(raw_path or "").replace("\\", "/").strip()
+        if not text:
+            return ""
+        is_absolute = bool(re.match(r"^[a-zA-Z]:/", text)) or text.startswith("/")
+        if is_absolute:
+            try:
+                relative = Path(text).expanduser().resolve().relative_to(self._skill_storage_root)
+            except Exception:
+                return ""
+            return relative.as_posix().strip("/")
+        parts = [part for part in text.split("/") if part and part not in {".", ".."}]
+        return "/".join(parts)
+
+    def _desired_skill_storage_path(self, *, record_id: str, name: str) -> str:
+        folder_name = str(name or "").strip()
+        if not folder_name:
+            folder_name = record_id
+        if Path(folder_name).name != folder_name or any(part in {"", ".", ".."} for part in Path(folder_name).parts):
+            folder_name = record_id
+        return f"{record_id}/{folder_name}"
+
+    def _legacy_skill_group_ids(self, row: dict[str, Any]) -> list[str]:
+        spec = json_loads(row.get("spec_json"), {})
+        refs: list[dict[str, Any]] = []
+        raw_refs = spec.get("group_refs")
+        if isinstance(raw_refs, list):
+            refs.extend(item for item in raw_refs if isinstance(item, dict))
+        legacy = {
+            "id": spec.get("group_id"),
+            "key": spec.get("group_key"),
+            "name": spec.get("group_name"),
+        }
+        if any(legacy.values()):
+            refs.append(legacy)
+        group_ids: list[str] = []
+        seen: set[str] = set()
+        for item in refs:
+            group_id = str(item.get("id") or "").strip()
+            group_key = str(item.get("key") or "").strip()
+            group = self.get_skill_group(group_id) if group_id else None
+            if group is None and group_key:
+                group = self.get_skill_group_by_key(group_key)
+            resolved_id = str((group or {}).get("id") or "").strip()
+            if not resolved_id or resolved_id in seen:
+                continue
+            seen.add(resolved_id)
+            group_ids.append(resolved_id)
+        return group_ids
+
+    def _legacy_skill_storage_source(self, row: dict[str, Any]) -> Path | None:
+        storage_path = self._normalize_skill_storage_path(row.get("storage_path"))
+        if storage_path:
+            candidate = self._skill_storage_root.joinpath(*storage_path.split("/"))
+            if candidate.is_dir():
+                return candidate
+        spec = json_loads(row.get("spec_json"), {})
+        absolute_path = str(spec.get("deepagents_skill_filesystem_path") or "").strip()
+        if absolute_path:
+            candidate = Path(absolute_path).expanduser().resolve()
+            if candidate.is_dir():
+                return candidate
+        legacy_directory = str(spec.get("deepagents_skill_directory") or "").strip()
+        if legacy_directory:
+            for base in (self._skill_storage_root / "library" / "catalog", self._skill_storage_root):
+                candidate = base / legacy_directory
+                if candidate.is_dir():
+                    return candidate
+        return None
+
+    def _migrate_skill_storage_path(self, row: dict[str, Any], *, record_id: str, name: str) -> str:
+        desired_relative = self._desired_skill_storage_path(record_id=record_id, name=name)
+        normalized_current = self._normalize_skill_storage_path(row.get("storage_path"))
+        source_dir = self._legacy_skill_storage_source(row)
+        current_dir = self._skill_storage_root.joinpath(*normalized_current.split("/")) if normalized_current else None
+        if current_dir is not None and current_dir.is_dir() and source_dir is None:
+            source_dir = current_dir
+        target_relative = desired_relative
+        target_dir = self._skill_storage_root.joinpath(*target_relative.split("/"))
+        if target_dir.is_dir():
+            return target_relative
+        if source_dir is not None:
+            self._skill_storage_root.mkdir(parents=True, exist_ok=True)
+            if target_dir.resolve() != source_dir.resolve():
+                if target_dir.exists():
+                    shutil.rmtree(target_dir, ignore_errors=True)
+                shutil.copytree(source_dir, target_dir)
+                try:
+                    legacy_relative = source_dir.resolve().relative_to(self._skill_storage_root)
+                    if legacy_relative.as_posix() != target_relative:
+                        shutil.rmtree(source_dir, ignore_errors=True)
+                except Exception:
+                    pass
+            return target_relative
+        return target_relative
+
+    def _migrate_skills_table(self) -> None:
+        if not self._table_exists("skills"):
+            return
+        columns = {str(row["name"]) for row in self.fetch_all("PRAGMA table_info(skills)")}
+        desired_columns = {"id", "name", "description", "storage_path", "created_at", "updated_at"}
+        if columns == desired_columns:
+            return
+        legacy_rows = self.fetch_all("SELECT * FROM skills ORDER BY created_at ASC, id ASC")
+        memberships: list[tuple[str, str]] = []
+        self._connection.execute("DROP TABLE IF EXISTS skills__new")
+        self._connection.execute(
+            """
+            CREATE TABLE skills__new (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT,
+                storage_path TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        seen_names: set[str] = set()
+        for row in legacy_rows:
+            record_id = str(row.get("id") or "").strip() or make_uuid7()
+            base_name = trim_text(str(row.get("name") or "").strip(), limit=255) or record_id
+            name = base_name
+            suffix = 1
+            while name in seen_names:
+                suffix += 1
+                name = trim_text(f"{base_name}-{suffix}", limit=255) or f"{record_id}-{suffix}"
+            seen_names.add(name)
+            storage_path = self._migrate_skill_storage_path(row, record_id=record_id, name=name)
+            created_at = str(row.get("created_at") or utcnow_iso())
+            updated_at = str(row.get("updated_at") or created_at)
+            self._connection.execute(
+                """
+                INSERT INTO skills__new(id, name, description, storage_path, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (record_id, name, str(row.get("description") or ""), storage_path, created_at, updated_at),
+            )
+            memberships.extend((record_id, group_id) for group_id in self._legacy_skill_group_ids(row))
+        self._connection.execute("DROP TABLE skills")
+        self._connection.execute("ALTER TABLE skills__new RENAME TO skills")
+        self._connection.execute("DROP INDEX IF EXISTS idx_skills_key_version")
+        self._connection.execute("DROP INDEX IF EXISTS idx_skills_name")
+        self._connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_skills_name ON skills(name)")
+        self._connection.execute("CREATE INDEX IF NOT EXISTS idx_skills_updated ON skills(updated_at DESC)")
+        self._connection.execute("DELETE FROM skill_group_members")
+        now = utcnow_iso()
+        for skill_id, group_id in memberships:
+            self._connection.execute(
+                """
+                INSERT OR IGNORE INTO skill_group_members(skill_id, skill_group_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (skill_id, group_id, now, now),
+            )
+
+    def _normalize_skill_storage_layout(self) -> None:
+        if not self._table_exists("skills"):
+            return
+        columns = {str(row["name"]) for row in self.fetch_all("PRAGMA table_info(skills)")}
+        if "storage_path" not in columns or "name" not in columns:
+            return
+        now = utcnow_iso()
+        for skill in self.fetch_all("SELECT id, name, storage_path FROM skills"):
+            record_id = str(skill.get("id") or "").strip()
+            name = str(skill.get("name") or "").strip()
+            if not record_id or not name:
+                continue
+            desired_relative = self._desired_skill_storage_path(record_id=record_id, name=name)
+            current_relative = self._normalize_skill_storage_path(skill.get("storage_path"))
+            target_dir = self._skill_storage_root.joinpath(*desired_relative.split("/"))
+            current_dir = self._skill_storage_root.joinpath(*current_relative.split("/")) if current_relative else None
+            if current_relative == desired_relative and target_dir.is_dir():
+                continue
+            source_dir = current_dir if current_dir is not None and current_dir.is_dir() else None
+            if source_dir is not None and source_dir.resolve() != target_dir.resolve():
+                self._skill_storage_root.mkdir(parents=True, exist_ok=True)
+                if target_dir.exists():
+                    shutil.rmtree(target_dir, ignore_errors=True)
+                shutil.copytree(source_dir, target_dir)
+                try:
+                    source_relative = source_dir.resolve().relative_to(self._skill_storage_root)
+                    if source_relative.as_posix() != desired_relative:
+                        shutil.rmtree(source_dir, ignore_errors=True)
+                except Exception:
+                    pass
+            self._connection.execute(
+                "UPDATE skills SET storage_path = ?, updated_at = ? WHERE id = ?",
+                (desired_relative, now, record_id),
+            )
+
+    def _migrate_agent_templates_to_definitions(self) -> None:
+        if not self._table_exists("agent_templates"):
+            return
+        templates = self.fetch_all("SELECT * FROM agent_templates ORDER BY created_at ASC, id ASC")
+        if not templates:
+            return
+        for template in templates:
+            template_id = str(template.get("id") or "").strip()
+            if not template_id:
+                continue
+            existing = self.get_agent_definition(template_id)
+            if existing is None:
+                spec = self._migrated_agent_definition_spec_from_template(dict(template.get("spec_json") or {}))
+                self.execute(
+                    """
+                    INSERT INTO agent_definitions(id, name, role, description, version, spec_json, status, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        template_id,
+                        str(template.get("name") or ""),
+                        trim_text(str(template.get("role") or "").strip(), limit=255) or "agent",
+                        str(template.get("description") or ""),
+                        str(template.get("version") or "v1"),
+                        json_dumps(spec),
+                        str(template.get("status") or "active"),
+                        str(template.get("created_at") or utcnow_iso()),
+                        str(template.get("updated_at") or utcnow_iso()),
+                    ),
+                )
+        for team_definition in self.fetch_all("SELECT id, spec_json FROM team_definitions"):
+            spec = json_loads(team_definition.get("spec_json"), {})
+            if not isinstance(spec, dict):
+                continue
+            changed = self._migrate_team_definition_agent_template_refs(spec)
+            if not changed:
+                continue
+            self.execute(
+                "UPDATE team_definitions SET spec_json = ? WHERE id = ?",
+                (json_dumps(spec), str(team_definition.get("id") or "")),
+            )
+
+    def _migrated_agent_definition_spec_from_template(self, spec: dict[str, Any]) -> dict[str, Any]:
+        migrated = dict(spec or {})
+        plugin_refs = [str(item).strip() for item in list(migrated.get("tool_plugin_refs") or migrated.get("plugin_refs") or []) if str(item).strip()]
+        if plugin_refs:
+            migrated["tool_plugin_refs"] = list(dict.fromkeys(plugin_refs))
+        migrated.pop("plugin_refs", None)
+        return migrated
+
+    def _migrate_skill_groups(self) -> None:
+        return
+
+    def sync_skill_groups_from_skills(self) -> None:
+        return
+
+    def _migrate_skill_group_refs(self) -> None:
+        return
+
+    def _strip_legacy_skill_group_order(self) -> None:
+        return
+
+    def _drop_skill_group_sort_order_column(self) -> None:
+        columns = {str(row["name"]) for row in self.fetch_all("PRAGMA table_info(skill_groups)")}
+        if "sort_order" not in columns:
+            return
+        self._connection.execute("DROP INDEX IF EXISTS idx_skill_groups_sort")
+        self._connection.execute("DROP TABLE IF EXISTS skill_groups__new")
+        self._connection.execute(
+            """
+            CREATE TABLE skill_groups__new (
+                id TEXT PRIMARY KEY,
+                key TEXT NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        self._connection.execute(
+            """
+            INSERT INTO skill_groups__new(id, key, name, description, created_at, updated_at)
+            SELECT id, key, name, description, created_at, updated_at
+            FROM skill_groups
+            """
+        )
+        self._connection.execute("DROP TABLE skill_groups")
+        self._connection.execute("ALTER TABLE skill_groups__new RENAME TO skill_groups")
+        self._connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_groups_key ON skill_groups(key)")
+
+    def _migrate_team_definition_agent_template_refs(self, payload: Any) -> bool:
+        changed = False
+        if isinstance(payload, dict):
+            template_ref = payload.pop("agent_template_ref", None)
+            template_id = payload.pop("agent_template_id", None)
+            reference = template_ref if template_ref is not None else template_id
+            if reference is not None:
+                payload["agent_definition_ref"] = reference
+                payload["source_kind"] = "agent_definition"
+                changed = True
+            elif str(payload.get("source_kind") or "").strip() == "agent_template":
+                payload["source_kind"] = "agent_definition"
+                changed = True
+            for value in payload.values():
+                if self._migrate_team_definition_agent_template_refs(value):
+                    changed = True
+            return changed
+        if isinstance(payload, list):
+            for item in payload:
+                if self._migrate_team_definition_agent_template_refs(item):
+                    changed = True
+        return changed
 
     def _ensure_column(self, table_name: str, column_name: str, definition: str) -> None:
         columns = {str(item.get("name") or "") for item in self.fetch_all(f"PRAGMA table_info({table_name})")}
@@ -599,6 +910,12 @@ class MetadataStore:
 
     def get_project(self, project_id: str) -> dict[str, Any] | None:
         return self.fetch_one("SELECT * FROM projects WHERE id = ?", (project_id,))
+
+    def default_scope_ids(self) -> dict[str, str]:
+        return {
+            "workspace_id": str(self._defaults["workspace_id"]),
+            "project_id": str(self._defaults["project_id"]),
+        }
 
     def save_blueprint(
         self,
@@ -923,132 +1240,133 @@ class MetadataStore:
             paths.append(path)
         return paths
 
-    def save_agent_template(
+    def save_skill_group(
         self,
         *,
-        agent_template_id: str | None,
+        skill_group_id: str | None,
+        key: str,
         name: str,
-        role: str,
         description: str,
-        version: str,
-        spec: dict[str, Any],
-        status: str = "active",
     ) -> dict[str, Any]:
-        record_id = agent_template_id or make_uuid7()
+        record_id = skill_group_id or make_uuid7()
         now = utcnow_iso()
         self.execute(
             """
-            INSERT INTO agent_templates(id, name, role, description, version, spec_json, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM agent_templates WHERE id = ?), ?), ?)
+            INSERT INTO skill_groups(id, key, name, description, created_at, updated_at)
+            VALUES (?, ?, ?, ?, COALESCE((SELECT created_at FROM skill_groups WHERE id = ?), ?), ?)
             ON CONFLICT(id) DO UPDATE SET
+                key = excluded.key,
                 name = excluded.name,
-                role = excluded.role,
                 description = excluded.description,
-                version = excluded.version,
-                spec_json = excluded.spec_json,
-                status = excluded.status,
                 updated_at = excluded.updated_at
             """,
-            (record_id, name, role, description, version, json_dumps(spec), status, record_id, now, now),
+            (record_id, key, name, description, record_id, now, now),
         )
-        template = self.get_agent_template(record_id)
-        assert template is not None
-        return template
+        saved = self.get_skill_group(record_id)
+        assert saved is not None
+        return saved
 
-    def get_agent_template(self, agent_template_id: str) -> dict[str, Any] | None:
-        return self._deserialize(self.fetch_one("SELECT * FROM agent_templates WHERE id = ?", (agent_template_id,)))
+    def get_skill_group(self, skill_group_id: str) -> dict[str, Any] | None:
+        return self._deserialize(self.fetch_one("SELECT * FROM skill_groups WHERE id = ?", (skill_group_id,)))
 
-    def list_agent_templates(self) -> list[dict[str, Any]]:
-        return self._deserialize_many(self.fetch_all("SELECT * FROM agent_templates ORDER BY updated_at DESC"))
+    def get_skill_group_by_key(self, key: str) -> dict[str, Any] | None:
+        return self._deserialize(self.fetch_one("SELECT * FROM skill_groups WHERE key = ? ORDER BY updated_at DESC LIMIT 1", (key,)))
 
-    def list_agent_templates_page(self, *, limit: int | None = None, offset: int = 0) -> dict[str, Any]:
-        total = int((self.fetch_one("SELECT COUNT(*) AS count FROM agent_templates") or {}).get("count", 0) or 0)
-        safe_offset = max(0, int(offset or 0))
-        sql = "SELECT * FROM agent_templates ORDER BY updated_at DESC"
-        params: list[Any] = []
-        if limit is not None:
-            safe_limit = max(1, int(limit))
-            sql += " LIMIT ? OFFSET ?"
-            params.extend([safe_limit, safe_offset])
-        else:
-            safe_limit = total or 0
-        return {
-            "items": self._deserialize_many(self.fetch_all(sql, tuple(params))),
-            "total": total,
-            "offset": safe_offset,
-            "limit": safe_limit,
+    def _skill_group_sort_key(self, item: dict[str, Any]) -> tuple[int, str, str]:
+        return (
+            1 if item.get("is_ungrouped") else 0,
+            str(item.get("name") or "").lower(),
+            str(item.get("key") or "").lower(),
+        )
+
+    def resolve_skill_groups(self, skill: dict[str, Any]) -> list[dict[str, Any]]:
+        skill_id = str(skill.get("id") or "").strip()
+        if not skill_id:
+            return []
+        rows = self.fetch_all(
+            """
+            SELECT sg.*
+            FROM skill_groups AS sg
+            INNER JOIN skill_group_members AS sgm
+                ON sgm.skill_group_id = sg.id
+            WHERE sgm.skill_id = ?
+            ORDER BY LOWER(sg.name) ASC, LOWER(sg.key) ASC
+            """,
+            (skill_id,),
+        )
+        return [
+            {
+                **row,
+                "is_ungrouped": False,
+            }
+            for row in self._deserialize_many(rows)
+        ]
+
+    def resolve_skill_group(self, skill: dict[str, Any]) -> dict[str, Any] | None:
+        groups = self.resolve_skill_groups(skill)
+        return groups[0] if groups else None
+
+    def _skill_group_usage_counts(self) -> dict[str, int]:
+        counts = {
+            str(item.get("group_key") or ""): int(item.get("count") or 0)
+            for item in self.fetch_all(
+                """
+                SELECT sg.key AS group_key, COUNT(sgm.skill_id) AS count
+                FROM skill_groups AS sg
+                LEFT JOIN skill_group_members AS sgm
+                    ON sgm.skill_group_id = sg.id
+                GROUP BY sg.id, sg.key
+                """
+            )
+            if str(item.get("group_key") or "").strip()
         }
-
-    def delete_agent_template(self, agent_template_id: str) -> dict[str, Any] | None:
-        existing = self.get_agent_template(agent_template_id)
-        if existing is None:
-            return None
-        self.execute("DELETE FROM agent_templates WHERE id = ?", (agent_template_id,))
-        return existing
-
-    def save_team_template(
-        self,
-        *,
-        team_template_id: str | None,
-        name: str,
-        description: str,
-        version: str,
-        spec: dict[str, Any],
-        status: str = "active",
-    ) -> dict[str, Any]:
-        record_id = team_template_id or make_uuid7()
-        now = utcnow_iso()
-        self.execute(
-            """
-            INSERT INTO team_templates(id, name, description, version, spec_json, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM team_templates WHERE id = ?), ?), ?)
-            ON CONFLICT(id) DO UPDATE SET
-                name = excluded.name,
-                description = excluded.description,
-                version = excluded.version,
-                spec_json = excluded.spec_json,
-                status = excluded.status,
-                updated_at = excluded.updated_at
-            """,
-            (record_id, name, description, version, json_dumps(spec), status, record_id, now, now),
+        counts["__ungrouped__"] = int(
+            (
+                self.fetch_one(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM skills AS s
+                    LEFT JOIN skill_group_members AS sgm
+                        ON sgm.skill_id = s.id
+                    WHERE sgm.skill_id IS NULL
+                    """
+                )
+                or {}
+            ).get("count", 0)
+            or 0
         )
-        template = self.get_team_template(record_id)
-        assert template is not None
-        return template
-
-    def get_team_template(self, team_template_id: str) -> dict[str, Any] | None:
-        return self._deserialize(self.fetch_one("SELECT * FROM team_templates WHERE id = ?", (team_template_id,)))
-
-    def list_team_templates(self) -> list[dict[str, Any]]:
-        return self._deserialize_many(self.fetch_all("SELECT * FROM team_templates ORDER BY updated_at DESC"))
+        return counts
 
     def save_skill(
         self,
         *,
         skill_id: str | None,
-        key: str,
         name: str,
         description: str,
-        version: str,
-        spec: dict[str, Any],
-        status: str = "active",
+        storage_path: str,
     ) -> dict[str, Any]:
         record_id = skill_id or make_uuid7()
         now = utcnow_iso()
+        normalized_name = trim_text(name, limit=255)
+        normalized_storage_path = self._normalize_skill_storage_path(storage_path)
+        if not normalized_name:
+            raise ValueError("Skill name is required.")
+        if not normalized_storage_path:
+            raise ValueError("Skill storage_path is required.")
+        existing_by_name = self.get_skill_by_name(normalized_name)
+        if existing_by_name is not None and str(existing_by_name.get("id") or "") != record_id:
+            raise ValueError(f"Skill name `{normalized_name}` already exists.")
         self.execute(
             """
-            INSERT INTO skills(id, key, name, description, version, spec_json, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM skills WHERE id = ?), ?), ?)
+            INSERT INTO skills(id, name, description, storage_path, created_at, updated_at)
+            VALUES (?, ?, ?, ?, COALESCE((SELECT created_at FROM skills WHERE id = ?), ?), ?)
             ON CONFLICT(id) DO UPDATE SET
-                key = excluded.key,
                 name = excluded.name,
                 description = excluded.description,
-                version = excluded.version,
-                spec_json = excluded.spec_json,
-                status = excluded.status,
+                storage_path = excluded.storage_path,
                 updated_at = excluded.updated_at
             """,
-            (record_id, key, name, description, version, json_dumps(spec), status, record_id, now, now),
+            (record_id, normalized_name, description, normalized_storage_path, record_id, now, now),
         )
         saved = self.get_skill(record_id)
         assert saved is not None
@@ -1057,16 +1375,188 @@ class MetadataStore:
     def get_skill(self, skill_id: str) -> dict[str, Any] | None:
         return self._deserialize(self.fetch_one("SELECT * FROM skills WHERE id = ?", (skill_id,)))
 
+    def get_skill_by_name(self, name: str) -> dict[str, Any] | None:
+        return self._deserialize(self.fetch_one("SELECT * FROM skills WHERE name = ? ORDER BY updated_at DESC LIMIT 1", (name,)))
+
     def get_skill_by_key(self, key: str) -> dict[str, Any] | None:
-        return self._deserialize(self.fetch_one("SELECT * FROM skills WHERE key = ? ORDER BY updated_at DESC LIMIT 1", (key,)))
+        return self.get_skill_by_name(key)
 
     def list_skills(self) -> list[dict[str, Any]]:
-        return self._deserialize_many(self.fetch_all("SELECT * FROM skills ORDER BY updated_at DESC"))
+        return self._deserialize_many(self.fetch_all("SELECT * FROM skills ORDER BY updated_at DESC, created_at DESC"))
+
+    def _skill_group_fields(self, skill: dict[str, Any]) -> tuple[str, str, None]:
+        group = self.resolve_skill_group(skill) or {}
+        return (
+            str(group.get("key") or ""),
+            str(group.get("name") or ""),
+            None,
+        )
+
+    def list_skill_groups(self, *, include_ungrouped: bool = False) -> list[dict[str, Any]]:
+        counts = self._skill_group_usage_counts()
+        groups = [
+            {
+                **row,
+                "count": int(counts.get(str(row.get("key") or ""), 0) or 0),
+                "is_ungrouped": False,
+            }
+            for row in self._deserialize_many(
+                self.fetch_all(
+                    """
+                    SELECT * FROM skill_groups
+                    ORDER BY
+                        LOWER(name) ASC,
+                        LOWER(key) ASC
+                    """
+                )
+            )
+        ]
+        if include_ungrouped:
+            groups.append(
+                {
+                    "id": "",
+                    "key": "__ungrouped__",
+                    "name": "未分组",
+                    "description": "",
+                    "count": int(counts.get("__ungrouped__", 0) or 0),
+                    "is_ungrouped": True,
+                }
+            )
+        return sorted(groups, key=self._skill_group_sort_key)
+
+    def list_skill_groups_page(self, *, limit: int | None = None, offset: int = 0) -> dict[str, Any]:
+        rows = self.list_skill_groups()
+        total = len(rows)
+        safe_offset = max(0, int(offset or 0))
+        if limit is not None:
+            safe_limit = max(1, int(limit))
+            items = rows[safe_offset : safe_offset + safe_limit]
+        else:
+            safe_limit = total or 0
+            items = rows[safe_offset:]
+        return {
+            "items": items,
+            "total": total,
+            "offset": safe_offset,
+            "limit": safe_limit,
+        }
+
+    def sync_skill_group_assignments(self, *, skill_group: dict[str, Any], previous_key: str | None = None) -> None:
+        del skill_group, previous_key
+        return
+
+    def replace_skill_group_memberships(self, skill_id: str, skill_group_ids: Sequence[str]) -> None:
+        normalized_skill_id = str(skill_id or "").strip()
+        if not normalized_skill_id:
+            return
+        normalized_group_ids: list[str] = []
+        seen: set[str] = set()
+        for item in skill_group_ids:
+            group_id = str(item or "").strip()
+            if not group_id or group_id in seen:
+                continue
+            seen.add(group_id)
+            normalized_group_ids.append(group_id)
+        now = utcnow_iso()
+        self.execute("DELETE FROM skill_group_members WHERE skill_id = ?", (normalized_skill_id,))
+        for group_id in normalized_group_ids:
+            self.execute(
+                """
+                INSERT OR IGNORE INTO skill_group_members(skill_id, skill_group_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (normalized_skill_id, group_id, now, now),
+            )
+
+    def set_skill_group_members(self, *, skill_group: dict[str, Any], skill_ids: Sequence[str]) -> None:
+        group_id = str(skill_group.get("id") or "").strip()
+        if not group_id:
+            return
+        normalized_skill_ids: list[str] = []
+        seen: set[str] = set()
+        for item in skill_ids:
+            skill_id = str(item or "").strip()
+            if not skill_id or skill_id in seen:
+                continue
+            seen.add(skill_id)
+            normalized_skill_ids.append(skill_id)
+        now = utcnow_iso()
+        self.execute("DELETE FROM skill_group_members WHERE skill_group_id = ?", (group_id,))
+        for skill_id in normalized_skill_ids:
+            self.execute(
+                """
+                INSERT OR IGNORE INTO skill_group_members(skill_id, skill_group_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (skill_id, group_id, now, now),
+            )
+
+    def delete_skill_group(self, skill_group_id: str) -> dict[str, Any] | None:
+        existing = self.get_skill_group(skill_group_id)
+        if existing is None:
+            return None
+        self.execute("DELETE FROM skill_groups WHERE id = ?", (skill_group_id,))
+        return existing
+
+    def list_skills_page(
+        self,
+        *,
+        query: str | None = None,
+        group_key: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        rows = self.list_skills()
+        groups = self.list_skill_groups(include_ungrouped=True)
+        keyword = str(query or "").strip().lower()
+        selected_group = str(group_key or "").strip()
+
+        filtered: list[dict[str, Any]] = []
+        for skill in rows:
+            current_groups = self.resolve_skill_groups(skill)
+            current_group_keys = [str(item.get("key") or "").strip() for item in current_groups if str(item.get("key") or "").strip()]
+            current_group_names = [str(item.get("name") or "").strip() for item in current_groups if str(item.get("name") or "").strip()]
+            if selected_group:
+                if selected_group == "__ungrouped__":
+                    if current_group_keys:
+                        continue
+                elif selected_group not in current_group_keys:
+                    continue
+            if keyword:
+                haystack = "\n".join(
+                    [
+                        str(skill.get("name") or ""),
+                        str(skill.get("description") or ""),
+                        str(skill.get("storage_path") or ""),
+                        "\n".join(current_group_keys),
+                        "\n".join(current_group_names),
+                    ]
+                ).lower()
+                if keyword not in haystack:
+                    continue
+            filtered.append(skill)
+
+        total = len(filtered)
+        safe_offset = max(0, int(offset or 0))
+        if limit is not None:
+            safe_limit = max(1, int(limit))
+            items = filtered[safe_offset : safe_offset + safe_limit]
+        else:
+            safe_limit = total or 0
+            items = filtered[safe_offset:]
+        return {
+            "items": items,
+            "total": total,
+            "offset": safe_offset,
+            "limit": safe_limit,
+            "groups": groups,
+        }
 
     def delete_skill(self, skill_id: str) -> dict[str, Any] | None:
         existing = self.get_skill(skill_id)
         if existing is None:
             return None
+        self.execute("DELETE FROM skill_group_members WHERE skill_id = ?", (skill_id,))
         self.execute("DELETE FROM skills WHERE id = ?", (skill_id,))
         return existing
 
@@ -1134,54 +1624,6 @@ class MetadataStore:
         if existing is None:
             return None
         self.execute("DELETE FROM static_memories WHERE id = ?", (static_memory_id,))
-        return existing
-
-    def save_memory_profile(
-        self,
-        *,
-        memory_profile_id: str | None,
-        key: str,
-        name: str,
-        description: str,
-        version: str,
-        spec: dict[str, Any],
-        status: str = "active",
-    ) -> dict[str, Any]:
-        record_id = memory_profile_id or make_uuid7()
-        now = utcnow_iso()
-        self.execute(
-            """
-            INSERT INTO memory_profiles(id, key, name, description, version, spec_json, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM memory_profiles WHERE id = ?), ?), ?)
-            ON CONFLICT(id) DO UPDATE SET
-                key = excluded.key,
-                name = excluded.name,
-                description = excluded.description,
-                version = excluded.version,
-                spec_json = excluded.spec_json,
-                status = excluded.status,
-                updated_at = excluded.updated_at
-            """,
-            (record_id, key, name, description, version, json_dumps(spec), status, record_id, now, now),
-        )
-        saved = self.get_memory_profile(record_id)
-        assert saved is not None
-        return saved
-
-    def get_memory_profile(self, memory_profile_id: str) -> dict[str, Any] | None:
-        return self._deserialize(self.fetch_one("SELECT * FROM memory_profiles WHERE id = ?", (memory_profile_id,)))
-
-    def get_memory_profile_by_key(self, key: str) -> dict[str, Any] | None:
-        return self._deserialize(self.fetch_one("SELECT * FROM memory_profiles WHERE key = ? ORDER BY updated_at DESC LIMIT 1", (key,)))
-
-    def list_memory_profiles(self) -> list[dict[str, Any]]:
-        return self._deserialize_many(self.fetch_all("SELECT * FROM memory_profiles ORDER BY updated_at DESC"))
-
-    def delete_memory_profile(self, memory_profile_id: str) -> dict[str, Any] | None:
-        existing = self.get_memory_profile(memory_profile_id)
-        if existing is None:
-            return None
-        self.execute("DELETE FROM memory_profiles WHERE id = ?", (memory_profile_id,))
         return existing
 
     def save_knowledge_base(
@@ -1526,6 +1968,32 @@ class MetadataStore:
     def list_team_definitions(self) -> list[dict[str, Any]]:
         return self._deserialize_many(self.fetch_all("SELECT * FROM team_definitions ORDER BY updated_at DESC"))
 
+    def list_team_definitions_page(self, *, limit: int | None = None, offset: int = 0) -> dict[str, Any]:
+        total = int((self.fetch_one("SELECT COUNT(*) AS count FROM team_definitions") or {}).get("count", 0) or 0)
+        safe_offset = max(0, int(offset or 0))
+        sql = "SELECT * FROM team_definitions ORDER BY updated_at DESC"
+        params: list[Any] = []
+        if limit is not None:
+            safe_limit = max(1, int(limit))
+            sql += " LIMIT ? OFFSET ?"
+            params.extend([safe_limit, safe_offset])
+        else:
+            safe_limit = total or 0
+        rows = self._deserialize_many(self.fetch_all(sql, tuple(params)))
+        return {
+            "items": rows,
+            "total": total,
+            "offset": safe_offset,
+            "limit": safe_limit,
+        }
+
+    def delete_team_definition(self, team_definition_id: str) -> dict[str, Any] | None:
+        existing = self.get_team_definition(team_definition_id)
+        if existing is None:
+            return None
+        self.execute("DELETE FROM team_definitions WHERE id = ?", (team_definition_id,))
+        return existing
+
     def save_platform_setting(self, setting_key: str, value: dict[str, Any]) -> dict[str, Any]:
         now = utcnow_iso()
         self.execute(
@@ -1575,7 +2043,51 @@ class MetadataStore:
         assert thread is not None
         return self._deserialize(thread) or {}
 
-    def list_task_threads(self, *, team_definition_id: str | None = None, run_id: str | None = None) -> list[dict[str, Any]]:
+    def get_task_thread(self, thread_id: str) -> dict[str, Any] | None:
+        return self._deserialize(self.fetch_one("SELECT * FROM task_threads WHERE id = ?", (thread_id,)))
+
+    def delete_task_thread(self, thread_id: str, *, delete_messages: bool = True) -> dict[str, Any] | None:
+        existing = self.get_task_thread(thread_id)
+        if existing is None:
+            return None
+        if delete_messages:
+            self.execute("DELETE FROM message_events WHERE thread_id = ?", (thread_id,))
+        self.execute("DELETE FROM task_threads WHERE id = ?", (thread_id,))
+        return existing
+
+    def update_task_thread(
+        self,
+        thread_id: str,
+        *,
+        title: str | None = None,
+        status: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        existing = self.get_task_thread(thread_id)
+        if existing is None:
+            return None
+        now = utcnow_iso()
+        next_title = existing.get("title") if title is None else title
+        next_status = str(existing.get("status") or "active") if status is None else status
+        next_metadata = dict(existing.get("metadata_json") or {}) if metadata is None else dict(metadata)
+        self.execute(
+            """
+            UPDATE task_threads
+            SET title = ?, status = ?, metadata_json = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (next_title, next_status, json_dumps(next_metadata), now, thread_id),
+        )
+        return self.get_task_thread(thread_id)
+
+    def list_task_threads(
+        self,
+        *,
+        team_definition_id: str | None = None,
+        run_id: str | None = None,
+        agent_definition_id: str | None = None,
+        mode: str | None = None,
+    ) -> list[dict[str, Any]]:
         clauses: list[str] = []
         params: list[Any] = []
         if team_definition_id:
@@ -1588,7 +2100,35 @@ class MetadataStore:
         if clauses:
             sql += f" WHERE {' AND '.join(clauses)}"
         sql += " ORDER BY updated_at DESC"
-        return self._deserialize_many(self.fetch_all(sql, tuple(params)))
+        items = self._deserialize_many(self.fetch_all(sql, tuple(params)))
+        if not agent_definition_id and not mode:
+            return items
+        filtered: list[dict[str, Any]] = []
+        for item in items:
+            metadata = dict(item.get("metadata_json") or {})
+            if agent_definition_id and str(metadata.get("agent_definition_id") or "").strip() != str(agent_definition_id):
+                continue
+            if mode and str(metadata.get("mode") or "").strip() != str(mode):
+                continue
+            filtered.append(item)
+        return filtered
+
+    def find_task_thread_by_session_thread_id(
+        self,
+        *,
+        session_thread_id: str,
+        agent_definition_id: str | None = None,
+        team_definition_id: str | None = None,
+        mode: str | None = None,
+    ) -> dict[str, Any] | None:
+        target = str(session_thread_id or "").strip()
+        if not target:
+            return None
+        for item in self.list_task_threads(team_definition_id=team_definition_id, agent_definition_id=agent_definition_id, mode=mode):
+            metadata = dict(item.get("metadata_json") or {})
+            if str(metadata.get("session_thread_id") or "").strip() == target:
+                return item
+        return None
 
     def add_message_event(
         self,
@@ -1628,44 +2168,6 @@ class MetadataStore:
             sql += f" WHERE {' AND '.join(clauses)}"
         sql += " ORDER BY created_at ASC"
         return self._deserialize_many(self.fetch_all(sql, tuple(params)))
-
-    def save_blueprint_build(
-        self,
-        *,
-        build_id: str | None,
-        team_template_id: str,
-        name: str,
-        description: str,
-        spec: dict[str, Any],
-        resource_lock: dict[str, Any],
-        blueprint_id: str | None,
-    ) -> dict[str, Any]:
-        record_id = build_id or make_id("build")
-        now = utcnow_iso()
-        self.execute(
-            """
-            INSERT INTO blueprint_builds(id, team_template_id, name, description, spec_json, resource_lock_json, blueprint_id, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM blueprint_builds WHERE id = ?), ?), ?)
-            ON CONFLICT(id) DO UPDATE SET
-                team_template_id = excluded.team_template_id,
-                name = excluded.name,
-                description = excluded.description,
-                spec_json = excluded.spec_json,
-                resource_lock_json = excluded.resource_lock_json,
-                blueprint_id = excluded.blueprint_id,
-                updated_at = excluded.updated_at
-            """,
-            (record_id, team_template_id, name, description, json_dumps(spec), json_dumps(resource_lock), blueprint_id, record_id, now, now),
-        )
-        build = self.get_blueprint_build(record_id)
-        assert build is not None
-        return build
-
-    def get_blueprint_build(self, build_id: str) -> dict[str, Any] | None:
-        return self._deserialize(self.fetch_one("SELECT * FROM blueprint_builds WHERE id = ?", (build_id,)))
-
-    def list_blueprint_builds(self) -> list[dict[str, Any]]:
-        return self._deserialize_many(self.fetch_all("SELECT * FROM blueprint_builds ORDER BY updated_at DESC"))
 
     def save_team_build_snapshot(
         self,
@@ -1830,11 +2332,39 @@ class MetadataStore:
         return self.get_run(run_id)
 
     def list_runs(self, *, project_id: str | None = None) -> list[dict[str, Any]]:
+        return list(self.list_runs_page(project_id=project_id)["items"])
+
+    def list_runs_page(self, *, project_id: str | None = None, limit: int | None = None, offset: int = 0) -> dict[str, Any]:
+        conditions: list[str] = []
+        params: list[Any] = []
         if project_id:
-            rows = self.fetch_all("SELECT * FROM runs WHERE project_id = ? ORDER BY updated_at DESC", (project_id,))
+            conditions.append("runs.project_id = ?")
+            params.append(project_id)
+        where_sql = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        total = int((self.fetch_one(f"SELECT COUNT(*) AS count FROM runs{where_sql}", tuple(params)) or {}).get("count", 0) or 0)
+        safe_offset = max(0, int(offset or 0))
+        sql = (
+            "SELECT runs.*, task_releases.title AS task_title, task_releases.prompt AS task_prompt, "
+            "blueprints.name AS blueprint_name, blueprints.description AS blueprint_description "
+            "FROM runs "
+            "LEFT JOIN task_releases ON task_releases.id = runs.task_release_id "
+            "LEFT JOIN blueprints ON blueprints.id = runs.blueprint_id"
+            f"{where_sql} ORDER BY runs.updated_at DESC"
+        )
+        query_params = list(params)
+        if limit is not None:
+            safe_limit = max(1, int(limit))
+            sql += " LIMIT ? OFFSET ?"
+            query_params.extend([safe_limit, safe_offset])
         else:
-            rows = self.fetch_all("SELECT * FROM runs ORDER BY updated_at DESC")
-        return self._deserialize_many(rows)
+            safe_limit = total or 0
+        rows = self._deserialize_many(self.fetch_all(sql, tuple(query_params)))
+        return {
+            "items": rows,
+            "total": total,
+            "offset": safe_offset,
+            "limit": safe_limit,
+        }
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         return self._deserialize(self.fetch_one("SELECT * FROM runs WHERE id = ?", (run_id,)))
@@ -2007,16 +2537,12 @@ class MetadataStore:
             "pending_approval_count": int((self.fetch_one("SELECT COUNT(*) AS count FROM approvals WHERE status = 'pending'") or {}).get("count", 0) or 0),
             "provider_profile_count": int((self.fetch_one("SELECT COUNT(*) AS count FROM provider_profiles") or {}).get("count", 0) or 0),
             "plugin_count": int((self.fetch_one("SELECT COUNT(*) AS count FROM plugins") or {}).get("count", 0) or 0),
-            "agent_template_count": int((self.fetch_one("SELECT COUNT(*) AS count FROM agent_templates") or {}).get("count", 0) or 0),
-            "team_template_count": int((self.fetch_one("SELECT COUNT(*) AS count FROM team_templates") or {}).get("count", 0) or 0),
             "skill_count": int((self.fetch_one("SELECT COUNT(*) AS count FROM skills") or {}).get("count", 0) or 0),
             "static_memory_count": int((self.fetch_one("SELECT COUNT(*) AS count FROM static_memories") or {}).get("count", 0) or 0),
-            "memory_profile_count": int((self.fetch_one("SELECT COUNT(*) AS count FROM memory_profiles") or {}).get("count", 0) or 0),
             "knowledge_base_count": int((self.fetch_one("SELECT COUNT(*) AS count FROM knowledge_bases") or {}).get("count", 0) or 0),
             "agent_definition_count": int((self.fetch_one("SELECT COUNT(*) AS count FROM agent_definitions") or {}).get("count", 0) or 0),
             "team_definition_count": int((self.fetch_one("SELECT COUNT(*) AS count FROM team_definitions") or {}).get("count", 0) or 0),
             "review_policy_count": int((self.fetch_one("SELECT COUNT(*) AS count FROM review_policies") or {}).get("count", 0) or 0),
-            "build_count": int((self.fetch_one("SELECT COUNT(*) AS count FROM blueprint_builds") or {}).get("count", 0) or 0),
         }
 
     def storage_info(self) -> dict[str, Any]:

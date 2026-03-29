@@ -1,4 +1,5 @@
-﻿const DEFAULT_UI_METADATA = {
+/*
+const DEFAULT_UI_METADATA = {
   review_policy: {
     triggers: [
       { value: "before_tool_call", label: "before_tool_call / 工具调用前" },
@@ -11,7 +12,6 @@
       { value: "before_agent_receive_task", label: "before_agent_receive_task / Agent 接任务前" },
       { value: "before_task_ingress", label: "before_task_ingress / 任务入站前" },
       { value: "final_delivery", label: "final_delivery / 交付消息" },
-    ],
     actions: [
       { value: "approve", label: "approve / 允许" },
       { value: "reject", label: "reject / 拒绝" },
@@ -44,6 +44,7 @@
       { value: "human_escalation", label: "human_escalation / 人工介入" },
     ],
   },
+  /*
   team_edge_review: {
     modes: [{ value: "must_review_before", label: "must_review_before / 必须前审" }],
     message_types: [
@@ -56,8 +57,6 @@
       { value: "up", label: "up / 向上" },
     ],
   },
-  memory_profile: {
-    scopes: [
       { value: "agent", label: "agent / Agent 私有" },
       { value: "team", label: "team / 团队共享" },
       { value: "project", label: "project / 项目共享" },
@@ -65,14 +64,42 @@
       { value: "retrospective", label: "retrospective / 运行回顾" },
     ],
   },
+  legacy_memory_profile_block_removed
 };
+
+*/
+
+const DEFAULT_UI_METADATA = {
+  review_policy: {
+    triggers: [],
+    actions: [],
+    message_types: [],
+    memory_scopes: [],
+    memory_kinds: [],
+  },
+  team_edge_review: {
+    modes: [],
+    message_types: [],
+    phases: [],
+  },
+};
+
+function loadPersistedTaskSessionThreads() {
+  try {
+    const raw = window.localStorage.getItem("aiteams.taskSessionThreads");
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch (error) {
+    console.warn("Failed to restore persisted task session threads", error);
+    return {};
+  }
+}
 
 const state = {
   summary: {},
   storage: null,
   providerTypes: [],
   uiMetadata: null,
-  recentBuilds: [],
   recentRuns: [],
   providers: [],
   retrievalSettings: {
@@ -100,6 +127,22 @@ const state = {
     offset: 0,
   },
   skills: [],
+  skillGroups: [],
+  skillGroupCatalog: [],
+  skillGroupPage: {
+    items: [],
+    total: 0,
+    limit: 10,
+    offset: 0,
+  },
+  skillPage: {
+    items: [],
+    total: 0,
+    limit: 10,
+    offset: 0,
+    query: "",
+    groupKey: "",
+  },
   staticMemories: [],
   staticMemoryPage: {
     items: [],
@@ -109,7 +152,6 @@ const state = {
   },
   knowledgeBases: [],
   reviewPolicies: [],
-  memoryProfiles: [],
   agentTemplates: [],
   agentTemplatePage: {
     items: [],
@@ -125,21 +167,55 @@ const state = {
     offset: 0,
   },
   teamDefinitions: [],
-  teamTemplates: [],
-  builds: [],
-  blueprints: [],
-  runs: [],
+  teamDefinitionPage: {
+    items: [],
+    total: 0,
+    limit: 10,
+    offset: 0,
+  },
+  runPage: {
+    items: [],
+    total: 0,
+    limit: 10,
+    offset: 0,
+  },
+  teamChat: {
+    selectedTeamDefinitionId: null,
+    threads: [],
+    selectedThreadRecordId: null,
+    selectedSessionThreadId: "",
+    messages: [],
+    sending: false,
+    draftMode: false,
+  },
   approvals: [],
   selectedTaskTeamDefinitionId: null,
+  taskSessionThreads: loadPersistedTaskSessionThreads(),
   activePage: "overview",
   activeNavSection: "overview",
   editingProviderId: null,
   editingPluginId: null,
+  editingSkillId: null,
+  skillModalMode: "import",
+  skillImportFiles: [],
+  skillImportDragActive: false,
+  skillImportBusy: false,
+  editingSkillGroupId: null,
+  skillManagementView: "skills",
+  skillPreview: {
+    skillId: null,
+    skill: null,
+    files: [],
+    selectedPath: "",
+    fileCache: {},
+    loading: false,
+    fileLoading: false,
+    errorText: "",
+  },
   editingStaticMemoryId: null,
   staticMemoryEditorMode: "role",
   editingKnowledgeBaseId: null,
   editingReviewPolicyId: null,
-  editingMemoryProfileId: null,
   editingAgentDefinitionId: null,
   editingAgentTemplateId: null,
   editingTeamDefinitionId: null,
@@ -148,12 +224,8 @@ const state = {
   knowledgeBasePersistedDocumentIds: [],
   knowledgeBaseBaseConfig: {},
   reviewPolicyBaseSpec: {},
-  memoryProfileBaseSpec: {},
   agentDefinitionBaseSpec: {},
   teamDefinitionBaseSpec: {},
-  selectedTeamTemplateId: null,
-  selectedBuildId: null,
-  selectedBlueprintId: null,
   selectedRunId: null,
   providerEditor: {
     models: [],
@@ -177,19 +249,19 @@ const state = {
     pluginRefs: false,
     pluginPage: false,
     skillRefs: false,
+    skillGroupCatalog: false,
+    skillGroupPage: false,
+    skillPage: false,
     staticMemoryRefs: false,
     staticMemoryPage: false,
     knowledgeBaseRefs: false,
     reviewPolicyRefs: false,
-    memoryProfileRefs: false,
     agentTemplateRefs: false,
     agentTemplatePage: false,
     agentDefinitionRefs: false,
     agentDefinitionPage: false,
     teamDefinitions: false,
-    teamTemplates: false,
-    builds: false,
-    blueprints: false,
+    teamDefinitionPage: false,
     runs: false,
     approvals: false,
   },
@@ -208,25 +280,15 @@ const PAGE_SECTIONS = {
   providers: "resources",
   "retrieval-config": "resources",
   plugins: "resources",
+  skills: "resources",
   "responsibility-specs": "resources",
   "knowledge-bases": "resources",
   "review-policies": "resources",
-  "memory-profiles": "resources",
   "agent-definitions": "resources",
-  "agent-templates": "resources",
   "team-definitions": "orchestration",
-  "team-templates": "orchestration",
+  "team-chat": "delivery",
   runtime: "delivery",
   approvals: "delivery",
-  builds: "delivery",
-  blueprints: "delivery",
-};
-
-const SECTION_DEFAULT_PAGE = {
-  overview: "overview",
-  resources: "providers",
-  orchestration: "team-definitions",
-  delivery: "runtime",
 };
 
 const MODEL_TYPE_LABELS = {
@@ -263,7 +325,6 @@ const pageViews = Array.from(document.querySelectorAll("[data-page]"));
 const summaryCards = document.querySelector("#summary-cards");
 const storageBanner = document.querySelector("#storage-banner");
 const providerTypeGrid = document.querySelector("#provider-type-grid");
-const overviewBuilds = document.querySelector("#overview-builds");
 const overviewRuns = document.querySelector("#overview-runs");
 
 const providerForm = document.querySelector("#provider-form");
@@ -336,6 +397,62 @@ const pluginConfigSchemaEmpty = document.querySelector("#plugin-config-schema-em
 const pluginConfigForm = document.querySelector("#plugin-config-form");
 const pluginModalResult = document.querySelector("#plugin-modal-result");
 
+const skillForm = document.querySelector("#skill-form");
+const skillViewSkills = document.querySelector("#skill-view-skills");
+const skillViewGroups = document.querySelector("#skill-view-groups");
+const skillOpenCreate = document.querySelector("#skill-open-create");
+const skillManagementSkillsView = document.querySelector("#skill-management-skills-view");
+const skillManagementGroupsView = document.querySelector("#skill-management-groups-view");
+const skillGroupOpenManageInline = document.querySelector("#skill-group-open-manage-inline");
+const skillSearchForm = document.querySelector("#skill-search-form");
+const skillSearchInput = document.querySelector("#skill-search-input");
+const skillSearchReset = document.querySelector("#skill-search-reset");
+const skillGroupList = document.querySelector("#skill-group-list");
+const skillGroupPageSize = document.querySelector("#skill-group-page-size");
+const skillGroupPaginationMeta = document.querySelector("#skill-group-pagination-meta");
+const skillPageSize = document.querySelector("#skill-page-size");
+const skillList = document.querySelector("#skill-list");
+const skillPaginationMeta = document.querySelector("#skill-pagination-meta");
+const skillResult = null;
+const skillModal = document.querySelector("#skill-modal");
+const skillModalTitle = document.querySelector("#skill-modal-title");
+const skillModalCloseButtons = Array.from(document.querySelectorAll("[data-skill-modal-close]"));
+const skillCancel = document.querySelector("#skill-cancel");
+const skillValidate = document.querySelector("#skill-validate");
+const skillSave = document.querySelector("#skill-save");
+const skillImportPanel = document.querySelector("#skill-import-panel");
+const skillEditorPanel = document.querySelector("#skill-editor-panel");
+const skillImportDirectoryInput = document.querySelector("#skill-import-directory-input");
+const skillImportDropzone = document.querySelector("#skill-import-dropzone");
+const skillImportDropzoneTitle = document.querySelector("#skill-import-dropzone-title");
+const skillImportDropzoneHint = document.querySelector("#skill-import-dropzone-hint");
+const skillImportDropzoneTrigger = document.querySelector("#skill-import-dropzone-trigger");
+const skillImportSelection = document.querySelector("#skill-import-selection");
+const skillImportGroups = document.querySelector("#skill-import-groups");
+const skillModalResult = document.querySelector("#skill-modal-result");
+const skillGroupResult = document.querySelector("#skill-group-result");
+const skillGroupModal = document.querySelector("#skill-group-modal");
+const skillGroupModalTitle = document.querySelector("#skill-group-modal-title");
+const skillGroupModalCloseButtons = Array.from(document.querySelectorAll("[data-skill-group-modal-close]"));
+const skillGroupManagementList = document.querySelector("#skill-group-management-list");
+const skillGroupForm = document.querySelector("#skill-group-form");
+const skillGroupManagementName = document.querySelector("#skill-group-management-name");
+const skillGroupManagementDescription = document.querySelector("#skill-group-management-description");
+const skillGroupSkills = document.querySelector("#skill-group-skills");
+const skillGroupCancel = document.querySelector("#skill-group-cancel");
+const skillGroupModalResult = document.querySelector("#skill-group-modal-result");
+const skillPreviewModal = document.querySelector("#skill-preview-modal");
+const skillPreviewTitle = document.querySelector("#skill-preview-title");
+const skillPreviewSubtitle = document.querySelector("#skill-preview-subtitle");
+const skillPreviewSummary = document.querySelector("#skill-preview-summary");
+const skillPreviewContent = document.querySelector("#skill-preview-content");
+const skillPreviewBodyMeta = document.querySelector("#skill-preview-body-meta");
+const skillPreviewFileMeta = document.querySelector("#skill-preview-file-meta");
+const skillPreviewFileList = document.querySelector("#skill-preview-file-list");
+const skillPreviewFileTitle = document.querySelector("#skill-preview-file-title");
+const skillPreviewFileContent = document.querySelector("#skill-preview-file-content");
+const skillPreviewCloseButtons = Array.from(document.querySelectorAll("[data-skill-preview-close]"));
+
 const responsibilitySpecOpenRoleCreate = document.querySelector("#responsibility-spec-open-role-create");
 const staticMemoryPageSize = document.querySelector("#static-memory-page-size");
 const responsibilitySpecList = document.querySelector("#responsibility-spec-list");
@@ -383,24 +500,6 @@ const reviewPolicyReset = document.querySelector("#review-policy-reset");
 const reviewPolicyList = document.querySelector("#review-policy-list");
 const reviewPolicyResult = document.querySelector("#review-policy-result");
 
-const memoryProfileForm = document.querySelector("#memory-profile-form");
-const memoryProfileKey = document.querySelector("#memory-profile-key");
-const memoryProfileName = document.querySelector("#memory-profile-name");
-const memoryProfileDescription = document.querySelector("#memory-profile-description");
-const memoryProfileShortTermEnabled = document.querySelector("#memory-profile-short-term-enabled");
-const memoryProfileSummaryTriggerTokens = document.querySelector("#memory-profile-summary-trigger-tokens");
-const memoryProfileSummaryMaxTokens = document.querySelector("#memory-profile-summary-max-tokens");
-const memoryProfileLongTermEnabled = document.querySelector("#memory-profile-long-term-enabled");
-const memoryProfileNamespaceStrategy = document.querySelector("#memory-profile-namespace-strategy");
-const memoryProfileTtlDays = document.querySelector("#memory-profile-ttl-days");
-const memoryProfileBackgroundEnabled = document.querySelector("#memory-profile-background-enabled");
-const memoryProfileDebounceSeconds = document.querySelector("#memory-profile-debounce-seconds");
-const memoryProfileReadScopes = document.querySelector("#memory-profile-read-scopes");
-const memoryProfileWriteScopes = document.querySelector("#memory-profile-write-scopes");
-const memoryProfileReset = document.querySelector("#memory-profile-reset");
-const memoryProfileList = document.querySelector("#memory-profile-list");
-const memoryProfileResult = document.querySelector("#memory-profile-result");
-
 const agentDefinitionForm = document.querySelector("#agent-definition-form");
 const agentDefinitionName = document.querySelector("#agent-definition-name");
 const agentDefinitionProvider = document.querySelector("#agent-definition-provider");
@@ -446,10 +545,8 @@ const agentTemplateModalResult = document.querySelector("#agent-template-modal-r
 const teamDefinitionForm = document.querySelector("#team-definition-form");
 const teamDefinitionKey = document.querySelector("#team-definition-key");
 const teamDefinitionName = document.querySelector("#team-definition-name");
-const teamDefinitionWorkspace = document.querySelector("#team-definition-workspace");
-const teamDefinitionProject = document.querySelector("#team-definition-project");
 const teamDefinitionDescription = document.querySelector("#team-definition-description");
-const teamDefinitionLeadAgentTemplate = document.querySelector("#team-definition-lead-agent-template");
+const teamDefinitionLeadAgentDefinition = document.querySelector("#team-definition-lead-agent-definition");
 const teamDefinitionEntryMode = document.querySelector("#team-definition-entry-mode");
 const teamDefinitionEntryAgent = document.querySelector("#team-definition-entry-agent");
 const teamDefinitionSharedKbs = document.querySelector("#team-definition-shared-kbs");
@@ -465,12 +562,25 @@ const teamDefinitionReviewOverrideList = document.querySelector("#team-definitio
 const teamDefinitionReviewOverrides = document.querySelector("#team-definition-review-overrides");
 const teamDefinitionOpenCreate = document.querySelector("#team-definition-open-create");
 const teamDefinitionList = document.querySelector("#team-definition-list");
+const teamDefinitionPageSize = document.querySelector("#team-definition-page-size");
+const teamDefinitionPaginationMeta = document.querySelector("#team-definition-pagination-meta");
 const teamDefinitionResult = document.querySelector("#team-definition-result");
 const teamDefinitionModal = document.querySelector("#team-definition-modal");
 const teamDefinitionModalTitle = document.querySelector("#team-definition-modal-title");
 const teamDefinitionModalCloseButtons = Array.from(document.querySelectorAll("[data-team-definition-modal-close]"));
 const teamDefinitionCancel = document.querySelector("#team-definition-cancel");
 const teamDefinitionModalResult = document.querySelector("#team-definition-modal-result");
+const teamDefinitionPreviewModal = document.querySelector("#team-definition-preview-modal");
+const teamDefinitionPreviewTitle = document.querySelector("#team-definition-preview-title");
+const teamDefinitionPreviewCloseButtons = Array.from(document.querySelectorAll("[data-team-definition-preview-close]"));
+const teamDefinitionPreviewSummary = document.querySelector("#team-definition-preview-summary");
+const teamDefinitionPreviewTree = document.querySelector("#team-definition-preview-tree");
+
+const teamDefinitionPreviewState = {
+  payload: null,
+  loading: false,
+  errorText: "",
+};
 
 const tagMultiSelectRegistry = new Map();
 
@@ -512,26 +622,32 @@ const teamEdgeList = document.querySelector("#team-edge-list");
 const teamNodeLink = document.querySelector("#team-node-link");
 const teamNodeDelete = document.querySelector("#team-node-delete");
 
-const buildForm = document.querySelector("#build-form");
-const buildTeamTemplate = document.querySelector("#build-team-template");
-const buildName = document.querySelector("#build-name");
-const buildList = document.querySelector("#build-list");
-const buildDetail = document.querySelector("#build-detail");
-const buildResult = document.querySelector("#build-result");
-
 const taskForm = document.querySelector("#task-form");
 const taskTeamDefinition = document.querySelector("#task-team-definition");
-const taskBuild = document.querySelector("#task-build");
-const taskBlueprint = document.querySelector("#task-blueprint");
 const taskTitle = document.querySelector("#task-title");
 const taskApprovalMode = document.querySelector("#task-approval-mode");
+const taskNewSession = document.querySelector("#task-new-session");
+const taskSessionHint = document.querySelector("#task-session-hint");
 const taskPrompt = document.querySelector("#task-prompt");
 const taskResult = document.querySelector("#task-result");
 const runList = document.querySelector("#run-list");
+const runPageSize = document.querySelector("#run-page-size");
+const runPaginationMeta = document.querySelector("#run-pagination-meta");
 const runDetail = document.querySelector("#run-detail");
 const approvalList = document.querySelector("#approval-list");
-const blueprintList = document.querySelector("#blueprint-list");
-const blueprintDetail = document.querySelector("#blueprint-detail");
+const teamChatTeamDefinition = document.querySelector("#team-chat-team-definition");
+const teamChatNewThread = document.querySelector("#team-chat-new-thread");
+const teamChatThreadList = document.querySelector("#team-chat-thread-list");
+const teamChatTitle = document.querySelector("#team-chat-title");
+const teamChatThreadMeta = document.querySelector("#team-chat-thread-meta");
+const teamChatOpenTeam = document.querySelector("#team-chat-open-team");
+const teamChatMessageList = document.querySelector("#team-chat-message-list");
+const teamChatForm = document.querySelector("#team-chat-form");
+const teamChatInput = document.querySelector("#team-chat-input");
+const teamChatSend = document.querySelector("#team-chat-send");
+const teamChatResult = document.querySelector("#team-chat-result");
+const teamChatPageView = document.querySelector('.page-view[data-page="team-chat"]');
+const teamChatLayout = teamChatPageView?.querySelector(".team-chat-layout") || null;
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -544,6 +660,308 @@ function escapeHtml(value) {
 
 function escapeAttribute(value) {
   return escapeHtml(value).replace(/\r?\n/g, "&#10;");
+}
+
+function fileNameFromPath(path) {
+  const text = String(path || "").replace(/\\/g, "/");
+  const parts = text.split("/").filter(Boolean);
+  return parts[parts.length - 1] || text || "-";
+}
+
+function sanitizeMarkdownUrl(value) {
+  const text = String(value ?? "").trim();
+  if (!text) {
+    return "";
+  }
+  if (/^(javascript|data|vbscript):/i.test(text)) {
+    return "";
+  }
+  if (/^(https?:|mailto:|tel:)/i.test(text)) {
+    return text;
+  }
+  if (/^(#|\/|\.\.?(\/|$))/.test(text)) {
+    return text;
+  }
+  return "";
+}
+
+function splitMarkdownTableRow(value) {
+  const text = String(value ?? "").trim();
+  if (!text || !text.includes("|")) {
+    return [];
+  }
+  const body = text.replace(/^\|/, "").replace(/\|$/, "");
+  const cells = [];
+  let current = "";
+  for (let index = 0; index < body.length; index += 1) {
+    const char = body[index];
+    if (char === "\\") {
+      const next = body[index + 1];
+      if (next === "|" || next === "\\") {
+        current += next;
+        index += 1;
+        continue;
+      }
+    }
+    if (char === "|") {
+      cells.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  cells.push(current.trim());
+  return cells;
+}
+
+function markdownTableAlignments(separatorLine) {
+  return splitMarkdownTableRow(separatorLine).map((cell) => {
+    const normalized = cell.replace(/\s+/g, "");
+    if (!/^:?-{3,}:?$/.test(normalized)) {
+      return "";
+    }
+    if (normalized.startsWith(":") && normalized.endsWith(":")) {
+      return "center";
+    }
+    if (normalized.endsWith(":")) {
+      return "right";
+    }
+    if (normalized.startsWith(":")) {
+      return "left";
+    }
+    return "";
+  });
+}
+
+function isMarkdownTableSeparator(value) {
+  const cells = splitMarkdownTableRow(value);
+  return Boolean(cells.length) && cells.every((cell) => /^:?-{3,}:?$/.test(cell.replace(/\s+/g, "")));
+}
+
+function renderMarkdownTable(headers, alignments, rows) {
+  const width = Math.max(headers.length, ...rows.map((row) => row.length));
+  if (!width) {
+    return "";
+  }
+  const normalizedHeaders = Array.from({ length: width }, (_, index) => headers[index] || "");
+  const normalizedRows = rows.map((row) => Array.from({ length: width }, (_, index) => row[index] || ""));
+  const alignAttr = (index) => {
+    const value = alignments[index];
+    return value ? ` style="text-align:${value}"` : "";
+  };
+  return `
+    <div class="markdown-table-wrap">
+      <table>
+        <thead>
+          <tr>${normalizedHeaders
+            .map((cell, index) => `<th${alignAttr(index)}>${renderMarkdownInline(cell)}</th>`)
+            .join("")}</tr>
+        </thead>
+        <tbody>${normalizedRows
+          .map(
+            (row) =>
+              `<tr>${row
+                .map((cell, index) => `<td${alignAttr(index)}>${renderMarkdownInline(cell)}</td>`)
+                .join("")}</tr>`,
+          )
+          .join("")}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderMarkdownInline(value) {
+  const codeTokens = [];
+  const raw = String(value ?? "").replace(/`([^`\n]+)`/g, (_, code) => {
+    const token = `@@MDCODESPAN${codeTokens.length}@@`;
+    codeTokens.push(`<code>${escapeHtml(code)}</code>`);
+    return token;
+  });
+  let html = escapeHtml(raw);
+  html = html.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (match, label, target) => {
+    const safeTarget = sanitizeMarkdownUrl(target);
+    if (!safeTarget) {
+      return escapeHtml(label);
+    }
+    return `<a href="${escapeAttribute(safeTarget)}" target="_blank" rel="noreferrer noopener">${escapeHtml(label)}</a>`;
+  });
+  html = html.replace(/(\*\*|__)(.+?)\1/g, "<strong>$2</strong>");
+  html = html.replace(/~~(.+?)~~/g, "<del>$1</del>");
+  codeTokens.forEach((token, index) => {
+    html = html.replace(`@@MDCODESPAN${index}@@`, token);
+  });
+  return html;
+}
+
+function renderMarkdown(value) {
+  const normalized = String(value ?? "").replace(/\r\n?/g, "\n").trim();
+  if (!normalized) {
+    return "";
+  }
+
+  const codeBlocks = [];
+  const text = normalized.replace(/```([^\n`]*)\n?([\s\S]*?)```/g, (match, language, code) => {
+    const token = `@@MDCODEBLOCK${codeBlocks.length}@@`;
+    codeBlocks.push({
+      token,
+      language: String(language || "")
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]+/g, "-"),
+      code: String(code || "").replace(/\n$/, ""),
+    });
+    return `\n${token}\n`;
+  });
+
+  const html = [];
+  const lines = text.split("\n");
+  let paragraph = [];
+  let listType = "";
+  let listItems = [];
+  let quoteLines = [];
+
+  function flushParagraph() {
+    if (!paragraph.length) {
+      return;
+    }
+    html.push(`<p>${paragraph.map((line) => renderMarkdownInline(line)).join("<br>")}</p>`);
+    paragraph = [];
+  }
+
+  function flushList() {
+    if (!listType || !listItems.length) {
+      listType = "";
+      listItems = [];
+      return;
+    }
+    html.push(
+      `<${listType}>${listItems
+        .map((item) => `<li>${renderMarkdownInline(item).replace(/\n/g, "<br>")}</li>`)
+        .join("")}</${listType}>`,
+    );
+    listType = "";
+    listItems = [];
+  }
+
+  function flushQuote() {
+    if (!quoteLines.length) {
+      return;
+    }
+    html.push(`<blockquote>${quoteLines.map((line) => renderMarkdownInline(line)).join("<br>")}</blockquote>`);
+    quoteLines = [];
+  }
+
+  function flushBlocks() {
+    flushParagraph();
+    flushList();
+    flushQuote();
+  }
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const trimmed = line.trim();
+    if (!trimmed) {
+      flushBlocks();
+      continue;
+    }
+
+    if (/^@@MDCODEBLOCK\d+@@$/.test(trimmed)) {
+      flushBlocks();
+      html.push(trimmed);
+      continue;
+    }
+
+    const nextLine = lines[index + 1] || "";
+    if (trimmed.includes("|") && isMarkdownTableSeparator(nextLine)) {
+      flushBlocks();
+      const headers = splitMarkdownTableRow(trimmed);
+      const alignments = markdownTableAlignments(nextLine);
+      const rows = [];
+      index += 2;
+      while (index < lines.length) {
+        const rowLine = lines[index];
+        const rowTrimmed = rowLine.trim();
+        if (!rowTrimmed || !rowTrimmed.includes("|") || isMarkdownTableSeparator(rowTrimmed)) {
+          index -= 1;
+          break;
+        }
+        const rowCells = splitMarkdownTableRow(rowTrimmed);
+        if (!rowCells.length) {
+          index -= 1;
+          break;
+        }
+        rows.push(rowCells);
+        index += 1;
+      }
+      if (!rows.length && index >= lines.length) {
+        index -= 1;
+      }
+      html.push(renderMarkdownTable(headers, alignments, rows));
+      continue;
+    }
+
+    const headingMatch = /^(#{1,6})\s+(.*)$/.exec(trimmed);
+    if (headingMatch) {
+      flushBlocks();
+      const level = headingMatch[1].length;
+      html.push(`<h${level}>${renderMarkdownInline(headingMatch[2])}</h${level}>`);
+      continue;
+    }
+
+    if (/^(-{3,}|\*{3,})$/.test(trimmed)) {
+      flushBlocks();
+      html.push("<hr>");
+      continue;
+    }
+
+    const quoteMatch = /^>\s?(.*)$/.exec(line);
+    if (quoteMatch) {
+      flushParagraph();
+      flushList();
+      quoteLines.push(quoteMatch[1]);
+      continue;
+    }
+    flushQuote();
+
+    const orderedMatch = /^\d+\.\s+(.*)$/.exec(trimmed);
+    if (orderedMatch) {
+      flushParagraph();
+      if (listType && listType !== "ol") {
+        flushList();
+      }
+      listType = "ol";
+      listItems.push(orderedMatch[1]);
+      continue;
+    }
+
+    const unorderedMatch = /^[-*+]\s+(.*)$/.exec(trimmed);
+    if (unorderedMatch) {
+      flushParagraph();
+      if (listType && listType !== "ul") {
+        flushList();
+      }
+      listType = "ul";
+      listItems.push(unorderedMatch[1]);
+      continue;
+    }
+
+    if (listType && /^\s{2,}\S/.test(line)) {
+      listItems[listItems.length - 1] = `${listItems[listItems.length - 1]}\n${trimmed}`;
+      continue;
+    }
+
+    flushList();
+    paragraph.push(trimmed);
+  }
+
+  flushBlocks();
+
+  let output = html.join("");
+  codeBlocks.forEach((block) => {
+    const languageClass = block.language ? ` class="language-${escapeAttribute(block.language)}"` : "";
+    output = output.replace(block.token, `<pre><code${languageClass}>${escapeHtml(block.code)}</code></pre>`);
+  });
+  return output;
 }
 
 function providerModelTooltipText(models, fallbackModelName = "") {
@@ -601,11 +1019,282 @@ function errorResult(error) {
   return { error: error?.message || "Request failed." };
 }
 
+function showSkillPageError(error) {
+  window.alert(formatApiError(error?.payload, error?.message || "\u64cd\u4f5c\u5931\u8d25"));
+}
+
+function isRecord(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function skillModalResultBadge(label, tone = "ok") {
+  return `<span class="validation-badge ${escapeHtml(tone)}">${escapeHtml(label)}</span>`;
+}
+
+function skillModalResultMetaMarkup(items) {
+  const chips = (items || []).map((item) => String(item || "").trim()).filter(Boolean);
+  if (!chips.length) {
+    return "";
+  }
+  return `<div class="skill-modal-result-meta">${chips.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>`;
+}
+
+function skillModalResultIssuesMarkup(issues) {
+  const items = Array.isArray(issues) ? issues.filter((item) => isRecord(item)) : [];
+  if (!items.length) {
+    return "";
+  }
+  return `<div class="skill-modal-result-issues">${items
+    .map((issue) => {
+      const severity = String(issue.severity || "").trim().toLowerCase() === "error" ? "error" : "warn";
+      const code = String(issue.code || issue.reason || "").trim();
+      const message = String(issue.message || "").trim() || "\u672a\u63d0\u4f9b\u8be6\u60c5";
+      const path = String(issue.path || issue.directory_path || "").trim();
+      const title = code || (severity === "error" ? "\u9519\u8bef" : "\u63d0\u793a");
+      return `
+        <div class="skill-modal-result-issue ${severity}">
+          <strong>${escapeHtml(title)}</strong>
+          <span>${escapeHtml(message)}</span>
+          ${path ? `<span>${escapeHtml(path)}</span>` : ""}
+        </div>
+      `;
+    })
+    .join("")}</div>`;
+}
+
+function skillModalResultSectionMarkup(title, body, extra = "") {
+  if (!body) {
+    return "";
+  }
+  return `
+    <section class="skill-modal-result-section">
+      <div class="skill-modal-result-section-head">
+        <h4>${escapeHtml(title)}</h4>
+        ${extra}
+      </div>
+      ${body}
+    </section>
+  `;
+}
+
+function renderSkillModalResultSkillCard(skill) {
+  const metadata = isRecord(skill?.metadata) ? skill.metadata : {};
+  const existingSkillName = String(skill?.existing_skill_name || "").trim();
+  const existingSkillId = String(skill?.existing_skill_id || "").trim();
+  const name =
+    String(metadata.name || "").trim() ||
+    fileNameFromPath(skill?.directory_path || skill?.skill_md_path || "") ||
+    "Skill";
+  const description = String(metadata.description || skill?.body_preview || "").trim();
+  const isValid = Boolean(skill?.is_valid);
+  const badgeTone = !isValid ? "error" : existingSkillId ? "warn" : "ok";
+  const badgeLabel = !isValid ? "\u672a\u901a\u8fc7" : existingSkillId ? "\u53ef\u8986\u76d6" : "\u901a\u8fc7";
+  const metaItems = [
+    skill?.directory_path ? `\u76ee\u5f55 ${skill.directory_path}` : "",
+    skill?.skill_md_path ? `SKILL.md ${fileNameFromPath(skill.skill_md_path)}` : "",
+    Array.isArray(skill?.files) ? `\u6587\u4ef6 ${skill.files.length}` : "",
+    Array.isArray(skill?.helper_files) && skill.helper_files.length ? `\u9644\u52a0 ${skill.helper_files.length}` : "",
+    metadata.path ? `path ${metadata.path}` : "",
+    existingSkillId ? `\u5df2\u5b58\u5728 ${existingSkillName || existingSkillId}` : "",
+  ];
+  return `
+    <article class="skill-modal-result-card">
+      <div class="skill-modal-result-card-head">
+        <div>
+          <strong>${escapeHtml(name)}</strong>
+          ${skill?.directory_path ? `<span class="skill-modal-result-card-path">${escapeHtml(skill.directory_path)}</span>` : ""}
+        </div>
+        ${skillModalResultBadge(badgeLabel, badgeTone)}
+      </div>
+      ${description ? `<p class="skill-modal-result-card-description">${escapeHtml(description)}</p>` : ""}
+      ${skillModalResultMetaMarkup(metaItems)}
+      ${skillModalResultIssuesMarkup(skill?.issues)}
+    </article>
+  `;
+}
+
+function renderSkillModalImportedCard(item) {
+  const skill = isRecord(item?.skill) ? item.skill : {};
+  const name = String(skill.name || "").trim() || fileNameFromPath(item?.directory_path || skill.storage_path || "") || "Skill";
+  const description = String(skill.description || "").trim();
+  const badgeLabel = item?.updated ? "\u5df2\u8986\u76d6" : "\u5df2\u5bfc\u5165";
+  const badgeTone = item?.updated ? "warn" : "ok";
+  const groups = Array.isArray(skill?.groups) ? skill.groups.filter((group) => isRecord(group)) : [];
+  const metaItems = [
+    skill?.storage_path ? `\u5b58\u50a8 ${skill.storage_path}` : "",
+    groups.length ? `\u5206\u7ec4 ${groups.length}` : "",
+    item?.directory_path ? `\u6765\u6e90 ${item.directory_path}` : "",
+  ];
+  return `
+    <article class="skill-modal-result-card">
+      <div class="skill-modal-result-card-head">
+        <div>
+          <strong>${escapeHtml(name)}</strong>
+          ${skill?.storage_path ? `<span class="skill-modal-result-card-path">${escapeHtml(skill.storage_path)}</span>` : ""}
+        </div>
+        ${skillModalResultBadge(badgeLabel, badgeTone)}
+      </div>
+      ${description ? `<p class="skill-modal-result-card-description">${escapeHtml(description)}</p>` : ""}
+      ${skillModalResultMetaMarkup(metaItems)}
+    </article>
+  `;
+}
+
+function renderSkillModalSkippedCard(item) {
+  const reason = String(item?.reason || "").trim();
+  const reasonLabelMap = {
+    "invalid-skill": "\u6821\u9a8c\u672a\u901a\u8fc7",
+    "duplicate-skill-name": "\u540c\u540d Skill",
+  };
+  const title = String(item?.name || "").trim() || fileNameFromPath(item?.directory_path || "") || "\u5df2\u8df3\u8fc7";
+  const description = reasonLabelMap[reason] || reason || "\u5df2\u8df3\u8fc7";
+  return `
+    <article class="skill-modal-result-card">
+      <div class="skill-modal-result-card-head">
+        <div>
+          <strong>${escapeHtml(title)}</strong>
+          ${item?.directory_path ? `<span class="skill-modal-result-card-path">${escapeHtml(item.directory_path)}</span>` : ""}
+        </div>
+        ${skillModalResultBadge("\u8df3\u8fc7", "warn")}
+      </div>
+      <p class="skill-modal-result-card-description">${escapeHtml(description)}</p>
+      ${skillModalResultIssuesMarkup(item?.issues)}
+    </article>
+  `;
+}
+
+function renderSkillModalResult(value) {
+  if (typeof value === "string") {
+    return `
+      <div class="skill-modal-result-shell">
+        <div class="skill-modal-result-banner ok">
+          <strong>${escapeHtml(value)}</strong>
+        </div>
+      </div>
+    `;
+  }
+  if (!isRecord(value)) {
+    return `
+      <div class="skill-modal-result-shell">
+        <pre class="skill-modal-result-json">${escapeHtml(prettyJson(value))}</pre>
+      </div>
+    `;
+  }
+
+  const payload = value;
+  const scan = isRecord(payload.scan) ? payload.scan : payload;
+  const tone =
+    typeof payload.error === "string" && payload.error.trim()
+      ? "error"
+      : scan.valid === false || (Array.isArray(scan.skills) && scan.skills.some((item) => item?.is_valid === false))
+        ? "warn"
+        : "ok";
+  const message =
+    String(payload.error || "").trim() ||
+    String(payload.detail || "").trim() ||
+    String(payload.message || "").trim() ||
+    (tone === "error" ? "\u64cd\u4f5c\u5931\u8d25" : "\u64cd\u4f5c\u5b8c\u6210");
+  const bannerMeta = [
+    scan?.source_path ? `\u6765\u6e90 ${scan.source_path}` : "",
+    payload?.uploaded_file_count ? `\u4e0a\u4f20\u6587\u4ef6 ${payload.uploaded_file_count}` : "",
+    scan?.recursive ? "\u9012\u5f52\u626b\u63cf" : "",
+  ]
+    .filter(Boolean)
+    .join(" \u00b7 ");
+
+  const stats = [
+    payload?.imported_count != null ? { label: "\u5bfc\u5165", value: payload.imported_count } : null,
+    payload?.skipped_count != null ? { label: "\u8df3\u8fc7", value: payload.skipped_count } : null,
+    scan?.skill_count != null ? { label: "\u8bc6\u522b Skill", value: scan.skill_count } : null,
+    scan?.valid_skill_count != null ? { label: "\u901a\u8fc7\u6821\u9a8c", value: scan.valid_skill_count } : null,
+    Array.isArray(scan?.issues) && scan.issues.length ? { label: "\u5168\u5c40\u95ee\u9898", value: scan.issues.length } : null,
+  ]
+    .filter(Boolean)
+    .map(
+      (item) => `
+        <div class="skill-modal-result-stat">
+          <span>${escapeHtml(item.label)}</span>
+          <strong>${escapeHtml(String(item.value))}</strong>
+        </div>
+      `,
+    )
+    .join("");
+
+  const sections = [
+    skillModalResultSectionMarkup(
+      "\u5168\u5c40\u95ee\u9898",
+      skillModalResultIssuesMarkup(scan?.issues),
+      Array.isArray(scan?.issues) && scan.issues.length ? skillModalResultBadge(String(scan.issues.length), tone === "error" ? "error" : "warn") : "",
+    ),
+    skillModalResultSectionMarkup(
+      "\u6821\u9a8c\u7ed3\u679c",
+      Array.isArray(scan?.skills) && scan.skills.length
+        ? `<div class="skill-modal-result-card-list">${scan.skills.map((item) => renderSkillModalResultSkillCard(item)).join("")}</div>`
+        : "",
+      Array.isArray(scan?.skills) && scan.skills.length ? skillModalResultBadge(String(scan.skills.length), "ok") : "",
+    ),
+    skillModalResultSectionMarkup(
+      "\u5df2\u5bfc\u5165",
+      Array.isArray(payload?.imported) && payload.imported.length
+        ? `<div class="skill-modal-result-card-list">${payload.imported.map((item) => renderSkillModalImportedCard(item)).join("")}</div>`
+        : "",
+      Array.isArray(payload?.imported) && payload.imported.length ? skillModalResultBadge(String(payload.imported.length), "ok") : "",
+    ),
+    skillModalResultSectionMarkup(
+      "\u5df2\u8df3\u8fc7",
+      Array.isArray(payload?.skipped) && payload.skipped.length
+        ? `<div class="skill-modal-result-card-list">${payload.skipped.map((item) => renderSkillModalSkippedCard(item)).join("")}</div>`
+        : "",
+      Array.isArray(payload?.skipped) && payload.skipped.length ? skillModalResultBadge(String(payload.skipped.length), "warn") : "",
+    ),
+  ]
+    .filter(Boolean)
+    .join("");
+
+  const fallbackPayload = { ...payload };
+  delete fallbackPayload.scan;
+  delete fallbackPayload.skills;
+  delete fallbackPayload.issues;
+  delete fallbackPayload.message;
+  delete fallbackPayload.detail;
+  delete fallbackPayload.error;
+  delete fallbackPayload.source_path;
+  delete fallbackPayload.recursive;
+  delete fallbackPayload.valid;
+  delete fallbackPayload.skill_count;
+  delete fallbackPayload.valid_skill_count;
+  delete fallbackPayload.uploaded_file_count;
+  delete fallbackPayload.imported_count;
+  delete fallbackPayload.skipped_count;
+  delete fallbackPayload.imported;
+  delete fallbackPayload.skipped;
+  const fallbackJson = !sections && Object.keys(fallbackPayload).length ? `<pre class="skill-modal-result-json">${escapeHtml(prettyJson(payload))}</pre>` : "";
+
+  return `
+    <div class="skill-modal-result-shell">
+      <div class="skill-modal-result-banner ${escapeHtml(tone)}">
+        <div class="skill-modal-result-banner-main">
+          <strong>${escapeHtml(message)}</strong>
+          ${skillModalResultBadge(tone === "error" ? "\u5931\u8d25" : tone === "warn" ? "\u9700\u5904\u7406" : "\u5b8c\u6210", tone)}
+        </div>
+        ${bannerMeta ? `<span>${escapeHtml(bannerMeta)}</span>` : ""}
+      </div>
+      ${stats ? `<div class="skill-modal-result-stats">${stats}</div>` : ""}
+      ${sections}
+      ${fallbackJson}
+    </div>
+  `;
+}
+
 function showResult(target, value) {
   if (!target) {
     return;
   }
   target.classList.remove("hidden");
+  if (target.dataset.resultFormat === "skill-modal") {
+    target.innerHTML = renderSkillModalResult(value);
+    return;
+  }
   target.textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
 }
 
@@ -614,6 +1303,7 @@ function hideResult(target) {
     return;
   }
   target.classList.add("hidden");
+  target.innerHTML = "";
   target.textContent = "";
 }
 
@@ -637,29 +1327,29 @@ async function switchPage(pageName, options = {}) {
   });
   try {
     await ensurePageData(pageName, { ...options, force: true });
+    if (pageName === "team-chat") {
+      requestAnimationFrame(() => {
+        syncTeamChatViewportHeight();
+        scrollTeamChatToBottom();
+      });
+    }
   } catch (error) {
     showResult(taskResult, errorResult(error));
   }
 }
 
-async function switchNavSection(sectionName) {
-  const targetPage = SECTION_DEFAULT_PAGE[sectionName] || "overview";
-  if (PAGE_SECTIONS[state.activePage] === sectionName) {
-    topNavButtons.forEach((button) => {
-      button.classList.toggle("active", button.dataset.navSection === sectionName);
-    });
-    subMenuPanels.forEach((panel) => {
-      panel.classList.toggle("active", panel.dataset.navPanel === sectionName);
-    });
-    state.activeNavSection = sectionName;
-    try {
-      await ensurePageData(state.activePage, { force: true });
-    } catch (error) {
-      showResult(taskResult, errorResult(error));
-    }
-    return;
+function navSectionEntryPage(sectionName) {
+  const panel = subMenuPanels.find((item) => item.dataset.navPanel === sectionName);
+  const firstButton = panel?.querySelector("[data-page-target]");
+  if (firstButton?.dataset.pageTarget) {
+    return firstButton.dataset.pageTarget;
   }
-  await switchPage(targetPage);
+  const fallbackButton = navButtons.find((button) => PAGE_SECTIONS[button.dataset.pageTarget] === sectionName);
+  return fallbackButton?.dataset.pageTarget || "overview";
+}
+
+async function switchNavSection(sectionName) {
+  await switchPage(navSectionEntryPage(sectionName));
 }
 
 function linesToList(value) {
@@ -737,11 +1427,6 @@ function currentAgentTemplateMetadata() {
   return { ...(template?.spec_json?.metadata || {}) };
 }
 
-function buildTeamTemplateLabel(item) {
-  const lock = item?.resource_lock_json?.team_template || {};
-  return lock.name || state.teamTemplates.find((entry) => entry.id === item?.team_template_id)?.name || item?.team_template_id || "-";
-}
-
 function pluginDisplayName(item) {
   return item?.name || "未命名插件";
 }
@@ -757,15 +1442,6 @@ function teamSummary(spec) {
     edges: Array.isArray(spec?.flow?.edges) ? spec.flow.edges : [],
     definitionOfDone: Array.isArray(spec?.definition_of_done) ? spec.definition_of_done : [],
     acceptanceChecks: Array.isArray(spec?.acceptance_checks) ? spec.acceptance_checks : [],
-  };
-}
-
-function blueprintSummary(spec) {
-  return {
-    roleTemplates: Object.keys(spec?.role_templates || {}),
-    agents: Object.keys(spec?.agents || {}),
-    nodes: Array.isArray(spec?.flow?.nodes) ? spec.flow.nodes : [],
-    edges: Array.isArray(spec?.flow?.edges) ? spec.flow.edges : [],
   };
 }
 
@@ -1264,7 +1940,9 @@ function populateProviderTypeOptions() {
 
 function populateProviderOptions() {
   const options = state.providers.map((item) => `<option value="${item.id}">${escapeHtml(item.name)} / ${escapeHtml(item.provider_type)}</option>`).join("");
-  agentTemplateProvider.innerHTML = options || '<option value="">暂无 Provider</option>';
+  if (agentTemplateProvider) {
+    agentTemplateProvider.innerHTML = options || '<option value="">暂无 Provider</option>';
+  }
 }
 
 function pluginKeyOptions() {
@@ -1501,6 +2179,104 @@ function multiSelectOptionsMarkup(items, selectedValues = []) {
     .join("");
 }
 
+function normalizeSkillGroupRecord(item) {
+  if (!item || typeof item !== "object") {
+    return null;
+  }
+  const id = String(item.id || "").trim();
+  const key = String(item.key || "").trim();
+  const name = String(item.name || key).trim();
+  if (!id && !key && !name) {
+    return null;
+  }
+  return {
+    id,
+    key: key || name,
+    name: name || key,
+  };
+}
+
+function skillGroupsForItem(item) {
+  const rawGroups = Array.isArray(item?.groups) ? item.groups : [];
+  const groups = [];
+  const seen = new Set();
+  rawGroups.forEach((entry) => {
+    const group = normalizeSkillGroupRecord(entry);
+    if (!group) {
+      return;
+    }
+    const token = group.id || group.key;
+    if (!token || seen.has(token)) {
+      return;
+    }
+    seen.add(token);
+    groups.push(group);
+  });
+  return groups;
+}
+
+function skillOptionLabel(item) {
+  const groups = skillGroupsForItem(item);
+  const groupSummary = groups.length ? groups.map((entry) => entry.name || entry.key || "-").join("、") : "未分组";
+  const description = String(item?.description || "").trim();
+  return description
+    ? `${item?.name || item?.id || "-"} / ${groupSummary} / ${description}`
+    : `${item?.name || item?.id || "-"} / ${groupSummary}`;
+}
+
+function skillIdsForGroup(group) {
+  const groupId = String(group?.id || "").trim();
+  const groupKey = String(group?.key || "").trim();
+  if (!groupId && !groupKey) {
+    return [];
+  }
+  return state.skills
+    .filter((item) => {
+      const groups = skillGroupsForItem(item);
+      return groups.some((entry) => (groupId && String(entry.id || "") === groupId) || (groupKey && String(entry.key || "") === groupKey));
+    })
+    .map((item) => String(item.id || "").trim())
+    .filter(Boolean);
+}
+
+function renderSkillGroupSkillOptions(selectedValues = null) {
+  if (!skillGroupSkills) {
+    return;
+  }
+  renderMultiSelect(
+    skillGroupSkills,
+    state.skills.map((item) => ({ value: item.id, label: skillOptionLabel(item) })),
+  );
+  if (Array.isArray(selectedValues)) {
+    setMultiSelectValues(skillGroupSkills, selectedValues.map((value) => String(value || "").trim()).filter(Boolean));
+  }
+}
+
+function skillGroupCatalogOptions() {
+  return [
+    ...state.skillGroupCatalog.map((item) => ({
+      value: item.id,
+      label: `${item.name || item.key || item.id} / ${item.key || item.id}`,
+    })),
+  ];
+}
+
+function renderSkillImportGroupOptions(selectedValues = null) {
+  if (!skillImportGroups) {
+    return;
+  }
+  const options = skillGroupCatalogOptions();
+  const selected = Array.isArray(selectedValues)
+    ? selectedValues.map((value) => String(value || "").trim()).filter(Boolean)
+    : getMultiSelectValues(skillImportGroups).map((value) => String(value || "").trim()).filter(Boolean);
+  const optionValues = new Set(options.map((item) => item.value));
+  renderMultiSelect(skillImportGroups, options);
+  setMultiSelectValues(
+    skillImportGroups,
+    selected.filter((value) => optionValues.has(value)),
+  );
+}
+
 function populatePluginOptions() {
   renderMultiSelect(
     agentTemplatePlugins,
@@ -1532,14 +2308,9 @@ function populateAgentTemplateReferenceOptions() {
   renderModelSelect(agentTemplateModel, providerModelsByType(agentTemplateProvider?.value || "", "chat"), agentTemplateModel?.value || "");
   renderMultiSelect(
     agentTemplateSkills,
-    state.skills.map((item) => ({ value: item.id, label: `${item.name || item.key || item.id} / ${item.key || item.id}` })),
+    state.skills.map((item) => ({ value: item.id, label: skillOptionLabel(item) })),
   );
   populatePluginOptions();
-}
-
-function populateStaticMemoryScopeOptions() {
-  renderMultiSelect(memoryProfileReadScopes, uiMetadataOptions("memory_profile", "scopes"));
-  renderMultiSelect(memoryProfileWriteScopes, uiMetadataOptions("memory_profile", "scopes"));
 }
 
 function populateAgentDefinitionReferenceOptions(includeStaticMemoryRefs = []) {
@@ -1557,7 +2328,7 @@ function populateAgentDefinitionReferenceOptions(includeStaticMemoryRefs = []) {
   );
   renderMultiSelect(
     agentDefinitionSkills,
-    state.skills.map((item) => ({ value: item.id, label: `${item.name || item.key || item.id} / ${item.key || item.id}` })),
+    state.skills.map((item) => ({ value: item.id, label: skillOptionLabel(item) })),
   );
   renderSingleSelect(
     agentDefinitionKnowledgeBases,
@@ -1576,12 +2347,12 @@ function populateAgentDefinitionReferenceOptions(includeStaticMemoryRefs = []) {
 }
 
 const TEAM_DEFINITION_CHILD_SOURCE_KIND_OPTIONS = [
-  { value: "agent_template", label: "Agent 模板" },
+  { value: "agent_definition", label: "Agent" },
   { value: "team_definition", label: "团队" },
 ];
 
 function teamDefinitionSourceKind(value) {
-  return String(value || "").trim() === "team_definition" ? "team_definition" : "agent_template";
+  return String(value || "").trim() === "team_definition" ? "team_definition" : "agent_definition";
 }
 
 function normalizeTeamDefinitionReference(sourceKind, value) {
@@ -1594,9 +2365,8 @@ function normalizeTeamDefinitionReference(sourceKind, value) {
     return matched?.id || raw;
   }
   const matched =
-    state.agentTemplates.find((item) => item.id === raw) ||
-    state.agentTemplates.find((item) => String(dictOrEmpty(item.spec_json).metadata?.builtin_ref || "").trim() === raw) ||
-    state.agentTemplates.find((item) => item.name === raw) ||
+    state.agentDefinitions.find((item) => item.id === raw) ||
+    state.agentDefinitions.find((item) => item.name === raw) ||
     null;
   return matched?.id || raw;
 }
@@ -1605,19 +2375,18 @@ function normalizeTeamDefinitionMember(item) {
   const payload = item && typeof item === "object" ? { ...item } : {};
   let sourceKind = String(payload.source_kind || "").trim();
   if (!sourceKind) {
-    sourceKind = payload.team_definition_ref || payload.team_definition_id ? "team_definition" : "agent_template";
+    sourceKind = payload.team_definition_ref || payload.team_definition_id ? "team_definition" : "agent_definition";
   }
   sourceKind = teamDefinitionSourceKind(sourceKind);
   const kind = sourceKind === "team_definition" ? "team" : "agent";
   const sourceRef =
     sourceKind === "team_definition"
       ? String(payload.team_definition_ref || payload.team_definition_id || payload.source_ref || "").trim()
-      : String(payload.agent_template_ref || payload.agent_template_id || payload.source_ref || "").trim();
+      : String(payload.agent_definition_ref || payload.agent_definition_id || payload.source_ref || "").trim();
   return {
     kind,
     source_kind: sourceKind,
     source_ref: normalizeTeamDefinitionReference(sourceKind, sourceRef),
-    name: String(payload.name || "").trim(),
   };
 }
 
@@ -1633,7 +2402,7 @@ function teamDefinitionReferenceOptions(sourceKind, { excludeDefinitionId = stat
       .filter((item) => item.id !== excludeDefinitionId)
       .map((item) => ({ value: item.id, label: item.name || item.id }));
   }
-  return state.agentTemplates.map((item) => ({ value: item.id, label: item.name || item.id }));
+  return state.agentDefinitions.map((item) => ({ value: item.id, label: item.name || item.id }));
 }
 
 function teamDefinitionSelectOptionsMarkup(items, selectedValue = "", { allowBlank = false, blankLabel = "请选择", fallbackLabel = "暂无可选项" } = {}) {
@@ -1651,16 +2420,16 @@ function teamDefinitionMemberSourceLabel(member) {
   return (
     options.find((entry) => entry.value === item.source_ref)?.label ||
     item.source_ref ||
-    (item.source_kind === "team_definition" ? "未选择团队" : "未选择 Agent 模板")
+    (item.source_kind === "team_definition" ? "未选择团队" : "未选择 Agent")
   );
 }
 
 function renderTeamDefinitionLeadAgentOptions(selectedValue = "") {
   renderSingleSelect(
-    teamDefinitionLeadAgentTemplate,
-    state.agentTemplates.map((item) => ({ value: item.id, label: item.name || item.id })),
+    teamDefinitionLeadAgentDefinition,
+    state.agentDefinitions.map((item) => ({ value: item.id, label: item.name || item.id })),
     selectedValue,
-    "暂无 Agent 模板",
+    "暂无 Agent",
     { allowBlank: true, blankLabel: "请选择" },
   );
 }
@@ -1677,7 +2446,7 @@ function teamDefinitionMembersValue() {
 function teamDefinitionMemberOptions() {
   return teamDefinitionMembersValue().map((item, index) => ({
     key: item.source_ref || `member_${index + 1}`,
-    name: item.name || teamDefinitionMemberSourceLabel(item) || `成员 ${index + 1}`,
+    name: teamDefinitionMemberSourceLabel(item) || `成员 ${index + 1}`,
   }));
 }
 
@@ -1707,47 +2476,44 @@ function renderTeamDefinitionMembers() {
     ? members
         .map((member, index) => {
           const sourceKind = teamDefinitionSourceKind(member.source_kind);
-          const label = member.name || teamDefinitionMemberSourceLabel(member) || `Subagent ${index + 1}`;
           return `
             <article class="member-card">
               <div class="member-card-head">
-                <strong>${escapeHtml(label)}</strong>
+                <strong>${escapeHtml(`Subagent ${index + 1}`)}</strong>
                 <button type="button" class="ghost" data-team-definition-member-remove="${index}">移除</button>
               </div>
               <div class="form-grid two">
-                <label><span>显示名称</span><input data-team-definition-member-field="name" data-member-index="${index}" value="${escapeHtml(member.name || "")}" placeholder="可选" /></label>
                 <label>
-                  <span>节点类型</span>
+                  <span>SubAgent 类型</span>
                   <select data-team-definition-member-field="source_kind" data-member-index="${index}">
                     ${teamDefinitionSelectOptionsMarkup(TEAM_DEFINITION_CHILD_SOURCE_KIND_OPTIONS, sourceKind)}
                   </select>
                 </label>
+                <label>
+                  <span>对象选择</span>
+                  <select data-team-definition-member-field="source_ref" data-member-index="${index}">
+                    ${teamDefinitionSelectOptionsMarkup(teamDefinitionReferenceOptions(sourceKind), member.source_ref, {
+                      allowBlank: true,
+                      blankLabel: sourceKind === "team_definition" ? "请选择团队" : "请选择 Agent",
+                      fallbackLabel: sourceKind === "team_definition" ? "暂无可引用团队" : "暂无 Agent",
+                    })}
+                  </select>
+                </label>
               </div>
-              <label>
-                <span>引用来源</span>
-                <select data-team-definition-member-field="source_ref" data-member-index="${index}">
-                  ${teamDefinitionSelectOptionsMarkup(teamDefinitionReferenceOptions(sourceKind), member.source_ref, {
-                    allowBlank: true,
-                    blankLabel: sourceKind === "team_definition" ? "请选择团队" : "请选择 Agent 模板",
-                    fallbackLabel: sourceKind === "team_definition" ? "暂无可引用团队" : "暂无 Agent 模板",
-                  })}
-                </select>
-              </label>
             </article>
           `;
         })
         .join("")
-    : '<div class="detail empty compact-detail">暂无直属 Subagent。可添加 Agent 模板或另一个团队作为子节点。</div>';
+    : '<div class="detail empty compact-detail">暂无直属 Subagent。可添加 Agent 或另一个团队作为子节点。</div>';
 }
 
 function addTeamDefinitionMember() {
   mutateTeamDefinitionMembers((members) => {
-    const firstAgentTemplate = state.agentTemplates[0] || null;
+    const firstAgentDefinition = state.agentDefinitions[0] || null;
     members.push({
       kind: "agent",
-      source_kind: "agent_template",
-      source_ref: firstAgentTemplate?.id || "",
-      name: "",
+      source_kind: "agent_definition",
+      source_ref: firstAgentDefinition?.id || "",
     });
   });
 }
@@ -1770,7 +2536,6 @@ function updateTeamDefinitionMemberField(index, field, value) {
       member.source_ref = String(value || "").trim();
       return;
     }
-    member[field] = String(value || "");
   });
 }
 
@@ -1780,13 +2545,6 @@ function removeTeamDefinitionMember(index) {
   mutateTeamDefinitionMembers((members) => {
     members.splice(index, 1);
   });
-}
-
-function populateTeamTemplateOptions() {
-  const options = state.teamTemplates
-    .map((item) => `<option value="${item.id}" ${item.id === state.selectedTeamTemplateId ? "selected" : ""}>${escapeHtml(item.name)}</option>`)
-    .join("");
-  buildTeamTemplate.innerHTML = options || '<option value="">暂无团队模板</option>';
 }
 
 function populateTaskOptions() {
@@ -1800,29 +2558,742 @@ function populateTaskOptions() {
     taskTeamDefinition.innerHTML = `<option value="">直接选择 TeamDefinition</option>${teamDefinitionOptions}`;
     taskTeamDefinition.value = state.selectedTaskTeamDefinitionId || "";
   }
-
-  const buildOptions = state.builds
-    .map((item) => `<option value="${item.id}" ${item.id === state.selectedBuildId ? "selected" : ""}>${escapeHtml(item.name)}</option>`)
-    .join("");
-  taskBuild.innerHTML = `<option value="">不使用 Build</option>${buildOptions}`;
-  taskBuild.value = state.selectedBuildId || "";
-
-  const blueprintOptions = state.blueprints
-    .map((item) => `<option value="${item.id}" ${item.id === state.selectedBlueprintId ? "selected" : ""}>${escapeHtml(item.name)}</option>`)
-    .join("");
-  taskBlueprint.innerHTML = `<option value="">不使用内部蓝图</option>${blueprintOptions}`;
-  taskBlueprint.value = state.selectedBlueprintId || "";
-  syncTaskLaunchControls();
+  renderTaskSessionHint();
 }
 
-function syncTaskLaunchControls() {
-  const usingTeamDefinition = Boolean(taskTeamDefinition?.value);
-  if (taskBuild) {
-    taskBuild.disabled = usingTeamDefinition;
+function currentTaskSessionThreadId(teamDefinitionId = state.selectedTaskTeamDefinitionId || taskTeamDefinition?.value || null) {
+  if (!teamDefinitionId) {
+    return "";
   }
-  if (taskBlueprint) {
-    taskBlueprint.disabled = usingTeamDefinition;
+  return String((state.taskSessionThreads || {})[teamDefinitionId] || "").trim();
+}
+
+function setTaskSessionThreadId(teamDefinitionId, threadId) {
+  const resolvedTeamDefinitionId = String(teamDefinitionId || "").trim();
+  if (!resolvedTeamDefinitionId) {
+    return;
   }
+  const next = { ...(state.taskSessionThreads || {}) };
+  const resolvedThreadId = String(threadId || "").trim();
+  if (resolvedThreadId) {
+    next[resolvedTeamDefinitionId] = resolvedThreadId;
+  } else {
+    delete next[resolvedTeamDefinitionId];
+  }
+  state.taskSessionThreads = next;
+  try {
+    window.localStorage.setItem("aiteams.taskSessionThreads", JSON.stringify(next));
+  } catch (error) {
+    console.warn("Failed to persist task session threads", error);
+  }
+}
+
+function resolveConversationThreadId(bundle) {
+  return String(
+    bundle?.conversation_thread_id ||
+      bundle?.run?.state_json?.session_thread_id ||
+      bundle?.task_thread?.metadata_json?.session_thread_id ||
+      "",
+  ).trim();
+}
+
+function renderTaskSessionHint() {
+  if (!taskSessionHint) {
+    return;
+  }
+  const teamDefinitionId = state.selectedTaskTeamDefinitionId || taskTeamDefinition?.value || "";
+  const currentThreadId = currentTaskSessionThreadId(teamDefinitionId);
+  if (!teamDefinitionId) {
+    taskSessionHint.textContent = "当前会话：先选择 TeamDefinition，再决定是否复用现有 thread_id。";
+    return;
+  }
+  if (taskNewSession?.checked || !currentThreadId) {
+    taskSessionHint.textContent = "当前会话：本次启动会自动生成新的 uuidv7 thread_id。";
+    return;
+  }
+  taskSessionHint.textContent = `当前会话 thread_id：${currentThreadId}`;
+}
+
+function currentTeamChatDefinition() {
+  return state.teamDefinitions.find((item) => item.id === state.teamChat.selectedTeamDefinitionId) || null;
+}
+
+function currentTeamChatThread() {
+  return state.teamChat.threads.find((item) => item.id === state.teamChat.selectedThreadRecordId) || null;
+}
+
+function teamChatThreadSessionId(thread) {
+  return String(thread?.thread_id || thread?.session_thread_id || thread?.metadata_json?.session_thread_id || "").trim();
+}
+
+function teamChatMessageRole(item) {
+  const payload = dictOrEmpty(item?.payload_json);
+  if (payload.interrupted || String(item?.status || "").trim() === "interrupted") {
+    return "system";
+  }
+  const role = String(payload.role || item?.message_type || "").trim().toLowerCase();
+  if (role === "user") {
+    return "user";
+  }
+  if (role === "assistant") {
+    return "assistant";
+  }
+  return "system";
+}
+
+function teamChatMessageBody(item) {
+  const payload = dictOrEmpty(item?.payload_json);
+  const candidates = [payload.body, payload.content, payload.text, payload.error];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+  return "";
+}
+
+function formatTeamChatTime(value) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return "";
+  }
+  const date = new Date(text);
+  if (Number.isNaN(date.getTime())) {
+    return text;
+  }
+  return date.toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function resizeTeamChatInput() {
+  if (!teamChatInput) {
+    return;
+  }
+  teamChatInput.style.height = "auto";
+  teamChatInput.style.height = `${Math.min(teamChatInput.scrollHeight, 180)}px`;
+  syncTeamChatViewportHeight();
+}
+
+function syncTeamChatViewportHeight() {
+  if (!teamChatLayout || !teamChatPageView?.classList.contains("active")) {
+    return;
+  }
+  const viewportHeight = Math.round(window.visualViewport?.height || window.innerHeight || document.documentElement.clientHeight || 0);
+  if (!viewportHeight) {
+    return;
+  }
+  const rect = teamChatLayout.getBoundingClientRect();
+  const bottomGap = 12;
+  const availableHeight = Math.max(420, Math.floor(viewportHeight - rect.top - bottomGap));
+  teamChatLayout.style.setProperty("--team-chat-layout-height", `${availableHeight}px`);
+}
+
+function populateTeamChatTeamOptions(selectedValue = state.teamChat.selectedTeamDefinitionId || "") {
+  if (!teamChatTeamDefinition) {
+    return;
+  }
+  const options = state.teamDefinitions
+    .map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name || item.id)}</option>`)
+    .join("");
+  teamChatTeamDefinition.innerHTML = `<option value="">选择团队</option>${options}`;
+  teamChatTeamDefinition.value = selectedValue || "";
+}
+
+async function loadTeamChatThreads(teamDefinitionId) {
+  if (!teamDefinitionId) {
+    state.teamChat.threads = [];
+    return;
+  }
+  const payload = await api(`/api/agent-center/team-definitions/${teamDefinitionId}/chat/threads`);
+  state.teamChat.threads = Array.isArray(payload.items) ? payload.items : [];
+}
+
+async function loadTeamChatMessages(threadRecordId) {
+  if (!threadRecordId) {
+    state.teamChat.messages = [];
+    return;
+  }
+  const payload = await api(`/api/message-events?thread_id=${encodeURIComponent(threadRecordId)}`);
+  state.teamChat.messages = Array.isArray(payload.items) ? payload.items : [];
+}
+
+async function refreshTeamChatThreads(
+  teamDefinitionId,
+  { selectRecordId = "", selectSessionThreadId = "", preserveSelection = true, allowEmptySelection = false } = {},
+) {
+  await loadTeamChatThreads(teamDefinitionId);
+  let nextThread =
+    state.teamChat.threads.find((item) => item.id === selectRecordId) ||
+    state.teamChat.threads.find((item) => teamChatThreadSessionId(item) === String(selectSessionThreadId || "").trim()) ||
+    null;
+  if (!nextThread && preserveSelection) {
+    nextThread =
+      state.teamChat.threads.find((item) => item.id === state.teamChat.selectedThreadRecordId) ||
+      state.teamChat.threads.find((item) => teamChatThreadSessionId(item) === state.teamChat.selectedSessionThreadId) ||
+      null;
+  }
+  if (!nextThread && !allowEmptySelection && state.teamChat.threads.length) {
+    nextThread = state.teamChat.threads[0];
+  }
+  if (nextThread) {
+    state.teamChat.selectedThreadRecordId = nextThread.id;
+    state.teamChat.selectedSessionThreadId = teamChatThreadSessionId(nextThread);
+    return;
+  }
+  state.teamChat.selectedThreadRecordId = null;
+  if (!allowEmptySelection) {
+    state.teamChat.selectedSessionThreadId = "";
+  }
+}
+
+function renderTeamChatThreads() {
+  if (!teamChatThreadList) {
+    return;
+  }
+  if (!state.teamChat.selectedTeamDefinitionId) {
+    teamChatThreadList.innerHTML = '<div class="team-chat-empty">先选择一个团队。</div>';
+    return;
+  }
+  teamChatThreadList.innerHTML = state.teamChat.threads.length
+    ? state.teamChat.threads
+        .map((item) => {
+          const active = item.id === state.teamChat.selectedThreadRecordId;
+          const preview = item.last_message_preview || item.title || "空会话";
+          const updatedAt = formatTeamChatTime(item.last_message_at || item.updated_at);
+          return `
+            <button type="button" class="team-chat-thread-item${active ? " active" : ""}" data-team-chat-thread="${item.id}">
+              <strong title="${escapeAttribute(item.title || "新会话")}">${escapeHtml(item.title || "新会话")}</strong>
+              <span title="${escapeAttribute(preview)}">${escapeHtml(preview)}</span>
+              <div class="team-chat-thread-meta-line">
+                <span>${escapeHtml(updatedAt || "刚刚创建")}</span>
+              </div>
+            </button>
+          `;
+        })
+        .join("")
+    : '<div class="team-chat-empty">还没有团队测试会话，点击“新建会话”后发送第一条消息。</div>';
+}
+
+function teamChatMessageMarkup(item) {
+  const role = teamChatMessageRole(item);
+  const body = teamChatMessageBody(item) || "无内容";
+  const label = role === "user" ? "你" : role === "assistant" ? currentTeamChatDefinition()?.name || "团队" : "系统";
+  return `
+    <article class="team-chat-message ${role}">
+      <div class="team-chat-bubble">
+        <div class="team-chat-bubble-head">
+          <strong>${escapeHtml(label)}</strong>
+          <span>${escapeHtml(formatTeamChatTime(item.created_at) || "")}</span>
+        </div>
+        <div class="team-chat-bubble-body">${escapeHtml(body)}</div>
+      </div>
+    </article>
+  `;
+}
+
+function renderTeamChatMessages() {
+  if (!teamChatMessageList) {
+    return;
+  }
+  if (!state.teamChat.selectedTeamDefinitionId) {
+    teamChatMessageList.innerHTML = '<div class="team-chat-empty">选择团队后，这里会显示测试对话。</div>';
+    return;
+  }
+  if (!state.teamChat.selectedThreadRecordId && !state.teamChat.messages.length) {
+    teamChatMessageList.innerHTML = '<div class="team-chat-empty">当前是新会话，发送第一条消息开始测试团队。</div>';
+    return;
+  }
+  teamChatMessageList.innerHTML = state.teamChat.messages.length
+    ? state.teamChat.messages.map((item) => teamChatMessageMarkup(item)).join("")
+    : '<div class="team-chat-empty">这条会话还没有消息。</div>';
+}
+
+function renderTeamChatHeader() {
+  const definition = currentTeamChatDefinition();
+  const thread = currentTeamChatThread();
+  if (teamChatTitle) {
+    teamChatTitle.textContent = definition?.name || "选择一个团队";
+  }
+  if (teamChatThreadMeta) {
+    const threadId = state.teamChat.selectedSessionThreadId || teamChatThreadSessionId(thread);
+    teamChatThreadMeta.textContent = threadId ? `thread_id：${threadId}` : "新会话会自动生成 uuidv7 thread_id";
+  }
+}
+
+function renderTeamChatStatus() {
+  const hasDefinition = Boolean(state.teamChat.selectedTeamDefinitionId);
+  const disabled = !hasDefinition || state.teamChat.sending;
+  if (teamChatInput) {
+    teamChatInput.disabled = disabled;
+  }
+  if (teamChatSend) {
+    teamChatSend.disabled = disabled;
+    teamChatSend.textContent = state.teamChat.sending ? "发送中..." : "发送";
+  }
+}
+
+function renderTeamChat() {
+  populateTeamChatTeamOptions();
+  renderTeamChatHeader();
+  renderTeamChatThreads();
+  renderTeamChatMessages();
+  renderTeamChatStatus();
+  requestAnimationFrame(syncTeamChatViewportHeight);
+}
+
+function scrollTeamChatToBottom() {
+  if (!teamChatMessageList) {
+    return;
+  }
+  requestAnimationFrame(() => {
+    syncTeamChatViewportHeight();
+    teamChatMessageList.scrollTop = teamChatMessageList.scrollHeight;
+  });
+}
+
+function startNewTeamChatThread() {
+  state.teamChat.selectedThreadRecordId = null;
+  state.teamChat.selectedSessionThreadId = "";
+  state.teamChat.messages = [];
+  state.teamChat.draftMode = true;
+  hideResult(teamChatResult);
+  renderTeamChat();
+  resizeTeamChatInput();
+  teamChatInput?.focus();
+}
+
+async function ensureTeamChatPage(force = false) {
+  if (!state.loaded.teamDefinitions || force) {
+    await loadTeamDefinitions();
+    state.loaded.teamDefinitions = true;
+  }
+  if (
+    state.teamChat.selectedTeamDefinitionId &&
+    !state.teamDefinitions.some((item) => item.id === state.teamChat.selectedTeamDefinitionId)
+  ) {
+    state.teamChat.selectedTeamDefinitionId = null;
+    state.teamChat.selectedThreadRecordId = null;
+    state.teamChat.selectedSessionThreadId = "";
+    state.teamChat.messages = [];
+    state.teamChat.draftMode = false;
+  }
+  if (!state.teamChat.selectedTeamDefinitionId && state.teamDefinitions.length) {
+    state.teamChat.selectedTeamDefinitionId = state.teamDefinitions[0].id;
+  }
+  populateTeamChatTeamOptions();
+  if (!state.teamChat.selectedTeamDefinitionId) {
+    state.teamChat.threads = [];
+    state.teamChat.messages = [];
+    renderTeamChat();
+    return;
+  }
+  await refreshTeamChatThreads(state.teamChat.selectedTeamDefinitionId, {
+    preserveSelection: true,
+    allowEmptySelection: state.teamChat.draftMode,
+  });
+  await loadTeamChatMessages(state.teamChat.selectedThreadRecordId);
+  if (state.teamChat.selectedThreadRecordId) {
+    state.teamChat.draftMode = false;
+  }
+  renderTeamChat();
+  scrollTeamChatToBottom();
+}
+
+async function selectTeamChatTeam(teamDefinitionId, { allowEmptySelection = false } = {}) {
+  state.teamChat.selectedTeamDefinitionId = teamDefinitionId || null;
+  state.teamChat.selectedThreadRecordId = null;
+  state.teamChat.selectedSessionThreadId = "";
+  state.teamChat.messages = [];
+  state.teamChat.draftMode = false;
+  hideResult(teamChatResult);
+  if (!state.teamChat.selectedTeamDefinitionId) {
+    renderTeamChat();
+    return;
+  }
+  await refreshTeamChatThreads(state.teamChat.selectedTeamDefinitionId, {
+    preserveSelection: false,
+    allowEmptySelection,
+  });
+  await loadTeamChatMessages(state.teamChat.selectedThreadRecordId);
+  renderTeamChat();
+  scrollTeamChatToBottom();
+}
+
+async function selectTeamChatThread(threadRecordId) {
+  state.teamChat.selectedThreadRecordId = threadRecordId || null;
+  const thread = currentTeamChatThread();
+  state.teamChat.selectedSessionThreadId = teamChatThreadSessionId(thread);
+  state.teamChat.draftMode = false;
+  await loadTeamChatMessages(state.teamChat.selectedThreadRecordId);
+  hideResult(teamChatResult);
+  renderTeamChat();
+  scrollTeamChatToBottom();
+}
+
+async function submitTeamChatMessage() {
+  if (state.teamChat.sending) {
+    return;
+  }
+  const teamDefinitionId = state.teamChat.selectedTeamDefinitionId;
+  const text = String(teamChatInput?.value || "").trim();
+  if (!teamDefinitionId) {
+    throw new Error("请先选择一个团队。");
+  }
+  if (!text) {
+    throw new Error("消息不能为空。");
+  }
+  state.teamChat.sending = true;
+  hideResult(teamChatResult);
+  renderTeamChatStatus();
+  try {
+    const response = await api(`/api/agent-center/team-definitions/${teamDefinitionId}/chat/messages`, {
+      method: "POST",
+      body: JSON.stringify({
+        message: text,
+        thread_id: state.teamChat.selectedSessionThreadId || null,
+      }),
+    });
+    state.teamChat.selectedSessionThreadId = String(response.thread_id || response.thread?.thread_id || "").trim();
+    state.teamChat.draftMode = false;
+    if (teamChatInput) {
+      teamChatInput.value = "";
+    }
+    resizeTeamChatInput();
+    await refreshTeamChatThreads(teamDefinitionId, {
+      selectRecordId: String(response.thread?.id || "").trim(),
+      selectSessionThreadId: state.teamChat.selectedSessionThreadId,
+      preserveSelection: false,
+    });
+    await loadTeamChatMessages(state.teamChat.selectedThreadRecordId);
+    renderTeamChat();
+    scrollTeamChatToBottom();
+    if (response.interrupted) {
+      showResult(teamChatResult, {
+        message: "本次团队测试触发了审核中断，消息已记录到会话流中。",
+        thread_id: state.teamChat.selectedSessionThreadId || null,
+      });
+    }
+  } finally {
+    state.teamChat.sending = false;
+    renderTeamChatStatus();
+  }
+}
+
+async function openTeamChatPageForTeamDefinition(teamDefinitionId) {
+  state.teamChat.selectedTeamDefinitionId = teamDefinitionId || null;
+  state.teamChat.selectedThreadRecordId = null;
+  state.teamChat.selectedSessionThreadId = "";
+  state.teamChat.messages = [];
+  state.teamChat.draftMode = false;
+  await switchPage("team-chat");
+}
+
+async function deleteTeamChatThread(threadRecordId) {
+  const teamDefinitionId = String(state.teamChat.selectedTeamDefinitionId || "").trim();
+  const targetThreadId = String(threadRecordId || "").trim();
+  if (!teamDefinitionId || !targetThreadId) {
+    return;
+  }
+  if (state.teamChat.sending) {
+    throw new Error("当前消息发送中，暂时不能删除会话。");
+  }
+  const wasSelected = state.teamChat.selectedThreadRecordId === targetThreadId;
+  const preservedRecordId = wasSelected ? "" : state.teamChat.selectedThreadRecordId || "";
+  const preservedSessionThreadId = wasSelected ? "" : state.teamChat.selectedSessionThreadId || "";
+  hideResult(teamChatResult);
+  await api(`/api/agent-center/team-definitions/${teamDefinitionId}/chat/threads/${targetThreadId}`, {
+    method: "DELETE",
+  });
+  if (wasSelected) {
+    state.teamChat.selectedThreadRecordId = null;
+    state.teamChat.selectedSessionThreadId = "";
+    state.teamChat.messages = [];
+  }
+  await refreshTeamChatThreads(teamDefinitionId, {
+    selectRecordId: preservedRecordId,
+    selectSessionThreadId: preservedSessionThreadId,
+    preserveSelection: !wasSelected,
+    allowEmptySelection: state.teamChat.draftMode,
+  });
+  await loadTeamChatMessages(state.teamChat.selectedThreadRecordId);
+  state.teamChat.draftMode = !state.teamChat.selectedThreadRecordId;
+  renderTeamChat();
+  scrollTeamChatToBottom();
+  showResult(teamChatResult, { message: "团队测试会话已删除", id: targetThreadId });
+}
+
+function populateTeamChatTeamOptions(selectedValue = state.teamChat.selectedTeamDefinitionId || "") {
+  if (!teamChatTeamDefinition) {
+    return;
+  }
+  const options = state.teamDefinitions
+    .map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name || item.id)}</option>`)
+    .join("");
+  teamChatTeamDefinition.innerHTML = `<option value="">\u9009\u62e9\u56e2\u961f</option>${options}`;
+  teamChatTeamDefinition.value = selectedValue || "";
+}
+
+function renderTeamChatThreads() {
+  if (!teamChatThreadList) {
+    return;
+  }
+  if (!state.teamChat.selectedTeamDefinitionId) {
+    teamChatThreadList.innerHTML = '<div class="team-chat-empty">\u5148\u9009\u62e9\u4e00\u4e2a\u56e2\u961f\u3002</div>';
+    return;
+  }
+  teamChatThreadList.innerHTML = state.teamChat.threads.length
+    ? state.teamChat.threads
+        .map((item) => {
+          const active = item.id === state.teamChat.selectedThreadRecordId;
+          const title = item.title || "\u65b0\u4f1a\u8bdd";
+          const preview = item.last_message_preview || title || "\u7a7a\u4f1a\u8bdd";
+          const updatedAt = formatTeamChatTime(item.last_message_at || item.updated_at) || "\u521a\u521a\u521b\u5efa";
+          return `
+            <article class="team-chat-thread-row">
+              <button
+                type="button"
+                class="team-chat-thread-item${active ? " active" : ""}"
+                data-team-chat-thread="${escapeAttribute(item.id || "")}"
+              >
+                <strong title="${escapeAttribute(title)}">${escapeHtml(title)}</strong>
+                <span title="${escapeAttribute(preview)}">${escapeHtml(preview)}</span>
+                <div class="team-chat-thread-meta-line">
+                  <span>${escapeHtml(updatedAt)}</span>
+                </div>
+              </button>
+              <button
+                type="button"
+                class="team-chat-thread-delete ghost warn"
+                data-team-chat-thread-delete="${escapeAttribute(item.id || "")}"
+                title="删除会话"
+              >
+                删除
+              </button>
+            </article>
+          `;
+        })
+        .join("")
+    : '<div class="team-chat-empty">\u8fd8\u6ca1\u6709\u56e2\u961f\u6d4b\u8bd5\u4f1a\u8bdd\uff0c\u70b9\u51fb\u201c\u65b0\u5efa\u4f1a\u8bdd\u201d\u540e\u53d1\u9001\u7b2c\u4e00\u6761\u6d88\u606f\u3002</div>';
+}
+
+function teamChatMessageMarkup(item) {
+  const role = teamChatMessageRole(item);
+  const body = teamChatMessageBody(item) || "\u65e0\u5185\u5bb9";
+  const label = role === "user" ? "\u4f60" : role === "assistant" ? currentTeamChatDefinition()?.name || "\u56e2\u961f" : "\u7cfb\u7edf";
+  return `
+    <article class="team-chat-message ${role}">
+      <div class="team-chat-bubble">
+        <div class="team-chat-bubble-head">
+          <strong>${escapeHtml(label)}</strong>
+          <span>${escapeHtml(formatTeamChatTime(item.created_at) || "")}</span>
+        </div>
+        <div class="team-chat-bubble-body">${renderMarkdown(body)}</div>
+      </div>
+    </article>
+  `;
+}
+
+function renderTeamChatMessages() {
+  if (!teamChatMessageList) {
+    return;
+  }
+  if (!state.teamChat.selectedTeamDefinitionId) {
+    teamChatMessageList.innerHTML = '<div class="team-chat-empty">\u9009\u62e9\u56e2\u961f\u540e\uff0c\u8fd9\u91cc\u4f1a\u663e\u793a\u6d4b\u8bd5\u5bf9\u8bdd\u3002</div>';
+    return;
+  }
+  if (!state.teamChat.selectedThreadRecordId && !state.teamChat.messages.length) {
+    teamChatMessageList.innerHTML =
+      '<div class="team-chat-empty">\u5f53\u524d\u662f\u65b0\u4f1a\u8bdd\uff0c\u53d1\u9001\u7b2c\u4e00\u6761\u6d88\u606f\u5f00\u59cb\u6d4b\u8bd5\u56e2\u961f\u3002</div>';
+    return;
+  }
+  teamChatMessageList.innerHTML = state.teamChat.messages.length
+    ? state.teamChat.messages.map((item) => teamChatMessageMarkup(item)).join("")
+    : '<div class="team-chat-empty">\u8fd9\u6761\u4f1a\u8bdd\u8fd8\u6ca1\u6709\u6d88\u606f\u3002</div>';
+}
+
+function renderTeamChatHeader() {
+  const definition = currentTeamChatDefinition();
+  const thread = currentTeamChatThread();
+  if (teamChatTitle) {
+    teamChatTitle.textContent = definition?.name || "\u9009\u62e9\u4e00\u4e2a\u56e2\u961f";
+  }
+  if (teamChatThreadMeta) {
+    const threadId = state.teamChat.selectedSessionThreadId || teamChatThreadSessionId(thread);
+    teamChatThreadMeta.textContent = threadId
+      ? `thread_id\uff1a${threadId}`
+      : "\u65b0\u4f1a\u8bdd\u4f1a\u81ea\u52a8\u751f\u6210 uuidv7 thread_id";
+  }
+}
+
+function renderTeamChatStatus() {
+  const hasDefinition = Boolean(state.teamChat.selectedTeamDefinitionId);
+  const disabled = !hasDefinition || state.teamChat.sending;
+  if (teamChatInput) {
+    teamChatInput.disabled = disabled;
+  }
+  if (teamChatSend) {
+    teamChatSend.disabled = disabled;
+    teamChatSend.textContent = state.teamChat.sending ? "\u53d1\u9001\u4e2d..." : "\u53d1\u9001";
+  }
+}
+
+function renderTeamChat() {
+  populateTeamChatTeamOptions();
+  renderTeamChatHeader();
+  renderTeamChatThreads();
+  renderTeamChatMessages();
+  renderTeamChatStatus();
+}
+
+function scrollTeamChatToBottom() {
+  if (!teamChatMessageList) {
+    return;
+  }
+  requestAnimationFrame(() => {
+    teamChatMessageList.scrollTop = teamChatMessageList.scrollHeight;
+  });
+}
+
+function startNewTeamChatThread() {
+  state.teamChat.selectedThreadRecordId = null;
+  state.teamChat.selectedSessionThreadId = "";
+  state.teamChat.messages = [];
+  state.teamChat.draftMode = true;
+  hideResult(teamChatResult);
+  renderTeamChat();
+  resizeTeamChatInput();
+  teamChatInput?.focus();
+}
+
+async function ensureTeamChatPage(force = false) {
+  if (!state.loaded.teamDefinitions || force) {
+    await loadTeamDefinitions();
+    state.loaded.teamDefinitions = true;
+  }
+  if (
+    state.teamChat.selectedTeamDefinitionId &&
+    !state.teamDefinitions.some((item) => item.id === state.teamChat.selectedTeamDefinitionId)
+  ) {
+    state.teamChat.selectedTeamDefinitionId = null;
+    state.teamChat.selectedThreadRecordId = null;
+    state.teamChat.selectedSessionThreadId = "";
+    state.teamChat.messages = [];
+    state.teamChat.draftMode = false;
+  }
+  if (!state.teamChat.selectedTeamDefinitionId && state.teamDefinitions.length) {
+    state.teamChat.selectedTeamDefinitionId = state.teamDefinitions[0].id;
+  }
+  populateTeamChatTeamOptions();
+  if (!state.teamChat.selectedTeamDefinitionId) {
+    state.teamChat.threads = [];
+    state.teamChat.messages = [];
+    renderTeamChat();
+    return;
+  }
+  await refreshTeamChatThreads(state.teamChat.selectedTeamDefinitionId, {
+    preserveSelection: true,
+    allowEmptySelection: state.teamChat.draftMode,
+  });
+  await loadTeamChatMessages(state.teamChat.selectedThreadRecordId);
+  if (state.teamChat.selectedThreadRecordId) {
+    state.teamChat.draftMode = false;
+  }
+  renderTeamChat();
+  scrollTeamChatToBottom();
+}
+
+async function selectTeamChatTeam(teamDefinitionId, { allowEmptySelection = false } = {}) {
+  state.teamChat.selectedTeamDefinitionId = teamDefinitionId || null;
+  state.teamChat.selectedThreadRecordId = null;
+  state.teamChat.selectedSessionThreadId = "";
+  state.teamChat.messages = [];
+  state.teamChat.draftMode = false;
+  hideResult(teamChatResult);
+  if (!state.teamChat.selectedTeamDefinitionId) {
+    renderTeamChat();
+    return;
+  }
+  await refreshTeamChatThreads(state.teamChat.selectedTeamDefinitionId, {
+    preserveSelection: false,
+    allowEmptySelection,
+  });
+  await loadTeamChatMessages(state.teamChat.selectedThreadRecordId);
+  renderTeamChat();
+  scrollTeamChatToBottom();
+}
+
+async function selectTeamChatThread(threadRecordId) {
+  state.teamChat.selectedThreadRecordId = threadRecordId || null;
+  const thread = currentTeamChatThread();
+  state.teamChat.selectedSessionThreadId = teamChatThreadSessionId(thread);
+  state.teamChat.draftMode = false;
+  await loadTeamChatMessages(state.teamChat.selectedThreadRecordId);
+  hideResult(teamChatResult);
+  renderTeamChat();
+  scrollTeamChatToBottom();
+}
+
+async function submitTeamChatMessage() {
+  if (state.teamChat.sending) {
+    return;
+  }
+  const teamDefinitionId = state.teamChat.selectedTeamDefinitionId;
+  const text = String(teamChatInput?.value || "").trim();
+  if (!teamDefinitionId) {
+    throw new Error("\u8bf7\u5148\u9009\u62e9\u4e00\u4e2a\u56e2\u961f\u3002");
+  }
+  if (!text) {
+    throw new Error("\u6d88\u606f\u4e0d\u80fd\u4e3a\u7a7a\u3002");
+  }
+  state.teamChat.sending = true;
+  hideResult(teamChatResult);
+  renderTeamChatStatus();
+  try {
+    const response = await api(`/api/agent-center/team-definitions/${teamDefinitionId}/chat/messages`, {
+      method: "POST",
+      body: JSON.stringify({
+        message: text,
+        thread_id: state.teamChat.selectedSessionThreadId || null,
+      }),
+    });
+    state.teamChat.selectedSessionThreadId = String(response.thread_id || response.thread?.thread_id || "").trim();
+    state.teamChat.draftMode = false;
+    if (teamChatInput) {
+      teamChatInput.value = "";
+    }
+    resizeTeamChatInput();
+    await refreshTeamChatThreads(teamDefinitionId, {
+      selectRecordId: String(response.thread?.id || "").trim(),
+      selectSessionThreadId: state.teamChat.selectedSessionThreadId,
+      preserveSelection: false,
+    });
+    await loadTeamChatMessages(state.teamChat.selectedThreadRecordId);
+    renderTeamChat();
+    scrollTeamChatToBottom();
+    if (response.interrupted) {
+      showResult(teamChatResult, {
+        message:
+          "\u672c\u6b21\u56e2\u961f\u6d4b\u8bd5\u89e6\u53d1\u4e86\u5ba1\u6279\u4e2d\u65ad\uff0c\u6d88\u606f\u5df2\u8bb0\u5f55\u5230\u4f1a\u8bdd\u6d41\u4e2d\u3002",
+        thread_id: state.teamChat.selectedSessionThreadId || null,
+      });
+    }
+  } finally {
+    state.teamChat.sending = false;
+    renderTeamChatStatus();
+  }
+}
+
+async function openTeamChatPageForTeamDefinition(teamDefinitionId) {
+  state.teamChat.selectedTeamDefinitionId = teamDefinitionId || null;
+  state.teamChat.selectedThreadRecordId = null;
+  state.teamChat.selectedSessionThreadId = "";
+  state.teamChat.messages = [];
+  state.teamChat.draftMode = false;
+  await switchPage("team-chat");
 }
 
 function providerPreset(type = providerType.value) {
@@ -2024,6 +3495,235 @@ function openPluginModal() {
 function closePluginModal() {
   pluginModal.classList.add("hidden");
   hideResult(pluginModalResult);
+}
+
+function openSkillModal() {
+  skillModal?.classList.remove("hidden");
+}
+
+function closeSkillModal() {
+  skillModal?.classList.add("hidden");
+  state.skillImportDragActive = false;
+  renderSkillImportSelection();
+  hideResult(skillModalResult);
+}
+
+function openSkillPreviewModal() {
+  skillPreviewModal?.classList.remove("hidden");
+}
+
+function closeSkillPreviewModal() {
+  skillPreviewModal?.classList.add("hidden");
+  resetSkillPreviewState();
+}
+
+function resetSkillPreviewState() {
+  state.skillPreview = {
+    skillId: null,
+    skill: null,
+    files: [],
+    selectedPath: "",
+    fileCache: {},
+    loading: false,
+    fileLoading: false,
+    errorText: "",
+  };
+  renderSkillPreview();
+}
+
+function skillPreviewBodyMarkdown(preview) {
+  const defaultPath = skillPreviewDefaultPath(preview?.files || []);
+  if (!defaultPath) {
+    return "";
+  }
+  const file = preview?.fileCache?.[defaultPath] || null;
+  if (!file || !file.is_text) {
+    return "";
+  }
+  const raw = String(file.content || "").trim();
+  if (!raw.startsWith("---")) {
+    return raw;
+  }
+  const closing = raw.indexOf("\n---", 3);
+  if (closing < 0) {
+    return raw;
+  }
+  return raw.slice(closing + 4).trim();
+}
+
+function skillPreviewDefaultPath(files) {
+  const items = Array.isArray(files) ? files : [];
+  const skillFile = items.find((item) => String(item.path || "") === "SKILL.md") || items.find((item) => String(item.path || "").endsWith("/SKILL.md"));
+  return String((skillFile || items[0] || {}).path || "").trim();
+}
+
+function renderSkillPreview() {
+  if (!skillPreviewModal) {
+    return;
+  }
+  const preview = state.skillPreview || {};
+  const skill = preview.skill || null;
+  const files = Array.isArray(preview.files) ? preview.files : [];
+  const selectedPath = String(preview.selectedPath || "").trim();
+  const selectedFile = selectedPath ? preview.fileCache?.[selectedPath] || null : null;
+  const groups = skill ? skillGroupsForItem(skill) : [];
+  const groupSummary = groups.length ? groups.map((item) => item.name || item.key || "-").join("、") : "未分组";
+  const bodyMarkdown = skill ? skillPreviewBodyMarkdown(preview) : "";
+
+  if (skillPreviewTitle) {
+    skillPreviewTitle.textContent = skill ? `${skill.name || skill.id} · Skill 预览` : "Skill 预览";
+  }
+  if (skillPreviewSubtitle) {
+    skillPreviewSubtitle.textContent = skill ? `${skill.storage_path || skill.id || "-"} / ${groupSummary}` : preview.loading ? "正在加载 Skill 详情..." : "";
+  }
+  if (skillPreviewSummary) {
+    skillPreviewSummary.innerHTML = skill
+      ? [
+          chip("分组", groupSummary),
+          chip("文件", files.length || 0),
+          chip("位置", skill.storage_path || "-"),
+        ].join("")
+      : preview.loading
+        ? chip("状态", "加载中")
+        : preview.errorText
+          ? chip("状态", "加载失败")
+          : "";
+  }
+  if (skillPreviewBodyMeta) {
+    skillPreviewBodyMeta.textContent = bodyMarkdown ? `${bodyMarkdown.length} 字符` : "";
+  }
+  if (skillPreviewContent) {
+    if (preview.loading && !skill) {
+      skillPreviewContent.innerHTML = '<div class="detail empty compact-detail">正在加载 Skill 内容...</div>';
+    } else if (preview.errorText && !skill) {
+      skillPreviewContent.innerHTML = `<div class="detail empty compact-detail"><strong>加载失败</strong><p>${escapeHtml(preview.errorText)}</p></div>`;
+    } else if (bodyMarkdown) {
+      skillPreviewContent.innerHTML = `<div class="team-chat-bubble-body skill-preview-markdown">${renderMarkdown(bodyMarkdown)}</div>`;
+    } else {
+      skillPreviewContent.innerHTML = '<div class="detail empty compact-detail">该 Skill 暂无可预览的正文内容。</div>';
+    }
+  }
+  if (skillPreviewFileMeta) {
+    skillPreviewFileMeta.textContent = files.length ? `${files.length} 个文件` : preview.loading ? "读取中..." : "";
+  }
+  if (skillPreviewFileList) {
+    skillPreviewFileList.innerHTML = files.length
+      ? files
+          .map((item) => {
+            const path = String(item.path || "");
+            return `
+              <button
+                type="button"
+                class="skill-preview-file-button${path === selectedPath ? " active" : ""}"
+                data-skill-preview-file="${escapeAttribute(path)}"
+              >
+                <strong>${escapeHtml(fileNameFromPath(path))}</strong>
+                <span title="${escapeAttribute(path)}">${escapeHtml(path)}</span>
+              </button>
+            `;
+          })
+          .join("")
+      : '<div class="detail empty compact-detail">当前 Skill 暂无可查看文件。</div>';
+  }
+  if (skillPreviewFileTitle) {
+    skillPreviewFileTitle.innerHTML = selectedPath
+      ? `<strong>${escapeHtml(fileNameFromPath(selectedPath))}</strong><span>${escapeHtml(selectedPath)}</span>`
+      : "<strong>未选择文件</strong>";
+  }
+  if (skillPreviewFileContent) {
+    if (preview.fileLoading && selectedPath) {
+      skillPreviewFileContent.innerHTML = '<div class="detail empty compact-detail">正在读取文件内容...</div>';
+    } else if (!selectedPath) {
+      skillPreviewFileContent.innerHTML = '<div class="detail empty compact-detail">从左侧选择一个文件后即可查看内容。</div>';
+    } else if (!selectedFile) {
+      skillPreviewFileContent.innerHTML = '<div class="detail empty compact-detail">文件内容尚未加载。</div>';
+    } else if (!selectedFile.is_text) {
+      skillPreviewFileContent.innerHTML = `<div class="detail empty compact-detail"><strong>${escapeHtml(fileNameFromPath(selectedPath))}</strong><p>${escapeHtml(selectedFile.message || "该文件暂不支持预览。")}</p></div>`;
+    } else if (selectedFile.is_markdown) {
+      skillPreviewFileContent.innerHTML = `
+        <div class="team-chat-bubble-body skill-preview-markdown">${renderMarkdown(selectedFile.content || "")}</div>
+        ${selectedFile.truncated ? '<p class="field-note skill-preview-truncated">文件较大，当前仅展示前 1 MB 内容。</p>' : ""}
+      `;
+    } else {
+      skillPreviewFileContent.innerHTML = `
+        <pre class="skill-preview-code"><code>${escapeHtml(selectedFile.content || "")}</code></pre>
+        ${selectedFile.truncated ? '<p class="field-note skill-preview-truncated">文件较大，当前仅展示前 1 MB 内容。</p>' : ""}
+      `;
+    }
+  }
+}
+
+async function loadSkillPreviewFile(path, { force = false } = {}) {
+  const skillId = String(state.skillPreview.skillId || "").trim();
+  const targetPath = String(path || "").trim();
+  if (!skillId || !targetPath) {
+    return;
+  }
+  state.skillPreview.selectedPath = targetPath;
+  if (!force && state.skillPreview.fileCache?.[targetPath]) {
+    state.skillPreview.fileLoading = false;
+    renderSkillPreview();
+    return;
+  }
+  state.skillPreview.fileLoading = true;
+  renderSkillPreview();
+  try {
+    const params = new URLSearchParams({ path: targetPath });
+    const payload = await api(`/api/agent-center/skills/${skillId}/file-content?${params.toString()}`);
+    if (String(state.skillPreview.skillId || "").trim() !== skillId) {
+      return;
+    }
+    state.skillPreview.fileCache[targetPath] = payload;
+    state.skillPreview.fileLoading = false;
+    renderSkillPreview();
+  } catch (error) {
+    if (String(state.skillPreview.skillId || "").trim() !== skillId) {
+      return;
+    }
+    state.skillPreview.fileCache[targetPath] = {
+      path: targetPath,
+      is_text: false,
+      message: error?.message || "读取文件失败。",
+    };
+    state.skillPreview.fileLoading = false;
+    renderSkillPreview();
+  }
+}
+
+async function openSkillPreview(skillId) {
+  const targetSkillId = String(skillId || "").trim();
+  if (!targetSkillId) {
+    return;
+  }
+  resetSkillPreviewState();
+  state.skillPreview.skillId = targetSkillId;
+  state.skillPreview.loading = true;
+  openSkillPreviewModal();
+  renderSkillPreview();
+  try {
+    const [skill, filesPayload] = await Promise.all([
+      api(`/api/agent-center/skills/${targetSkillId}`),
+      api(`/api/agent-center/skills/${targetSkillId}/files`),
+    ]);
+    if (String(state.skillPreview.skillId || "").trim() !== targetSkillId) {
+      return;
+    }
+    state.skillPreview.skill = skill;
+    state.skillPreview.files = Array.isArray(filesPayload.items) ? filesPayload.items : [];
+    state.skillPreview.loading = false;
+    renderSkillPreview();
+    const defaultPath = skillPreviewDefaultPath(state.skillPreview.files);
+    if (defaultPath) {
+      await loadSkillPreviewFile(defaultPath);
+    }
+  } catch (error) {
+    if (String(state.skillPreview.skillId || "").trim() !== targetSkillId) {
+      return;
+    }
+    state.skillPreview.loading = false;
+    state.skillPreview.errorText = error?.message || "加载 Skill 预览失败。";
+    renderSkillPreview();
+  }
 }
 
 function openStaticMemoryModal(mode = currentStaticMemoryMode()) {
@@ -2349,6 +4049,37 @@ function closeTeamDefinitionModal() {
   hideResult(teamDefinitionModalResult);
 }
 
+function resetTeamDefinitionPreviewState() {
+  teamDefinitionPreviewState.payload = null;
+  teamDefinitionPreviewState.loading = false;
+  teamDefinitionPreviewState.errorText = "";
+}
+
+function openTeamDefinitionPreviewModal() {
+  teamDefinitionPreviewModal?.classList.remove("hidden");
+}
+
+function closeTeamDefinitionPreviewModal() {
+  resetTeamDefinitionPreviewState();
+  teamDefinitionPreviewModal?.classList.add("hidden");
+  if (teamDefinitionPreviewTitle) {
+    teamDefinitionPreviewTitle.textContent = "团队树预览";
+  }
+  if (teamDefinitionPreviewSummary) {
+    teamDefinitionPreviewSummary.innerHTML = "";
+  }
+  if (teamDefinitionPreviewTree) {
+    teamDefinitionPreviewTree.innerHTML = "";
+  }
+}
+
+function teamDefinitionPreviewPayload(payload, { loading = false, errorText = "" } = {}) {
+  teamDefinitionPreviewState.payload = payload || null;
+  teamDefinitionPreviewState.loading = loading;
+  teamDefinitionPreviewState.errorText = errorText;
+  renderTeamDefinitionPreview();
+}
+
 function resetProviderForm() {
   state.editingProviderId = null;
   providerName.value = "";
@@ -2430,7 +4161,6 @@ function defaultTeamFlow() {
 
 function resetTeamTemplateForm() {
   state.editingTeamTemplateId = null;
-  state.selectedTeamTemplateId = null;
   teamTemplateName.value = "";
   teamTemplateWorkspace.value = "local-workspace";
   teamTemplateProject.value = "default-project";
@@ -2495,6 +4225,386 @@ function fillPluginForm(plugin) {
   openPluginModal();
 }
 
+function resetSkillForm({ openModal = false } = {}) {
+  state.editingSkillId = null;
+  setSkillModalMode("import");
+  resetSkillImportState();
+  renderSkillImportGroupOptions([]);
+  hideResult(skillModalResult);
+  renderSkills();
+  if (openModal) {
+    openSkillModal();
+  }
+}
+
+function fillSkillForm(skill, { openModal = false } = {}) {
+  const groups = skillGroupsForItem(skill);
+  state.editingSkillId = skill.id;
+  setSkillModalMode("reupload");
+  resetSkillImportState();
+  renderSkillImportGroupOptions(groups.map((item) => item.id).filter(Boolean));
+  hideResult(skillModalResult);
+  renderSkills();
+  if (openModal) {
+    openSkillModal();
+  }
+}
+
+function setSkillModalMode(mode) {
+  state.skillModalMode = mode === "reupload" ? "reupload" : "import";
+  const isImportMode = state.skillModalMode === "import";
+  skillImportPanel?.classList.toggle("hidden", false);
+  skillEditorPanel?.classList.toggle("hidden", true);
+  if (skillModalTitle) {
+    skillModalTitle.textContent = isImportMode ? "导入 Skill" : "重新上传 Skill";
+  }
+  if (skillImportDropzone) {
+    skillImportDropzone.setAttribute(
+      "aria-label",
+      isImportMode ? "点击选择 Skill 文件夹，或将文件夹拖到这里" : "点击重新选择 Skill 文件夹，或将新文件夹拖到这里",
+    );
+  }
+  if (skillImportDropzoneTitle) {
+    skillImportDropzoneTitle.textContent = isImportMode ? "点击上传文件夹" : "点击重新上传文件夹";
+  }
+  if (skillImportDropzoneHint) {
+    skillImportDropzoneHint.textContent = isImportMode ? "或拖拽文件夹到这里" : "或拖拽新的文件夹到这里";
+  }
+  if (skillImportDropzoneTrigger) {
+    skillImportDropzoneTrigger.textContent = isImportMode ? "选择文件夹" : "重新选择文件夹";
+  }
+  if (skillValidate) {
+    skillValidate.classList.toggle("hidden", false);
+    skillValidate.disabled = !state.skillImportFiles.length || state.skillImportBusy;
+  }
+  if (skillSave) {
+    skillSave.textContent = isImportMode ? "导入 Skill" : "重新上传并覆盖";
+    skillSave.disabled = !state.skillImportFiles.length || state.skillImportBusy;
+  }
+}
+
+function normalizeSkillImportPath(path) {
+  return String(path || "")
+    .replace(/\\/g, "/")
+    .replace(/^\/+/, "")
+    .trim();
+}
+
+function normalizeSkillImportEntries(entries) {
+  const seen = new Set();
+  return (entries || [])
+    .map((item) => ({
+      file: item?.file || null,
+      path: normalizeSkillImportPath(item?.path || item?.relativePath || item?.file?.webkitRelativePath || item?.file?.name || ""),
+    }))
+    .filter((item) => item.file && item.path)
+    .filter((item) => {
+      if (seen.has(item.path)) {
+        return false;
+      }
+      seen.add(item.path);
+      return true;
+    })
+    .sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function resetSkillImportState() {
+  state.skillImportFiles = [];
+  state.skillImportDragActive = false;
+  state.skillImportBusy = false;
+  if (skillImportDirectoryInput) {
+    skillImportDirectoryInput.value = "";
+  }
+  renderSkillImportSelection();
+  setSkillModalMode(state.skillModalMode);
+}
+
+function renderSkillImportSelection() {
+  skillImportDropzone?.classList.toggle("drag-active", Boolean(state.skillImportDragActive));
+  const files = Array.isArray(state.skillImportFiles) ? state.skillImportFiles : [];
+  if (!skillImportSelection) {
+    setSkillModalMode(state.skillModalMode);
+    return;
+  }
+  if (!files.length) {
+    skillImportSelection.classList.add("empty");
+    skillImportSelection.innerHTML = `
+      <span class="skill-import-selection-placeholder">未选择文件夹</span>
+    `;
+    setSkillModalMode(state.skillModalMode);
+    return;
+  }
+  const roots = Array.from(new Set(files.map((item) => item.path.split("/")[0] || item.path))).slice(0, 3);
+  const skillMdCount = files.filter((item) => item.path.split("/").pop() === "SKILL.md").length;
+  const suffix = roots.length < new Set(files.map((item) => item.path.split("/")[0] || item.path)).size ? " ..." : "";
+  skillImportSelection.classList.remove("empty");
+  skillImportSelection.innerHTML = `
+    <strong title="${escapeAttribute(roots.join(" / ") + suffix)}">${escapeHtml(roots.join(" / ") + suffix)}</strong>
+    <div class="skill-import-selection-meta">
+      <span class="skill-import-selection-stat">${escapeHtml(`${files.length} 个文件`)}</span>
+      <span class="skill-import-selection-stat">${escapeHtml(`${skillMdCount} 个 Skill`)}</span>
+    </div>
+  `;
+  setSkillModalMode(state.skillModalMode);
+}
+
+function setSkillImportFiles(entries) {
+  state.skillImportFiles = normalizeSkillImportEntries(entries);
+  state.skillImportDragActive = false;
+  hideResult(skillModalResult);
+  renderSkillImportSelection();
+}
+
+function setSkillImportBusy(busy) {
+  state.skillImportBusy = Boolean(busy);
+  skillImportDropzone?.classList.toggle("busy", state.skillImportBusy);
+  if (skillImportDirectoryInput) {
+    skillImportDirectoryInput.disabled = state.skillImportBusy;
+  }
+  setSkillModalMode(state.skillModalMode);
+}
+
+function openSkillImportModal() {
+  state.editingSkillId = null;
+  setSkillModalMode("import");
+  resetSkillImportState();
+  renderSkillImportGroupOptions([]);
+  hideResult(skillModalResult);
+  openSkillModal();
+  skillImportDropzone?.focus();
+}
+
+function readFileAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || "");
+      const index = result.indexOf(",");
+      resolve(index >= 0 ? result.slice(index + 1) : result);
+    };
+    reader.onerror = () => reject(reader.error || new Error("读取文件失败。"));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function buildSkillUploadPayload() {
+  const files = normalizeSkillImportEntries(state.skillImportFiles);
+  if (!files.length) {
+    throw new Error("请先选择要导入的 Skill 文件夹。");
+  }
+  const groupIds = skillImportGroups ? getMultiSelectValues(skillImportGroups).map((value) => String(value || "").trim()).filter(Boolean) : [];
+  return {
+    recursive: true,
+    group_ids: groupIds,
+    target_skill_id: String(state.editingSkillId || "").trim(),
+    files: await Promise.all(
+      files.map(async (item) => ({
+        path: item.path,
+        content_base64: await readFileAsBase64(item.file),
+      })),
+    ),
+  };
+}
+
+function readDirectoryEntries(reader) {
+  return new Promise((resolve, reject) => {
+    const items = [];
+    const next = () => {
+      reader.readEntries(
+        (batch) => {
+          if (!batch.length) {
+            resolve(items);
+            return;
+          }
+          items.push(...batch);
+          next();
+        },
+        (error) => reject(error || new Error("读取目录失败。")),
+      );
+    };
+    next();
+  });
+}
+
+async function collectSkillImportEntriesFromEntry(entry, prefix = "") {
+  if (!entry) {
+    return [];
+  }
+  if (entry.isFile) {
+    return new Promise((resolve, reject) => {
+      entry.file(
+        (file) => resolve([{ file, path: normalizeSkillImportPath(`${prefix}${file.name}`) }]),
+        (error) => reject(error || new Error("读取拖入文件失败。")),
+      );
+    });
+  }
+  if (!entry.isDirectory) {
+    return [];
+  }
+  const children = await readDirectoryEntries(entry.createReader());
+  let files = [];
+  for (const child of children) {
+    files = files.concat(await collectSkillImportEntriesFromEntry(child, `${prefix}${entry.name}/`));
+  }
+  return files;
+}
+
+async function collectSkillImportEntriesFromInput(fileList) {
+  return normalizeSkillImportEntries(
+    Array.from(fileList || []).map((file) => ({
+      file,
+      path: normalizeSkillImportPath(file.webkitRelativePath || file.name),
+    })),
+  );
+}
+
+async function collectSkillImportEntriesFromDataTransfer(dataTransfer) {
+  const items = Array.from(dataTransfer?.items || []);
+  const entries = items.map((item) => (typeof item.webkitGetAsEntry === "function" ? item.webkitGetAsEntry() : null)).filter(Boolean);
+  if (entries.length) {
+    let files = [];
+    for (const entry of entries) {
+      files = files.concat(await collectSkillImportEntriesFromEntry(entry));
+    }
+    return normalizeSkillImportEntries(files);
+  }
+  return collectSkillImportEntriesFromInput(dataTransfer?.files || []);
+}
+
+async function scanSelectedSkillImportFiles() {
+  const payload = await buildSkillUploadPayload();
+  setSkillImportBusy(true);
+  try {
+    const result = await api("/api/agent-center/skills/scan-upload", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    showResult(skillModalResult, result);
+    return result;
+  } finally {
+    setSkillImportBusy(false);
+  }
+}
+
+function renderSkillManagementView() {
+  const isSkillsView = state.skillManagementView !== "groups";
+  skillManagementSkillsView?.classList.toggle("hidden", !isSkillsView);
+  skillManagementGroupsView?.classList.toggle("hidden", isSkillsView);
+  skillSearchForm?.classList.toggle("hidden", !isSkillsView);
+  skillViewSkills?.classList.toggle("active", isSkillsView);
+  skillViewSkills?.classList.toggle("ghost", !isSkillsView);
+  skillViewGroups?.classList.toggle("active", !isSkillsView);
+  skillViewGroups?.classList.toggle("ghost", isSkillsView);
+  if (skillOpenCreate) {
+    skillOpenCreate.textContent = "新增";
+    skillOpenCreate.dataset.mode = isSkillsView ? "skill" : "group";
+  }
+}
+
+function setSkillManagementView(view) {
+  state.skillManagementView = view === "groups" ? "groups" : "skills";
+  renderSkillManagementView();
+}
+
+function focusSkillGroupPageOn(groupId) {
+  const targetId = String(groupId || "").trim();
+  if (!targetId) {
+    return;
+  }
+  const index = state.skillGroupCatalog.findIndex((item) => String(item.id || "") === targetId);
+  if (index < 0) {
+    return;
+  }
+  const limit = Math.max(1, Number(state.skillGroupPage.limit || 10));
+  state.skillGroupPage.offset = Math.floor(index / limit) * limit;
+}
+
+function openSkillGroupModal() {
+  skillGroupModal?.classList.remove("hidden");
+}
+
+function closeSkillGroupModal() {
+  skillGroupModal?.classList.add("hidden");
+  hideResult(skillGroupModalResult);
+}
+
+function resetSkillGroupForm() {
+  state.editingSkillGroupId = null;
+  if (skillGroupManagementName) {
+    skillGroupManagementName.value = "";
+  }
+  if (skillGroupManagementDescription) {
+    skillGroupManagementDescription.value = "";
+  }
+  renderSkillGroupSkillOptions([]);
+  if (skillGroupModalTitle) {
+    skillGroupModalTitle.textContent = "新增分组";
+  }
+  hideResult(skillGroupModalResult);
+  renderSkillGroupManagementList();
+}
+
+function fillSkillGroupForm(group) {
+  state.editingSkillGroupId = group.id || null;
+  if (skillGroupManagementName) {
+    skillGroupManagementName.value = group.name || "";
+  }
+  if (skillGroupManagementDescription) {
+    skillGroupManagementDescription.value = group.description || "";
+  }
+  renderSkillGroupSkillOptions(skillIdsForGroup(group));
+  if (skillGroupModalTitle) {
+    skillGroupModalTitle.textContent = "编辑分组";
+  }
+  hideResult(skillGroupModalResult);
+  renderSkillGroupManagementList();
+}
+
+async function openSkillGroupManagementView(groupId = "") {
+  await switchPage("skills");
+  await ensureSkillGroupCatalog(true);
+  focusSkillGroupPageOn(groupId);
+  await ensureSkillGroupManagementPage(true);
+  state.editingSkillGroupId = groupId || null;
+  renderSkillGroupManagementList();
+  setSkillManagementView("groups");
+}
+
+function renderSkillGroupManagementList() {
+  if (!skillGroupManagementList) {
+    return;
+  }
+  const items = Array.isArray(state.skillGroupPage.items) ? state.skillGroupPage.items : [];
+  skillGroupManagementList.innerHTML = items.length
+    ? items
+        .map((group) => {
+          const active = Boolean(group.id) && group.id === state.editingSkillGroupId;
+          const countText = `${group.count || 0}`;
+          const canManage = Boolean(group.id);
+          return `
+            <article class="provider-row skill-group-management-row${active ? " active" : ""}">
+              <div class="provider-main">
+                <strong title="${escapeAttribute(group.name || group.key || group.id || "-")}">${escapeHtml(group.name || group.key || group.id || "-")}</strong>
+                <span title="${escapeAttribute(group.key || group.id || "-")}">${escapeHtml(group.key || group.id || "-")}</span>
+              </div>
+              <div class="provider-cell">
+                <span title="${escapeAttribute(group.description || "未填写分组简介")}">${escapeHtml(group.description || "未填写分组简介")}</span>
+              </div>
+              <div class="provider-cell">
+                <strong>${escapeHtml(countText)}</strong>
+              </div>
+              <div class="provider-row-actions">
+                <button type="button" data-skill-group-edit="${escapeAttribute(group.id || "")}" ${canManage ? "" : "disabled"}>编辑</button>
+                <button type="button" class="ghost warn" data-skill-group-delete="${escapeAttribute(group.id || "")}" ${canManage ? "" : "disabled"}>删除</button>
+              </div>
+            </article>
+          `;
+        })
+        .join("")
+    : '<div class="detail empty compact-detail"><strong>暂无 Skill 分组</strong><p>先创建一个分组，再把 Skill 归进去。</p></div>';
+  renderOffsetPagination(state.skillGroupPage, skillGroupPaginationMeta, "skill-group-page");
+}
+
 function fillAgentTemplateForm(template) {
   state.editingAgentTemplateId = template.id;
   const spec = template.spec_json || {};
@@ -2519,7 +4629,6 @@ function fillAgentTemplateForm(template) {
 
 function fillTeamTemplateForm(template) {
   state.editingTeamTemplateId = template.id;
-  state.selectedTeamTemplateId = template.id;
   const spec = template.spec_json || {};
   teamTemplateName.value = template.name || "";
   teamTemplateWorkspace.value = spec.workspace_id || "local-workspace";
@@ -2547,9 +4656,9 @@ function renderOverview() {
   const items = [
     ["Provider", state.summary.provider_profile_count || 0],
     ["插件", state.summary.plugin_count || 0],
+    ["技能", state.summary.skill_count || 0],
     ["角色管理", state.summary.static_memory_count || 0],
     ["知识库", state.summary.knowledge_base_count || 0],
-    ["记忆画像", state.summary.memory_profile_count || 0],
     ["Agent 管理", state.summary.agent_definition_count || 0],
     ["团队定义", state.summary.team_definition_count || 0],
     ["Run", state.summary.run_count || 0],
@@ -2575,19 +4684,6 @@ function renderOverview() {
       `,
     )
     .join("");
-
-  overviewBuilds.innerHTML = state.recentBuilds.length
-    ? state.recentBuilds
-        .map((item) =>
-          cardMarkup({
-            title: item.name,
-            body: item.description || buildTeamTemplateLabel(item),
-            meta: `team=${buildTeamTemplateLabel(item)} / blueprint=${item.blueprint_id || "-"}`,
-            actions: `<button type="button" class="ghost" data-build-open="${item.id}">查看</button>`,
-          }),
-        )
-        .join("")
-    : cardMarkup({ title: "暂无 Build", body: "先构建团队模板。", meta: "" });
 
   overviewRuns.innerHTML = state.recentRuns.length
     ? state.recentRuns
@@ -2706,6 +4802,71 @@ function renderPlugins() {
         .join("")
     : '<div class="detail empty compact-detail">暂无插件，先新建一个插件。</div>';
   renderOffsetPagination(state.pluginPage, pluginPaginationMeta, "plugin-page");
+}
+
+function renderSkillGroupFilters() {
+  if (!skillGroupList) {
+    return;
+  }
+  const totalCount = state.skills.length;
+  const groups = Array.isArray(state.skillGroups) ? state.skillGroups : [];
+  const currentGroupKey = state.skillPage.groupKey || "";
+  const allButtons = [
+    { key: "", name: "全部", count: totalCount },
+    ...groups.map((group) => ({ key: group.key || "", name: group.name || "未分组", count: group.count || 0 })),
+  ];
+  skillGroupList.innerHTML = allButtons
+    .map(
+      (group) => `
+        <button
+          type="button"
+          class="skill-group-chip${group.key === currentGroupKey ? " active" : ""}"
+          data-skill-group="${escapeAttribute(group.key)}"
+        >
+          <strong>${escapeHtml(group.name)}</strong>
+          <span>${escapeHtml(group.count || 0)}</span>
+        </button>
+      `,
+    )
+    .join("");
+}
+
+function renderSkills() {
+  if (!skillList) {
+    return;
+  }
+  skillList.innerHTML = state.skillPage.items.length
+      ? state.skillPage.items
+        .map((item) => {
+          const groups = skillGroupsForItem(item);
+          const groupNameSummary = groups.length ? groups.map((entry) => entry.name || entry.key || "-").join("、") : "未分组";
+          const groupKeySummary = groups.length ? groups.map((entry) => entry.key || entry.id || "-").join(" / ") : "可在导入时归组";
+          const description = String(item.description || "").trim() || "暂无简介";
+          return `
+            <article class="provider-row skill-management-row">
+              <div class="provider-main">
+                <strong title="${escapeAttribute(item.name || item.id || "-")}">${escapeHtml(item.name || item.id || "-")}</strong>
+                <span title="${escapeAttribute(item.storage_path || item.id || "-")}">${escapeHtml(item.storage_path || item.id || "-")}</span>
+              </div>
+              <div class="provider-cell">
+                <strong title="${escapeAttribute(groupNameSummary)}">${escapeHtml(groupNameSummary)}</strong>
+                <span title="${escapeAttribute(groupKeySummary)}">${escapeHtml(groupKeySummary)}</span>
+              </div>
+              <div class="provider-cell">
+                <strong title="${escapeAttribute(description)}">${escapeHtml(description)}</strong>
+                <span title="${escapeAttribute(item.description || "")}">${escapeHtml(item.description || "来自 SKILL.md")}</span>
+              </div>
+              <div class="provider-row-actions skill-row-actions">
+                <button type="button" class="ghost" data-skill-preview="${item.id}">预览</button>
+                <button type="button" data-skill-edit="${item.id}">重新上传</button>
+                <button type="button" class="ghost warn" data-skill-delete="${item.id}">删除</button>
+              </div>
+            </article>
+          `;
+        })
+        .join("")
+    : '<div class="detail empty compact-detail"><strong>暂无 Skill</strong><p>先创建第一个 Skill，并为它归一个分组。</p></div>';
+  renderOffsetPagination(state.skillPage, skillPaginationMeta, "skill-page");
 }
 
 function renderAgentTemplates() {
@@ -3227,45 +5388,11 @@ function removeEdge(sourceId, targetId) {
 }
 
 async function validateTeamGraph() {
-  try {
-    const payload = await api("/api/agent-center/team-templates/graph/validate", {
-      method: "POST",
-      body: JSON.stringify({ spec: buildTeamTemplateSpecFromForm() }),
-    });
-    if (payload.normalized_spec) {
-      state.teamEditor.spec = payload.normalized_spec;
-      syncTeamEditorToForm();
-    }
-    state.teamEditor.validation = payload;
-    renderTeamEditor();
-  } catch (error) {
-    showResult(teamTemplateResult, { error: error.message });
-  }
+  showResult(teamTemplateResult, { error: "Legacy 团队模板已移除。" });
 }
 
 async function previewTeamGraph() {
-  try {
-    const payload = await api("/api/agent-center/team-templates/graph/preview", {
-      method: "POST",
-      body: JSON.stringify({
-        team_template_id: state.editingTeamTemplateId,
-        name: teamTemplateName.value.trim() || "Preview Team",
-        spec: buildTeamTemplateSpecFromForm(),
-      }),
-    });
-    state.teamEditor.preview = payload;
-    if (!state.teamEditor.validation) {
-      state.teamEditor.validation = {
-        valid: payload.valid,
-        errors: payload.errors || [],
-        warnings: payload.warnings || [],
-        communication: {},
-      };
-    }
-    renderTeamEditor();
-  } catch (error) {
-    showResult(teamTemplateResult, { error: error.message });
-  }
+  showResult(teamTemplateResult, { error: "Legacy 团队模板已移除。" });
 }
 
 function renderTeamTemplates() {
@@ -3281,7 +5408,7 @@ function renderTeamTemplates() {
               <button type="button" data-team-template-edit="${item.id}">编辑</button>
               <button type="button" class="ghost" data-team-build="${item.id}">构建</button>
             `,
-            active: item.id === state.editingTeamTemplateId || item.id === state.selectedTeamTemplateId,
+            active: item.id === state.editingTeamTemplateId,
           });
         })
         .join("")
@@ -3306,147 +5433,247 @@ function renderTeamDefinitions() {
   if (!teamDefinitionList) {
     return;
   }
-  teamDefinitionList.innerHTML = state.teamDefinitions.length
-    ? state.teamDefinitions
+  teamDefinitionList.innerHTML = state.teamDefinitionPage.items.length
+    ? state.teamDefinitionPage.items
         .map((item) => {
           const spec = dictOrEmpty(item.spec_json);
           const hierarchy = teamDefinitionHierarchySpec(spec);
           const directChildCount = hierarchy.children.length || hierarchy.legacyMembers.length;
           const childAgentCount = hierarchy.children.filter((child) => child.kind === "agent").length;
           const childTeamCount = hierarchy.children.filter((child) => child.kind === "team").length;
-          const leadLabel = hierarchy.lead.source_ref ? teamDefinitionMemberSourceLabel(hierarchy.lead) : "未配置 Lead Agent 模板";
-          const summaryPrimary = hierarchy.children.length || hierarchy.lead.source_ref
-            ? `Lead: ${leadLabel}`
-            : hierarchy.legacyMembers.length
-              ? `旧版团队定义 / 成员 ${hierarchy.legacyMembers.length}`
-              : "尚未配置层级";
-          const summarySecondary = hierarchy.children.length || hierarchy.lead.source_ref
-            ? `直属 Subagent ${hierarchy.children.length} / Agent ${childAgentCount} / Team ${childTeamCount}`
-            : "重新编辑后会切换为 create_deep_agent 层级";
+          const description = item.description || "未填写团队简介";
+          const leadLabel = hierarchy.lead.source_ref ? teamDefinitionMemberSourceLabel(hierarchy.lead) : "未配置 Lead Agent";
+          const leadSummary = hierarchy.legacyMembers.length && !hierarchy.lead.source_ref ? "旧版团队定义" : leadLabel;
+          const subagentSummary =
+            hierarchy.children.length || hierarchy.lead.source_ref
+              ? `直属 ${directChildCount} / Agent ${childAgentCount} / Team ${childTeamCount}`
+              : hierarchy.legacyMembers.length
+                ? `旧版成员 ${hierarchy.legacyMembers.length}`
+                : "未配置";
           return `
             <article class="provider-row team-management-row">
               <div class="provider-main">
                 <strong title="${escapeAttribute(item.name || item.id || "-")}">${escapeHtml(item.name || item.id || "-")}</strong>
-                <span title="${escapeAttribute(`直属 Subagent ${directChildCount}`)}">${escapeHtml(`直属 Subagent ${directChildCount}`)}</span>
               </div>
               <div class="provider-cell">
-                <strong title="${escapeAttribute(item.description || "未填写说明")}">${escapeHtml(item.description || "未填写说明")}</strong>
-                <span title="${escapeAttribute(`${hierarchy.workspaceId} / ${hierarchy.projectId}`)}">${escapeHtml(`${hierarchy.workspaceId} / ${hierarchy.projectId}`)}</span>
+                <strong title="${escapeAttribute(description)}">${escapeHtml(description)}</strong>
               </div>
               <div class="provider-cell">
-                <strong title="${escapeAttribute(summaryPrimary)}">${escapeHtml(summaryPrimary)}</strong>
-                <span title="${escapeAttribute(summarySecondary)}">${escapeHtml(summarySecondary)}</span>
+                <strong title="${escapeAttribute(leadSummary)}">${escapeHtml(leadSummary)}</strong>
+              </div>
+              <div class="provider-cell">
+                <strong title="${escapeAttribute(subagentSummary)}">${escapeHtml(subagentSummary)}</strong>
               </div>
               <div class="provider-row-actions">
                 <button type="button" data-team-definition-edit="${item.id}">编辑</button>
-                <button type="button" class="ghost" data-team-definition-task="${item.id}">启动任务</button>
-                <button type="button" class="ghost" data-team-definition-compile="${item.id}">编译</button>
-                <button type="button" class="ghost" data-team-definition-build="${item.id}">兼容构建</button>
+                <button type="button" class="ghost warn" data-team-definition-delete="${item.id}">删除</button>
+                <button type="button" class="ghost" data-team-definition-test="${item.id}">测试</button>
+                <button type="button" class="ghost" data-team-definition-preview="${item.id}">预览</button>
               </div>
             </article>
           `;
         })
         .join("")
     : '<div class="detail empty compact-detail"><strong>暂无团队管理项</strong><p>先创建第一个团队。</p></div>';
+  renderOffsetPagination(state.teamDefinitionPage, teamDefinitionPaginationMeta, "team-definition-page");
 }
 
-function renderBuilds() {
-  buildList.innerHTML = state.builds.length
-    ? state.builds
-        .map((item) =>
-          cardMarkup({
-            title: item.name,
-            body: item.description || buildTeamTemplateLabel(item),
-            meta: `team=${buildTeamTemplateLabel(item)} / blueprint=${item.blueprint_id || "-"}`,
-            actions: `
-              <button type="button" data-build-open="${item.id}">查看</button>
-              <button type="button" class="ghost" data-build-use="${item.id}">用于任务</button>
-            `,
-            active: item.id === state.selectedBuildId,
-          }),
-        )
-        .join("")
-    : cardMarkup({ title: "暂无 Build", body: "先构建团队模板。", meta: "" });
+function teamDefinitionPreviewMessageMarkup(title, body, tone = "") {
+  return `
+    <article class="team-preview-empty${tone ? ` ${tone}` : ""}">
+      <strong>${escapeHtml(title)}</strong>
+      <p>${escapeHtml(body)}</p>
+    </article>
+  `;
 }
 
-function renderBuildDetail(build) {
-  if (!build) {
-    setDetailPlaceholder(buildDetail, "请选择一个 Build。");
+function teamDefinitionPreviewSummaryMarkup(preview) {
+  if (!preview || typeof preview !== "object") {
+    return "";
+  }
+  const items = [];
+  if ("team_count" in preview) {
+    items.push(chip("Team", preview.team_count || 0));
+  }
+  if ("agent_count" in preview) {
+    items.push(chip("Agent", preview.agent_count || 0));
+  }
+  if ("node_count" in preview) {
+    items.push(chip("节点", preview.node_count || 0));
+  }
+  if ("edge_count" in preview) {
+    items.push(chip("边", preview.edge_count || 0));
+  }
+  if (preview.hierarchy_mode) {
+    items.push(chip("结构", preview.hierarchy_mode));
+  }
+  if (preview.execution_mode) {
+    items.push(chip("模式", preview.execution_mode));
+  }
+  return items.join("");
+}
+
+function teamDefinitionPreviewErrorText(error) {
+  const payload = errorResult(error);
+  const fallback =
+    (typeof payload?.error === "string" && payload.error.trim()) || (typeof error?.message === "string" && error.message.trim()) || "预览生成失败。";
+  return formatApiError(payload, fallback);
+}
+
+function teamHierarchyNodeType(node) {
+  return String(node?.node_type || "agent").trim().toLowerCase() === "team" ? "team" : "agent";
+}
+
+function teamHierarchyNodeTitle(node) {
+  return node?.name || node?.delegate_name || node?.runtime_key || node?.key || "未命名节点";
+}
+
+function teamHierarchyGraphCardMarkup(node, { isRoot = false } = {}) {
+  const title = teamHierarchyNodeTitle(node);
+  return `
+    <article class="team-preview-graph-card${isRoot ? " root" : ""}" title="${escapeAttribute(title)}">
+      <strong class="team-preview-graph-title">${escapeHtml(title)}</strong>
+    </article>
+  `;
+}
+
+function teamHierarchyGraphAgentMarkup(node, { isRoot = false } = {}) {
+  return `<div class="team-preview-graph-node-shell">${teamHierarchyGraphCardMarkup(node, { isRoot })}</div>`;
+}
+
+function teamHierarchyGraphTeamMarkup(node, { isRoot = false } = {}) {
+  if (!node || typeof node !== "object") {
+    return "";
+  }
+  const teamName = teamHierarchyNodeTitle(node);
+  const leadNode = node.lead && typeof node.lead === "object" ? node.lead : null;
+  const children = Array.isArray(node.children) ? node.children : [];
+  const childMarkup = children
+    .map((child) => `<div class="team-preview-graph-child">${teamHierarchyGraphNodeMarkup(child)}</div>`)
+    .join("");
+  return `
+    <section class="team-preview-team-box${isRoot ? " root" : ""}">
+      <span class="team-preview-team-label">${escapeHtml(teamName)}</span>
+      <div class="team-preview-team-content">
+        <div class="team-preview-team-lead">
+          ${
+            leadNode
+              ? teamHierarchyGraphAgentMarkup(leadNode, { isRoot })
+              : `<div class="team-preview-graph-node-shell">${teamHierarchyGraphCardMarkup(node, { isRoot })}</div>`
+          }
+        </div>
+        ${
+          childMarkup
+            ? `
+              <div class="team-preview-graph-branch">
+                <div class="team-preview-graph-children">
+                  ${childMarkup}
+                </div>
+              </div>
+            `
+            : ""
+        }
+      </div>
+    </section>
+  `;
+}
+
+function teamHierarchyGraphNodeMarkup(node, { isRoot = false } = {}) {
+  if (!node || typeof node !== "object") {
+    return "";
+  }
+  const nodeType = teamHierarchyNodeType(node);
+  if (nodeType === "team") {
+    return teamHierarchyGraphTeamMarkup(node, { isRoot });
+  }
+  return teamHierarchyGraphAgentMarkup(node, { isRoot });
+}
+
+function renderTeamDefinitionPreview() {
+  const payload = teamDefinitionPreviewState.payload || {};
+  const loading = Boolean(teamDefinitionPreviewState.loading);
+  const errorText = String(teamDefinitionPreviewState.errorText || "").trim();
+  const teamDefinition = payload?.team_definition || {};
+  const hierarchy = payload?.hierarchy && typeof payload.hierarchy === "object" ? payload.hierarchy : null;
+  const title = teamDefinition.name || hierarchy?.name || "团队树预览";
+  const description = String(teamDefinition.description || hierarchy?.description || "").trim();
+  const summaryMarkup = loading ? chip("状态", "生成中") : errorText ? chip("状态", "失败") : teamDefinitionPreviewSummaryMarkup(payload?.preview) || chip("状态", "已生成");
+
+  if (teamDefinitionPreviewTitle) {
+    teamDefinitionPreviewTitle.textContent = `${title} · 团队树预览`;
+  }
+  if (teamDefinitionPreviewSummary) {
+    teamDefinitionPreviewSummary.innerHTML = `
+      ${description ? `<p class="team-preview-description">${escapeHtml(description)}</p>` : ""}
+      <div class="team-preview-chip-row">${summaryMarkup}</div>
+    `;
+  }
+  if (!teamDefinitionPreviewTree) {
     return;
   }
-  state.selectedBuildId = build.id;
-  buildDetail.classList.remove("empty");
-  const summary = blueprintSummary(build.spec_json || {});
-  buildDetail.textContent =
-    `Build：${build.id}\n` +
-    `名称：${build.name}\n` +
-    `团队模板：${buildTeamTemplateLabel(build)}\n` +
-    `蓝图快照：${build.blueprint_id || ""}\n` +
-    `角色模板：${summary.roleTemplates.length}\n` +
-    `Agent：${summary.agents.length}\n` +
-    `节点：${summary.nodes.length}\n` +
-    `边：${summary.edges.length}\n\n` +
-    `资源锁定\n${prettyJson(build.resource_lock_json || {})}\n\n` +
-    `BlueprintSpec\n${prettyJson(build.spec_json || {})}`;
-}
-
-function renderBlueprints() {
-  blueprintList.innerHTML = state.blueprints.length
-    ? state.blueprints
-        .map((item) => {
-          const summary = blueprintSummary(item.spec_json || {});
-          return cardMarkup({
-            title: item.name,
-            body: item.description || "内部蓝图快照",
-            meta: `roles=${summary.roleTemplates.length} / agents=${summary.agents.length} / nodes=${summary.nodes.length}`,
-            actions: `
-              <button type="button" data-blueprint-open="${item.id}">查看</button>
-              <button type="button" class="ghost" data-blueprint-use="${item.id}">用于任务</button>
-            `,
-            active: item.id === state.selectedBlueprintId,
-          });
-        })
-        .join("")
-    : cardMarkup({ title: "暂无蓝图", body: "Build 后会生成蓝图快照。", meta: "" });
-}
-
-function renderBlueprintDetail(blueprint) {
-  if (!blueprint) {
-    setDetailPlaceholder(blueprintDetail, "请选择一个蓝图。");
+  if (loading) {
+    teamDefinitionPreviewTree.innerHTML = teamDefinitionPreviewMessageMarkup(
+      "正在生成树状结构",
+      "将基于当前团队定义递归展开 Team、Lead Agent 和所有 SubAgent。",
+    );
     return;
   }
-  state.selectedBlueprintId = blueprint.id;
-  blueprintDetail.classList.remove("empty");
-  const summary = blueprintSummary(blueprint.spec_json || {});
-  blueprintDetail.textContent =
-    `Blueprint：${blueprint.id}\n` +
-    `名称：${blueprint.name}\n` +
-    `说明：${blueprint.description || ""}\n` +
-    `角色模板：${summary.roleTemplates.length}\n` +
-    `Agent：${summary.agents.length}\n` +
-    `节点：${summary.nodes.length}\n` +
-    `边：${summary.edges.length}\n\n` +
-    prettyJson(blueprint.spec_json || {});
+  if (errorText) {
+    teamDefinitionPreviewTree.innerHTML = teamDefinitionPreviewMessageMarkup("预览生成失败", errorText, "error");
+    return;
+  }
+  if (!hierarchy) {
+    teamDefinitionPreviewTree.innerHTML = teamDefinitionPreviewMessageMarkup(
+      "暂无树状结构",
+      "当前团队编译结果没有返回 hierarchy 数据。",
+    );
+    return;
+  }
+  teamDefinitionPreviewTree.classList.add("graph-view");
+  teamDefinitionPreviewTree.innerHTML = `<div class="team-preview-graph-stage">${teamHierarchyGraphNodeMarkup(hierarchy, { isRoot: true })}</div>`;
 }
 
 function renderRuns() {
-  runList.innerHTML = state.runs.length
-    ? state.runs
-        .map((item) =>
-          cardMarkup({
-            title: item.summary || item.id,
-            body: `状态：${item.status}`,
-            meta: `run=${item.id}`,
-            actions:
-              item.status === "waiting_approval"
-                ? `<button type="button" class="warn" data-run-resume="${item.id}">恢复</button>
-                   <button type="button" class="ghost" data-run-open="${item.id}">查看</button>`
-                : `<button type="button" class="ghost" data-run-open="${item.id}">查看</button>`,
-            active: item.id === state.selectedRunId,
-          }),
-        )
+  renderOffsetPagination(state.runPage, runPaginationMeta, "run-page");
+  runList.innerHTML = state.runPage.items.length
+    ? state.runPage.items
+        .map((item) => {
+          const title = item.task_title || item.summary || item.id;
+          const subtitle = item.task_prompt || item.id;
+          const blueprint = item.blueprint_name || item.blueprint_id || "-";
+          const statusSummary = item.current_node_id ? `${item.status} / ${item.current_node_id}` : item.status;
+          const updatedAt = formatTeamChatTime(item.updated_at) || item.updated_at || "-";
+          return `
+            <article class="provider-row runtime-row${item.id === state.selectedRunId ? " active" : ""}">
+              <div class="provider-main">
+                <strong title="${escapeAttribute(title)}">${escapeHtml(title)}</strong>
+                <span title="${escapeAttribute(subtitle)}">${escapeHtml(subtitle)}</span>
+              </div>
+              <div class="provider-cell">
+                <strong title="${escapeAttribute(blueprint)}">${escapeHtml(blueprint)}</strong>
+                <span title="${escapeAttribute(item.blueprint_description || "")}">${escapeHtml(item.blueprint_description || "运行蓝图")}</span>
+              </div>
+              <div class="provider-cell">
+                <strong title="${escapeAttribute(statusSummary)}">${escapeHtml(item.status || "-")}</strong>
+                <span title="${escapeAttribute(statusSummary)}">${escapeHtml(item.current_node_id || "待处理")}</span>
+              </div>
+              <div class="provider-cell">
+                <strong title="${escapeAttribute(updatedAt)}">${escapeHtml(updatedAt)}</strong>
+                <span title="${escapeAttribute(item.started_at || "")}">${escapeHtml(item.started_at ? `开始于 ${formatTeamChatTime(item.started_at) || item.started_at}` : "未开始")}</span>
+              </div>
+              <div class="provider-row-actions">
+                ${
+                  item.status === "waiting_approval"
+                    ? `<button type="button" class="warn" data-run-resume="${item.id}">恢复</button>`
+                    : ""
+                }
+                <button type="button" class="ghost" data-run-open="${item.id}">查看</button>
+              </div>
+            </article>
+          `;
+        })
         .join("")
-    : cardMarkup({ title: "暂无 Run", body: "启动任务后显示。", meta: "" });
+    : '<div class="detail empty compact-detail"><strong>暂无 Run</strong><p>启动任务后显示。</p></div>';
 }
 
 function renderApprovals() {
@@ -3552,7 +5779,7 @@ function normalizeResourceSelections(values, collection) {
       if (!normalized) {
         return "";
       }
-      const matched = collection.find((item) => item.id === normalized || item.key === normalized) || null;
+      const matched = collection.find((item) => item.id === normalized || item.key === normalized || item.name === normalized) || null;
       return matched?.id || normalized;
     })
     .filter(Boolean);
@@ -3864,81 +6091,8 @@ function renderReviewPolicies() {
     : cardMarkup({ title: "暂无审核策略", body: "先创建第一个审核策略。", meta: "" });
 }
 
-function resetMemoryProfileForm() {
-  state.editingMemoryProfileId = null;
-  state.memoryProfileBaseSpec = {};
-  memoryProfileKey.value = "";
-  memoryProfileName.value = "";
-  memoryProfileDescription.value = "";
-  memoryProfileShortTermEnabled.checked = true;
-  memoryProfileSummaryTriggerTokens.value = "1800";
-  memoryProfileSummaryMaxTokens.value = "320";
-  memoryProfileLongTermEnabled.checked = true;
-  memoryProfileNamespaceStrategy.value = "agent_team_project";
-  memoryProfileTtlDays.value = "30";
-  memoryProfileBackgroundEnabled.checked = true;
-  memoryProfileDebounceSeconds.value = "30";
-  populateStaticMemoryScopeOptions();
-  setMultiSelectValues(memoryProfileReadScopes, ["agent", "team", "project"]);
-  setMultiSelectValues(memoryProfileWriteScopes, ["agent", "team"]);
-  hideResult(memoryProfileResult);
-  renderMemoryProfiles();
-}
-
-function fillMemoryProfileForm(item) {
-  const spec = dictOrEmpty(item?.spec_json);
-  const shortTerm = dictOrEmpty(spec.short_term);
-  const longTerm = dictOrEmpty(spec.long_term);
-  const backgroundReflection = dictOrEmpty(spec.background_reflection);
-  state.editingMemoryProfileId = item.id;
-  state.memoryProfileBaseSpec = clone(spec);
-  memoryProfileKey.value = item.key || "";
-  memoryProfileName.value = item.name || "";
-  memoryProfileDescription.value = item.description || "";
-  memoryProfileShortTermEnabled.checked = Boolean(shortTerm.enabled ?? true);
-  memoryProfileSummaryTriggerTokens.value = String(shortTerm.summary_trigger_tokens ?? 1800);
-  memoryProfileSummaryMaxTokens.value = String(shortTerm.summary_max_tokens ?? 320);
-  memoryProfileLongTermEnabled.checked = Boolean(longTerm.enabled ?? true);
-  memoryProfileNamespaceStrategy.value = String(longTerm.namespace_strategy || "agent_team_project");
-  memoryProfileTtlDays.value = String(longTerm.ttl_days ?? 30);
-  memoryProfileBackgroundEnabled.checked = Boolean(backgroundReflection.enabled ?? true);
-  memoryProfileDebounceSeconds.value = String(backgroundReflection.debounce_seconds ?? 30);
-  populateStaticMemoryScopeOptions();
-  setMultiSelectValues(memoryProfileReadScopes, spec.read_scopes || []);
-  setMultiSelectValues(memoryProfileWriteScopes, spec.write_scopes || []);
-  hideResult(memoryProfileResult);
-  renderMemoryProfiles();
-}
-
-function buildMemoryProfilePayloadFromForm() {
-  const spec = clone(state.memoryProfileBaseSpec || {});
-  spec.short_term = {
-    enabled: Boolean(memoryProfileShortTermEnabled.checked),
-    summary_trigger_tokens: Number(memoryProfileSummaryTriggerTokens.value || 1800),
-    summary_max_tokens: Number(memoryProfileSummaryMaxTokens.value || 320),
-  };
-  spec.long_term = {
-    enabled: Boolean(memoryProfileLongTermEnabled.checked),
-    namespace_strategy: memoryProfileNamespaceStrategy.value.trim() || "agent_team_project",
-    ttl_days: Number(memoryProfileTtlDays.value || 30),
-  };
-  spec.background_reflection = {
-    enabled: Boolean(memoryProfileBackgroundEnabled.checked),
-    debounce_seconds: Number(memoryProfileDebounceSeconds.value || 30),
-  };
-  spec.read_scopes = getMultiSelectValues(memoryProfileReadScopes);
-  spec.write_scopes = getMultiSelectValues(memoryProfileWriteScopes);
-  return {
-    id: state.editingMemoryProfileId,
-    key: memoryProfileKey.value.trim(),
-    name: memoryProfileName.value.trim(),
-    description: memoryProfileDescription.value.trim(),
-    version: "v1",
-    spec,
-  };
-}
-
 function renderMemoryProfiles() {
+  /*
   memoryProfileList.innerHTML = state.memoryProfiles.length
     ? state.memoryProfiles
         .map((item) => {
@@ -3957,6 +6111,8 @@ function renderMemoryProfiles() {
         })
         .join("")
     : cardMarkup({ title: "暂无记忆画像", body: "先创建第一个记忆画像。", meta: "" });
+function syncAgentDefinitionModelOptions(selectedModel = "") {
+  */
 }
 
 function syncAgentDefinitionModelOptions(selectedModel = "") {
@@ -4080,7 +6236,7 @@ function agentDefinitionRowMarkup(item) {
         <strong title="${escapeAttribute(item.name || item.id || "-")}">${escapeHtml(item.name || item.id || "-")}</strong>
       </div>
       <div class="provider-cell">
-        <strong title="${escapeAttribute(item.description || "未填写说明")}">${escapeHtml(item.description || "未填写说明")}</strong>
+        <strong title="${escapeAttribute(item.description || "未填写 Agent 简介")}">${escapeHtml(item.description || "未填写 Agent 简介")}</strong>
       </div>
       <div class="provider-cell">
         <strong title="${escapeAttribute(`${providerLabel} / ${modelLabel}`)}">${escapeHtml(`${providerLabel} / ${modelLabel}`)}</strong>
@@ -4235,12 +6391,12 @@ function resetTeamDefinitionForm({ openModal = false } = {}) {
   state.teamDefinitionBaseSpec = {};
   teamDefinitionKey.value = "";
   teamDefinitionName.value = "";
-  teamDefinitionWorkspace.value = "local-workspace";
-  teamDefinitionProject.value = "default-project";
-  teamDefinitionDescription.value = "";
+  if (teamDefinitionDescription) {
+    teamDefinitionDescription.value = "";
+  }
   renderTeamDefinitionLeadAgentOptions("");
-  if (teamDefinitionLeadAgentTemplate) {
-    teamDefinitionLeadAgentTemplate.value = "";
+  if (teamDefinitionLeadAgentDefinition) {
+    teamDefinitionLeadAgentDefinition.value = "";
   }
   setTeamDefinitionMembers([]);
   if (teamDefinitionEntryAgent) {
@@ -4272,12 +6428,12 @@ function fillTeamDefinitionForm(definition, { openModal = false } = {}) {
   state.teamDefinitionBaseSpec = clone(spec);
   teamDefinitionKey.value = definition.key || "";
   teamDefinitionName.value = definition.name || "";
-  teamDefinitionWorkspace.value = hierarchy.workspaceId;
-  teamDefinitionProject.value = hierarchy.projectId;
-  teamDefinitionDescription.value = definition.description || "";
+  if (teamDefinitionDescription) {
+    teamDefinitionDescription.value = definition.description || "";
+  }
   renderTeamDefinitionLeadAgentOptions(hierarchy.lead.source_ref);
-  if (teamDefinitionLeadAgentTemplate && hierarchy.lead.source_ref) {
-    teamDefinitionLeadAgentTemplate.value = hierarchy.lead.source_ref;
+  if (teamDefinitionLeadAgentDefinition && hierarchy.lead.source_ref) {
+    teamDefinitionLeadAgentDefinition.value = hierarchy.lead.source_ref;
   }
   setTeamDefinitionMembers(hierarchy.children);
   hideResult(teamDefinitionResult);
@@ -4293,9 +6449,9 @@ function fillTeamDefinitionForm(definition, { openModal = false } = {}) {
 
 function buildTeamDefinitionPayloadFromForm() {
   const children = teamDefinitionMembersValue();
-  const leadAgentTemplateRef = normalizeTeamDefinitionReference("agent_template", teamDefinitionLeadAgentTemplate?.value || "");
-  if (!leadAgentTemplateRef) {
-    throw new Error("请先选择 Lead Agent 模板。");
+  const leadAgentDefinitionRef = normalizeTeamDefinitionReference("agent_definition", teamDefinitionLeadAgentDefinition?.value || "");
+  if (!leadAgentDefinitionRef) {
+    throw new Error("请先选择 Lead Agent。");
   }
   children.forEach((member, index) => {
     if (!String(member.source_kind || "").trim()) {
@@ -4306,12 +6462,11 @@ function buildTeamDefinitionPayloadFromForm() {
     }
   });
   const spec = clone(state.teamDefinitionBaseSpec || {});
-  spec.workspace_id = teamDefinitionWorkspace.value.trim() || "local-workspace";
-  spec.project_id = teamDefinitionProject.value.trim() || "default-project";
+  spec.workspace_id = "local-workspace";
   spec.lead = {
     kind: "agent",
-    source_kind: "agent_template",
-    agent_template_ref: leadAgentTemplateRef,
+    source_kind: "agent_definition",
+    agent_definition_ref: leadAgentDefinitionRef,
   };
   spec.children = children.map((member) =>
     member.source_kind === "team_definition"
@@ -4319,13 +6474,11 @@ function buildTeamDefinitionPayloadFromForm() {
           kind: "team",
           source_kind: "team_definition",
           team_definition_ref: member.source_ref,
-          ...(member.name ? { name: member.name } : {}),
         }
       : {
           kind: "agent",
-          source_kind: "agent_template",
-          agent_template_ref: member.source_ref,
-          ...(member.name ? { name: member.name } : {}),
+          source_kind: "agent_definition",
+          agent_definition_ref: member.source_ref,
         },
   );
   delete spec.root;
@@ -4346,7 +6499,7 @@ function buildTeamDefinitionPayloadFromForm() {
   return {
     id: state.editingTeamDefinitionId,
     name: teamDefinitionName.value.trim(),
-    description: teamDefinitionDescription.value.trim(),
+    description: teamDefinitionDescription?.value.trim() || "",
     version: "v1",
     spec,
   };
@@ -4357,7 +6510,6 @@ async function loadControlPlane() {
   state.summary = payload.summary || {};
   state.storage = payload.storage || null;
   state.providerTypes = payload.provider_types || [];
-  state.recentBuilds = payload.recent_builds || [];
   state.recentRuns = payload.recent_runs || [];
 }
 
@@ -4418,16 +6570,48 @@ async function loadBuiltinPlugins() {
 async function loadSkills() {
   const payload = await api("/api/agent-center/skills");
   state.skills = payload.items || [];
+  state.skillGroups = payload.groups || [];
+}
+
+async function loadSkillGroupCatalog() {
+  const payload = await api("/api/agent-center/skill-groups");
+  state.skillGroupCatalog = payload.items || [];
+}
+
+async function loadSkillGroupPage() {
+  const params = new URLSearchParams({
+    limit: String(state.skillGroupPage.limit || 10),
+    offset: String(state.skillGroupPage.offset || 0),
+  });
+  const payload = await api(`/api/agent-center/skill-groups?${params.toString()}`);
+  state.skillGroupPage.items = payload.items || [];
+  state.skillGroupPage.total = payload.total || 0;
+  state.skillGroupPage.limit = payload.limit || state.skillGroupPage.limit;
+  state.skillGroupPage.offset = payload.offset || 0;
+}
+
+async function loadSkillPage() {
+  const params = new URLSearchParams({
+    limit: String(state.skillPage.limit || 10),
+    offset: String(state.skillPage.offset || 0),
+  });
+  if (state.skillPage.query) {
+    params.set("query", state.skillPage.query);
+  }
+  if (state.skillPage.groupKey) {
+    params.set("group_key", state.skillPage.groupKey);
+  }
+  const payload = await api(`/api/agent-center/skills?${params.toString()}`);
+  state.skillPage.items = payload.items || [];
+  state.skillPage.total = payload.total || 0;
+  state.skillPage.limit = payload.limit || state.skillPage.limit;
+  state.skillPage.offset = payload.offset || 0;
+  state.skillGroups = payload.groups || [];
 }
 
 async function loadReviewPolicies() {
   const payload = await api("/api/agent-center/review-policies");
   state.reviewPolicies = payload.items || [];
-}
-
-async function loadMemoryProfiles() {
-  const payload = await api("/api/agent-center/memory-profiles");
-  state.memoryProfiles = payload.items || [];
 }
 
 async function loadPluginPage() {
@@ -4515,6 +6699,19 @@ async function loadTeamDefinitions() {
   if (state.selectedTaskTeamDefinitionId && !state.teamDefinitions.some((item) => item.id === state.selectedTaskTeamDefinitionId)) {
     state.selectedTaskTeamDefinitionId = null;
   }
+  populateTaskOptions();
+}
+
+async function loadTeamDefinitionPage() {
+  const params = new URLSearchParams({
+    limit: String(state.teamDefinitionPage.limit || 10),
+    offset: String(state.teamDefinitionPage.offset || 0),
+  });
+  const payload = await api(`/api/agent-center/team-definitions?${params.toString()}`);
+  state.teamDefinitionPage.items = payload.items || [];
+  state.teamDefinitionPage.total = payload.total || 0;
+  state.teamDefinitionPage.limit = payload.limit || state.teamDefinitionPage.limit;
+  state.teamDefinitionPage.offset = payload.offset || 0;
 }
 
 async function loadAgentTemplatePage() {
@@ -4529,48 +6726,16 @@ async function loadAgentTemplatePage() {
   state.agentTemplatePage.offset = payload.offset || 0;
 }
 
-async function loadTeamTemplates() {
-  const payload = await api("/api/agent-center/team-templates");
-  state.teamTemplates = payload.items || [];
-  if (state.selectedTeamTemplateId && !state.teamTemplates.some((item) => item.id === state.selectedTeamTemplateId)) {
-    state.selectedTeamTemplateId = null;
-  }
-  if (!state.selectedTeamTemplateId && state.teamTemplates.length) {
-    state.selectedTeamTemplateId = state.teamTemplates[0].id;
-  }
-  populateTeamTemplateOptions();
-}
-
-async function loadBuilds() {
-  const payload = await api("/api/agent-center/builds");
-  state.builds = payload.items || [];
-  if (state.selectedBuildId && !state.builds.some((item) => item.id === state.selectedBuildId)) {
-    state.selectedBuildId = null;
-  }
-  if (!state.selectedBuildId && state.builds.length) {
-    state.selectedBuildId = state.builds[0].id;
-  }
-  populateTaskOptions();
-}
-
-async function loadBlueprints() {
-  const payload = await api("/api/blueprints");
-  state.blueprints = payload.items || [];
-  if (state.selectedBlueprintId && !state.blueprints.some((item) => item.id === state.selectedBlueprintId)) {
-    state.selectedBlueprintId = null;
-  }
-  if (!state.selectedBlueprintId && state.blueprints.length) {
-    state.selectedBlueprintId = state.blueprints[0].id;
-  }
-  populateTaskOptions();
-}
-
-async function loadRuns() {
-  const payload = await api("/api/runs");
-  state.runs = payload.items || [];
-  if (state.selectedRunId && !state.runs.some((item) => item.id === state.selectedRunId)) {
-    state.selectedRunId = null;
-  }
+async function loadRunPage() {
+  const params = new URLSearchParams({
+    limit: String(state.runPage.limit || 10),
+    offset: String(state.runPage.offset || 0),
+  });
+  const payload = await api(`/api/runs?${params.toString()}`);
+  state.runPage.items = payload.items || [];
+  state.runPage.total = payload.total || 0;
+  state.runPage.limit = payload.limit || state.runPage.limit;
+  state.runPage.offset = payload.offset || 0;
 }
 
 async function loadApprovals() {
@@ -4581,6 +6746,7 @@ async function loadApprovals() {
 async function loadRunDetail(runId) {
   const payload = await api(`/api/runs/${runId}`);
   state.selectedRunId = runId;
+  const conversationThreadId = resolveConversationThreadId(payload);
   const steps = (payload.steps || [])
     .map((item) => {
       const visibleIds = item.output_json?.visible_output_ids || item.output_json?.details?.visible_output_ids || [];
@@ -4594,25 +6760,12 @@ async function loadRunDetail(runId) {
   runDetail.textContent =
     `Run：${payload.run.id}\n` +
     `状态：${payload.run.status}\n` +
+    `会话 Thread：${conversationThreadId || "-"}\n` +
     `摘要：${payload.run.summary || ""}\n\n` +
     `步骤\n${steps || "- 无"}\n\n` +
     `产物\n${artifacts || "- 无"}\n\n` +
     `最近事件\n${events || "- 无"}\n\n` +
     `工作区文件\n${files || "- 无"}`;
-}
-
-async function openBuild(buildId) {
-  const build = await api(`/api/agent-center/builds/${buildId}`);
-  renderBuildDetail(build);
-  renderBuilds();
-  populateTaskOptions();
-}
-
-async function openBlueprint(blueprintId) {
-  const blueprint = await api(`/api/blueprints/${blueprintId}`);
-  renderBlueprintDetail(blueprint);
-  renderBlueprints();
-  populateTaskOptions();
 }
 
 async function ensureAgentTemplateEditorData(force = false) {
@@ -4655,10 +6808,6 @@ async function ensureAgentDefinitionEditorData(force = false) {
   if (!state.loaded.reviewPolicyRefs || force) {
     await loadReviewPolicies();
     state.loaded.reviewPolicyRefs = true;
-  }
-  if (!state.loaded.memoryProfileRefs || force) {
-    await loadMemoryProfiles();
-    state.loaded.memoryProfileRefs = true;
   }
   if (!state.loaded.agentDefinitionRefs || force) {
     await loadAgentDefinitions();
@@ -4710,6 +6859,73 @@ async function ensurePluginsPage(force = false) {
   }
   pluginPageSize.value = String(state.pluginPage.limit || 10);
   renderPlugins();
+}
+
+async function ensureSkillGroupCatalog(force = false) {
+  if (!state.loaded.skillGroupCatalog || force) {
+    await loadSkillGroupCatalog();
+    state.loaded.skillGroupCatalog = true;
+  }
+  if (state.editingSkillGroupId && !state.skillGroupCatalog.some((item) => item.id === state.editingSkillGroupId)) {
+    state.editingSkillGroupId = null;
+  }
+  renderSkillImportGroupOptions();
+}
+
+async function ensureSkillGroupManagementPage(force = false) {
+  if (!state.loaded.skillGroupPage || force) {
+    await loadSkillGroupPage();
+    state.loaded.skillGroupPage = true;
+  }
+  if (skillGroupPageSize) {
+    skillGroupPageSize.value = String(state.skillGroupPage.limit || 10);
+  }
+  renderSkillGroupManagementList();
+}
+
+async function ensureSkillsPage(force = false) {
+  await ensureSkillGroupCatalog(force);
+  await ensureSkillGroupManagementPage(force);
+  if (!state.loaded.skillRefs || force) {
+    await loadSkills();
+    state.loaded.skillRefs = true;
+  }
+  if (!state.loaded.skillPage || force) {
+    await loadSkillPage();
+    state.loaded.skillPage = true;
+  }
+  if (state.skillPage.groupKey && !state.skillGroups.some((item) => String(item.key || "") === state.skillPage.groupKey)) {
+    state.skillPage.groupKey = "";
+    await loadSkillPage();
+  }
+  if (skillPageSize) {
+    skillPageSize.value = String(state.skillPage.limit || 10);
+  }
+  if (skillSearchInput) {
+    skillSearchInput.value = state.skillPage.query || "";
+  }
+  renderSkillGroupSkillOptions();
+  if (state.editingSkillId) {
+    const current = state.skills.find((item) => item.id === state.editingSkillId) || null;
+    if (!current) {
+      resetSkillForm();
+      closeSkillModal();
+    } else if (force && !skillModal?.classList.contains("hidden")) {
+      fillSkillForm(current);
+    }
+  }
+  if (state.editingSkillGroupId) {
+    const currentGroup = state.skillGroupCatalog.find((item) => item.id === state.editingSkillGroupId) || null;
+    if (!currentGroup) {
+      resetSkillGroupForm();
+      closeSkillGroupModal();
+    } else if (force && !skillGroupModal?.classList.contains("hidden")) {
+      fillSkillGroupForm(currentGroup);
+    }
+  }
+  renderSkillGroupFilters();
+  renderSkills();
+  renderSkillManagementView();
 }
 
 async function ensureAgentTemplatesPage(force = false) {
@@ -4828,34 +7044,6 @@ async function ensureReviewPoliciesPage(force = false) {
   }
 }
 
-async function ensureMemoryProfilesPage(force = false) {
-  if (!state.loaded.uiMetadata || force) {
-    await loadUiMetadata();
-    state.loaded.uiMetadata = true;
-  }
-  if (!state.loaded.memoryProfileRefs || force) {
-    await loadMemoryProfiles();
-    state.loaded.memoryProfileRefs = true;
-  }
-  populateStaticMemoryScopeOptions();
-  if (state.editingMemoryProfileId) {
-    const current = state.memoryProfiles.find((item) => item.id === state.editingMemoryProfileId) || null;
-    if (!current) {
-      resetMemoryProfileForm();
-    } else if (force) {
-      fillMemoryProfileForm(current);
-    } else {
-      renderMemoryProfiles();
-    }
-  } else {
-    if (!memoryProfileKey.value.trim() && !memoryProfileName.value.trim()) {
-      resetMemoryProfileForm();
-    } else {
-      renderMemoryProfiles();
-    }
-  }
-}
-
 async function ensureAgentDefinitionsPage(force = false) {
   await ensureAgentDefinitionEditorData(force);
   if (!state.loaded.agentDefinitionPage || force) {
@@ -4884,13 +7072,20 @@ async function ensureAgentDefinitionsPage(force = false) {
 }
 
 async function ensureTeamDefinitionsPage(force = false) {
-  if (!state.loaded.agentTemplateRefs || force) {
-    await loadAgentTemplates();
-    state.loaded.agentTemplateRefs = true;
+  if (!state.loaded.agentDefinitionRefs || force) {
+    await loadAgentDefinitions();
+    state.loaded.agentDefinitionRefs = true;
   }
   if (!state.loaded.teamDefinitions || force) {
     await loadTeamDefinitions();
     state.loaded.teamDefinitions = true;
+  }
+  if (!state.loaded.teamDefinitionPage || force) {
+    await loadTeamDefinitionPage();
+    state.loaded.teamDefinitionPage = true;
+  }
+  if (teamDefinitionPageSize) {
+    teamDefinitionPageSize.value = String(state.teamDefinitionPage.limit || 10);
   }
   if (state.editingTeamDefinitionId) {
     const current = state.teamDefinitions.find((item) => item.id === state.editingTeamDefinitionId) || null;
@@ -4900,62 +7095,15 @@ async function ensureTeamDefinitionsPage(force = false) {
       if (force) {
         fillTeamDefinitionForm(current);
       } else {
-        renderTeamDefinitionLeadAgentOptions(teamDefinitionLeadAgentTemplate?.value || "");
+        renderTeamDefinitionLeadAgentOptions(teamDefinitionLeadAgentDefinition?.value || "");
         renderTeamDefinitionMembers();
         renderTeamDefinitions();
       }
     }
   } else {
-    renderTeamDefinitionLeadAgentOptions(teamDefinitionLeadAgentTemplate?.value || "");
+    renderTeamDefinitionLeadAgentOptions(teamDefinitionLeadAgentDefinition?.value || "");
     renderTeamDefinitionMembers();
     renderTeamDefinitions();
-  }
-}
-
-async function ensureTeamTemplatesPage(force = false) {
-  if (!state.loaded.agentTemplateRefs || force) {
-    await loadAgentTemplates();
-    state.loaded.agentTemplateRefs = true;
-  }
-  if (!state.loaded.teamTemplates || force) {
-    await loadTeamTemplates();
-    state.loaded.teamTemplates = true;
-  }
-  renderTeamTemplates();
-  if (!state.teamEditor.spec) {
-    resetTeamTemplateForm();
-  } else {
-    renderTeamEditor();
-  }
-}
-
-async function ensureBuildsPage(force = false) {
-  if (!state.loaded.teamTemplates || force) {
-    await loadTeamTemplates();
-    state.loaded.teamTemplates = true;
-  }
-  if (!state.loaded.builds || force) {
-    await loadBuilds();
-    state.loaded.builds = true;
-  }
-  renderBuilds();
-  if (state.selectedBuildId) {
-    renderBuildDetail(state.builds.find((item) => item.id === state.selectedBuildId) || null);
-  } else {
-    setDetailPlaceholder(buildDetail, "请选择一个 Build。");
-  }
-}
-
-async function ensureBlueprintsPage(force = false) {
-  if (!state.loaded.blueprints || force) {
-    await loadBlueprints();
-    state.loaded.blueprints = true;
-  }
-  renderBlueprints();
-  if (state.selectedBlueprintId) {
-    renderBlueprintDetail(state.blueprints.find((item) => item.id === state.selectedBlueprintId) || null);
-  } else {
-    setDetailPlaceholder(blueprintDetail, "请选择一个蓝图。");
   }
 }
 
@@ -4964,17 +7112,13 @@ async function ensureRuntimePage(force = false) {
     await loadTeamDefinitions();
     state.loaded.teamDefinitions = true;
   }
-  if (!state.loaded.builds || force) {
-    await loadBuilds();
-    state.loaded.builds = true;
-  }
-  if (!state.loaded.blueprints || force) {
-    await loadBlueprints();
-    state.loaded.blueprints = true;
-  }
   if (!state.loaded.runs || force) {
-    await loadRuns();
+    await loadRunPage();
     state.loaded.runs = true;
+  }
+  populateTaskOptions();
+  if (runPageSize) {
+    runPageSize.value = String(state.runPage.limit || 10);
   }
   renderRuns();
   if (state.selectedRunId) {
@@ -5007,6 +7151,9 @@ async function ensurePageData(pageName, options = {}) {
     case "plugins":
       await ensurePluginsPage(force);
       break;
+    case "skills":
+      await ensureSkillsPage(force);
+      break;
     case "responsibility-specs":
       await ensureResponsibilitySpecsPage(force);
       break;
@@ -5025,32 +7172,20 @@ async function ensurePageData(pageName, options = {}) {
     case "review-policies":
       await ensureReviewPoliciesPage(force);
       break;
-    case "memory-profiles":
-      await ensureMemoryProfilesPage(force);
-      break;
     case "agent-definitions":
       await ensureAgentDefinitionsPage(force);
-      break;
-    case "agent-templates":
-      await ensureAgentTemplatesPage(force);
       break;
     case "team-definitions":
       await ensureTeamDefinitionsPage(force);
       break;
-    case "team-templates":
-      await ensureTeamTemplatesPage(force);
-      break;
-    case "builds":
-      await ensureBuildsPage(force);
+    case "team-chat":
+      await ensureTeamChatPage(force);
       break;
     case "runtime":
       await ensureRuntimePage(force);
       break;
     case "approvals":
       await ensureApprovalsPage(force);
-      break;
-    case "blueprints":
-      await ensureBlueprintsPage(force);
       break;
     default:
       break;
@@ -5076,33 +7211,6 @@ if (refreshAllButton) {
     await ensurePageData(state.activePage, { force: true });
   } catch (error) {
     showResult(taskResult, { error: error.message });
-  }
-  });
-}
-
-const quickBuildButton = document.querySelector("#quick-build");
-if (quickBuildButton) {
-  quickBuildButton.addEventListener("click", async () => {
-  try {
-    await ensureTeamTemplatesPage(true);
-    const targetId = state.selectedTeamTemplateId || state.teamTemplates[0]?.id;
-    if (!targetId) {
-      throw new Error("暂无可构建的团队模板。");
-    }
-    const payload = await api(`/api/agent-center/team-templates/${targetId}/build`, {
-      method: "POST",
-      body: JSON.stringify({}),
-    });
-    state.selectedBuildId = payload.id;
-    if (payload.blueprint_id) {
-      state.selectedBlueprintId = payload.blueprint_id;
-    }
-    hideResult(buildResult);
-    invalidateData("builds", "blueprints", "controlPlane");
-    await switchPage("builds", { force: true });
-    await openBuild(payload.id);
-  } catch (error) {
-    showResult(buildResult, { error: error.message });
   }
   });
 }
@@ -5170,6 +7278,46 @@ pluginForm.addEventListener("submit", async (event) => {
     showResult(pluginResult, { message: "插件已保存", id: saved.id });
   } catch (error) {
     showResult(pluginModalResult, errorResult(error));
+  }
+});
+
+skillForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  hideResult(skillModalResult);
+  try {
+    const isReupload = state.skillModalMode === "reupload";
+    setSkillImportBusy(true);
+    try {
+      const payload = await buildSkillUploadPayload();
+      const result = await api("/api/agent-center/skills/import-upload", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      invalidateData("skillGroupCatalog", "skillGroupPage", "skillRefs", "skillPage", "agentDefinitionRefs", "agentTemplateRefs", "controlPlane");
+      if (!isReupload) {
+        state.skillPage.offset = 0;
+      }
+      await ensureSkillsPage(true);
+      if ((result.imported_count || 0) > 0) {
+        closeSkillModal();
+      } else {
+        showResult(skillModalResult, result);
+      }
+      return;
+      if ((result.imported_count || 0) > 0) {
+        closeSkillModal();
+        showResult(skillResult, {
+          ...result,
+          message: isReupload ? "Skill 已重新上传并覆盖" : "Skill 已导入",
+        });
+      } else {
+        showResult(skillModalResult, result);
+      }
+    } finally {
+      setSkillImportBusy(false);
+    }
+  } catch (error) {
+    showResult(skillModalResult, errorResult(error));
   }
 });
 
@@ -5273,6 +7421,7 @@ reviewPolicyForm?.addEventListener("submit", async (event) => {
   }
 });
 
+/*
 memoryProfileForm?.addEventListener("submit", async (event) => {
   event.preventDefault();
   hideResult(memoryProfileResult);
@@ -5291,6 +7440,7 @@ memoryProfileForm?.addEventListener("submit", async (event) => {
     showResult(memoryProfileResult, errorResult(error));
   }
 });
+*/
 
 agentDefinitionForm?.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -5318,7 +7468,7 @@ agentDefinitionForm?.addEventListener("submit", async (event) => {
   }
 });
 
-agentTemplateForm.addEventListener("submit", async (event) => {
+agentTemplateForm?.addEventListener("submit", async (event) => {
   event.preventDefault();
   hideResult(agentTemplateResult);
   hideResult(agentTemplateModalResult);
@@ -5347,6 +7497,7 @@ teamDefinitionForm.addEventListener("submit", async (event) => {
   hideResult(teamDefinitionResult);
   hideResult(teamDefinitionModalResult);
   try {
+    const isCreate = !state.editingTeamDefinitionId;
     const payload = buildTeamDefinitionPayloadFromForm();
     const method = state.editingTeamDefinitionId ? "PUT" : "POST";
     const path = state.editingTeamDefinitionId
@@ -5355,58 +7506,15 @@ teamDefinitionForm.addEventListener("submit", async (event) => {
     const saved = await api(path, { method, body: JSON.stringify(payload) });
     state.editingTeamDefinitionId = saved.id;
     state.teamDefinitionBaseSpec = clone(dictOrEmpty(saved.spec_json));
-    invalidateData("teamDefinitions", "controlPlane");
+    if (isCreate) {
+      state.teamDefinitionPage.offset = 0;
+    }
+    invalidateData("teamDefinitions", "teamDefinitionPage", "controlPlane");
     await ensureTeamDefinitionsPage(true);
     closeTeamDefinitionModal();
     showResult(teamDefinitionResult, { message: "团队管理项已保存", id: saved.id });
   } catch (error) {
     showResult(teamDefinitionModalResult, errorResult(error));
-  }
-});
-
-teamTemplateForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  hideResult(teamTemplateResult);
-  try {
-    const payload = buildTeamTemplatePayloadFromForm();
-    const method = state.editingTeamTemplateId ? "PUT" : "POST";
-    const path = state.editingTeamTemplateId
-      ? `/api/agent-center/team-templates/${state.editingTeamTemplateId}`
-      : "/api/agent-center/team-templates";
-    const saved = await api(path, { method, body: JSON.stringify(payload) });
-    fillTeamTemplateForm(saved);
-    invalidateData("teamTemplates", "builds", "controlPlane");
-    await ensureTeamTemplatesPage(true);
-    showResult(teamTemplateResult, { message: "团队模板已保存", id: saved.id });
-  } catch (error) {
-    showResult(teamTemplateResult, { error: error.message });
-  }
-});
-
-buildForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  hideResult(buildResult);
-  try {
-    if (!buildTeamTemplate.value) {
-      throw new Error("请选择团队模板。");
-    }
-    const payload = await api("/api/agent-center/builds", {
-      method: "POST",
-      body: JSON.stringify({
-        team_template_id: buildTeamTemplate.value,
-        name: buildName.value.trim() || null,
-      }),
-    });
-    state.selectedBuildId = payload.id;
-    if (payload.blueprint_id) {
-      state.selectedBlueprintId = payload.blueprint_id;
-    }
-    invalidateData("builds", "blueprints", "controlPlane");
-    await ensureBuildsPage(true);
-    await openBuild(payload.id);
-    showResult(buildResult, { message: "Build 已生成", id: payload.id, blueprint_id: payload.blueprint_id });
-  } catch (error) {
-    showResult(buildResult, { error: error.message });
   }
 });
 
@@ -5425,30 +7533,36 @@ taskForm.addEventListener("submit", async (event) => {
     let runBundle;
     if (taskTeamDefinition?.value) {
       state.selectedTaskTeamDefinitionId = taskTeamDefinition.value;
+      const activeThreadId = taskNewSession?.checked ? "" : currentTaskSessionThreadId(taskTeamDefinition.value);
+      if (activeThreadId) {
+        payload.thread_id = activeThreadId;
+      }
       runBundle = await api(`/api/agent-center/team-definitions/${taskTeamDefinition.value}/tasks`, {
         method: "POST",
         body: JSON.stringify(payload),
       });
-    } else if (taskBuild.value) {
-      payload.build_id = taskBuild.value;
-      runBundle = await api("/api/task-releases", {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
-    } else if (taskBlueprint.value) {
-      payload.blueprint_id = taskBlueprint.value;
-      runBundle = await api("/api/task-releases", {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
     } else {
-      throw new Error("请选择 TeamDefinition，或使用兼容 Build / 蓝图链路。");
+      throw new Error("请选择 TeamDefinition。");
     }
+    const conversationThreadId = resolveConversationThreadId(runBundle);
+    if (state.selectedTaskTeamDefinitionId) {
+      setTaskSessionThreadId(state.selectedTaskTeamDefinitionId, conversationThreadId);
+    }
+    if (taskNewSession) {
+      taskNewSession.checked = false;
+    }
+    renderTaskSessionHint();
     state.selectedRunId = runBundle.run.id;
+    state.runPage.offset = 0;
     invalidateData("runs", "approvals", "controlPlane");
     await switchPage("runtime", { force: true });
     await loadRunDetail(runBundle.run.id);
-    showResult(taskResult, { message: "Run 已启动", run_id: runBundle.run.id, status: runBundle.run.status });
+    showResult(taskResult, {
+      message: "Run 已启动",
+      run_id: runBundle.run.id,
+      status: runBundle.run.status,
+      conversation_thread_id: conversationThreadId || null,
+    });
   } catch (error) {
     showResult(taskResult, { error: error.message });
   }
@@ -5487,10 +7601,213 @@ providerPageSize.addEventListener("change", async () => {
   state.providerPage.offset = 0;
   await ensureProvidersPage(true);
 });
+skillOpenCreate?.addEventListener("click", async () => {
+  if (state.skillManagementView === "groups") {
+    await ensureSkillsPage(true);
+    setSkillManagementView("groups");
+    resetSkillGroupForm();
+    openSkillGroupModal();
+    skillGroupManagementName?.focus();
+    return;
+  }
+  await ensureSkillsPage(true);
+  setSkillManagementView("skills");
+  openSkillImportModal();
+});
+skillViewSkills?.addEventListener("click", () => {
+  setSkillManagementView("skills");
+});
+skillViewGroups?.addEventListener("click", async () => {
+  await ensureSkillsPage(true);
+  if (!state.editingSkillGroupId) {
+    resetSkillGroupForm();
+  }
+  setSkillManagementView("groups");
+});
+skillGroupOpenManageInline?.addEventListener("click", async () => {
+  const selectedGroupIds = skillImportGroups ? getMultiSelectValues(skillImportGroups) : [];
+  closeSkillModal();
+  await openSkillGroupManagementView(selectedGroupIds[0] || "");
+});
+skillImportDirectoryInput?.addEventListener("change", async (event) => {
+  try {
+    const entries = await collectSkillImportEntriesFromInput(event.target?.files || []);
+    setSkillImportFiles(entries);
+    if (entries.length) {
+      await scanSelectedSkillImportFiles();
+    }
+  } catch (error) {
+    showResult(skillModalResult, errorResult(error));
+  }
+});
+skillImportDropzone?.addEventListener("click", () => {
+  if (!state.skillImportBusy) {
+    skillImportDirectoryInput?.click();
+  }
+});
+skillImportDropzone?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    if (!state.skillImportBusy) {
+      skillImportDirectoryInput?.click();
+    }
+  }
+});
+["dragenter", "dragover"].forEach((eventName) => {
+  skillImportDropzone?.addEventListener(eventName, (event) => {
+    event.preventDefault();
+    if (state.skillModalMode !== "import") {
+      return;
+    }
+    state.skillImportDragActive = true;
+    renderSkillImportSelection();
+  });
+});
+["dragleave", "dragend"].forEach((eventName) => {
+  skillImportDropzone?.addEventListener(eventName, (event) => {
+    event.preventDefault();
+    const related = event.relatedTarget;
+    if (related && skillImportDropzone?.contains?.(related)) {
+      return;
+    }
+    state.skillImportDragActive = false;
+    renderSkillImportSelection();
+  });
+});
+skillImportDropzone?.addEventListener("drop", async (event) => {
+  event.preventDefault();
+  if (state.skillModalMode !== "import") {
+    return;
+  }
+  try {
+    const entries = await collectSkillImportEntriesFromDataTransfer(event.dataTransfer);
+    setSkillImportFiles(entries);
+    if (entries.length) {
+      await scanSelectedSkillImportFiles();
+    }
+  } catch (error) {
+    state.skillImportDragActive = false;
+    renderSkillImportSelection();
+    showResult(skillModalResult, errorResult(error));
+  }
+});
+skillModalCloseButtons.forEach((button) => button.addEventListener("click", closeSkillModal));
+skillCancel?.addEventListener("click", closeSkillModal);
+skillPreviewCloseButtons.forEach((button) => button.addEventListener("click", closeSkillPreviewModal));
+skillValidate?.addEventListener("click", async () => {
+  hideResult(skillModalResult);
+  try {
+    await scanSelectedSkillImportFiles();
+  } catch (error) {
+    showResult(skillModalResult, errorResult(error));
+  }
+});
+skillGroupModalCloseButtons.forEach((button) => button.addEventListener("click", closeSkillGroupModal));
+skillGroupCancel?.addEventListener("click", () => {
+  closeSkillGroupModal();
+});
+skillSearchForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  state.skillPage.query = skillSearchInput?.value?.trim() || "";
+  state.skillPage.offset = 0;
+  await ensureSkillsPage(true);
+});
+skillSearchReset?.addEventListener("click", async () => {
+  state.skillPage.query = "";
+  state.skillPage.groupKey = "";
+  state.skillPage.offset = 0;
+  if (skillSearchInput) {
+    skillSearchInput.value = "";
+  }
+  await ensureSkillsPage(true);
+});
+skillPageSize?.addEventListener("change", async () => {
+  state.skillPage.limit = Number(skillPageSize.value || 10);
+  state.skillPage.offset = 0;
+  await ensureSkillsPage(true);
+});
+skillGroupPageSize?.addEventListener("change", async () => {
+  state.skillGroupPage.limit = Number(skillGroupPageSize.value || 10);
+  state.skillGroupPage.offset = 0;
+  await ensureSkillGroupManagementPage(true);
+});
+skillGroupForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  hideResult(skillGroupModalResult);
+  hideResult(skillGroupResult);
+  try {
+    const payload = {
+      id: state.editingSkillGroupId,
+      name: skillGroupManagementName?.value?.trim() || "",
+      description: skillGroupManagementDescription?.value?.trim() || "",
+      skill_ids: getMultiSelectValues(skillGroupSkills),
+    };
+    const method = state.editingSkillGroupId ? "PUT" : "POST";
+    const path = state.editingSkillGroupId
+      ? `/api/agent-center/skill-groups/${state.editingSkillGroupId}`
+      : "/api/agent-center/skill-groups";
+    const saved = await api(path, { method, body: JSON.stringify(payload) });
+    state.editingSkillGroupId = saved.id;
+    invalidateData("skillGroupCatalog", "skillGroupPage", "skillRefs", "skillPage", "agentDefinitionRefs", "agentTemplateRefs", "controlPlane");
+    await ensureSkillGroupCatalog(true);
+    focusSkillGroupPageOn(saved.id);
+    await ensureSkillsPage(true);
+    closeSkillGroupModal();
+    renderSkillGroupManagementList();
+    showResult(skillGroupResult, { message: "Skill 分组已保存", id: saved.id });
+  } catch (error) {
+    showResult(skillGroupModalResult, errorResult(error));
+  }
+});
 agentDefinitionPageSize?.addEventListener("change", async () => {
   state.agentDefinitionPage.limit = Number(agentDefinitionPageSize.value || 10);
   state.agentDefinitionPage.offset = 0;
   await ensureAgentDefinitionsPage(true);
+});
+teamDefinitionPageSize?.addEventListener("change", async () => {
+  state.teamDefinitionPage.limit = Number(teamDefinitionPageSize.value || 10);
+  state.teamDefinitionPage.offset = 0;
+  await ensureTeamDefinitionsPage(true);
+});
+runPageSize?.addEventListener("change", async () => {
+  state.runPage.limit = Number(runPageSize.value || 10);
+  state.runPage.offset = 0;
+  await ensureRuntimePage(true);
+});
+teamChatTeamDefinition?.addEventListener("change", async () => {
+  try {
+    await selectTeamChatTeam(teamChatTeamDefinition.value || "", { allowEmptySelection: false });
+  } catch (error) {
+    showResult(teamChatResult, errorResult(error));
+  }
+});
+teamChatNewThread?.addEventListener("click", () => {
+  startNewTeamChatThread();
+});
+teamChatOpenTeam?.addEventListener("click", async () => {
+  await switchPage("team-definitions");
+});
+teamChatForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    await submitTeamChatMessage();
+  } catch (error) {
+    showResult(teamChatResult, errorResult(error));
+  }
+});
+teamChatInput?.addEventListener("keydown", async (event) => {
+  if (event.key !== "Enter" || event.shiftKey || event.isComposing) {
+    return;
+  }
+  event.preventDefault();
+  try {
+    await submitTeamChatMessage();
+  } catch (error) {
+    showResult(teamChatResult, errorResult(error));
+  }
+});
+teamChatInput?.addEventListener("input", () => {
+  resizeTeamChatInput();
 });
 retrievalEmbeddingMode?.addEventListener("change", () => {
   syncRetrievalModelOptions();
@@ -5586,10 +7903,6 @@ reviewPolicyReset?.addEventListener("click", async () => {
   await ensureReviewPoliciesPage(true);
   resetReviewPolicyForm();
 });
-memoryProfileReset?.addEventListener("click", async () => {
-  await ensureMemoryProfilesPage(true);
-  resetMemoryProfileForm();
-});
 agentDefinitionOpenCreate?.addEventListener("click", async () => {
   await ensureAgentDefinitionsPage(true);
   resetAgentDefinitionForm({ openModal: true });
@@ -5604,17 +7917,17 @@ pluginPageSize.addEventListener("change", async () => {
   state.pluginPage.offset = 0;
   await ensurePluginsPage(true);
 });
-agentTemplateOpenCreate.addEventListener("click", async () => {
+agentTemplateOpenCreate?.addEventListener("click", async () => {
   await ensureAgentTemplateEditorData(true);
   resetAgentTemplateForm();
   openAgentTemplateModal();
 });
 agentTemplateModalCloseButtons.forEach((button) => button.addEventListener("click", closeAgentTemplateModal));
-agentTemplateCancel.addEventListener("click", closeAgentTemplateModal);
+agentTemplateCancel?.addEventListener("click", closeAgentTemplateModal);
 agentTemplateProvider?.addEventListener("change", () => {
   renderModelSelect(agentTemplateModel, providerModelsByType(agentTemplateProvider?.value || "", "chat"));
 });
-agentTemplatePageSize.addEventListener("change", async () => {
+agentTemplatePageSize?.addEventListener("change", async () => {
   state.agentTemplatePage.limit = Number(agentTemplatePageSize.value || 10);
   state.agentTemplatePage.offset = 0;
   await ensureAgentTemplatesPage(true);
@@ -5648,87 +7961,14 @@ teamDefinitionMembers?.addEventListener("input", () => {
   renderTeamDefinitionReviewOverrides();
 });
 teamDefinitionModalCloseButtons.forEach((button) => button.addEventListener("click", closeTeamDefinitionModal));
+teamDefinitionPreviewCloseButtons.forEach((button) => button.addEventListener("click", closeTeamDefinitionPreviewModal));
 teamDefinitionCancel?.addEventListener("click", closeTeamDefinitionModal);
-document.querySelector("#team-template-reset").addEventListener("click", async () => {
-  await ensureTeamTemplatesPage(true);
-  resetTeamTemplateForm();
-});
-document.querySelector("#team-member-add").addEventListener("click", addTeamMember);
-teamGraphValidate.addEventListener("click", validateTeamGraph);
-teamGraphPreview.addEventListener("click", previewTeamGraph);
-teamGraphAutolayout.addEventListener("click", () => {
-  mutateTeamSpec((spec) => {
-    autoLayoutTeamSpec(spec);
-  });
-});
-teamNodeLink.addEventListener("click", startLinkMode);
-teamNodeDelete.addEventListener("click", deleteSelectedNode);
-
-[teamNodeId, teamNodeName, teamNodeAgent, teamNodeInstruction, teamNodeExpr, teamNodeMaxIterations, teamNodeArtifactKind, teamNodeArtifactName, teamNodeTemplate, teamNodeSource].forEach(
-  (input) => input.addEventListener("input", updateSelectedNode),
-);
-
-teamTemplateAgents.addEventListener("input", () => {
-  try {
-    const spec = ensureTeamEditorMetadata(teamEditorSpec());
-    spec.agents = safeParseJson(teamTemplateAgents.value, []);
-    state.teamEditor.spec = spec;
-    renderTeamEditor();
-  } catch (error) {
-    renderTeamTemplatePreview();
-  }
-});
-teamTemplateFlow.addEventListener("input", () => {
-  try {
-    const spec = ensureTeamEditorMetadata(teamEditorSpec());
-    spec.flow = safeParseJson(teamTemplateFlow.value, { nodes: [], edges: [] });
-    state.teamEditor.spec = spec;
-    renderTeamEditor();
-  } catch (error) {
-    renderTeamTemplatePreview();
-  }
-});
-[teamTemplateName, teamTemplateWorkspace, teamTemplateProject, teamTemplateDod, teamTemplateChecks].forEach((input) =>
-  input.addEventListener("input", () => renderTeamEditor()),
-);
-teamTemplateDescription.addEventListener("input", () => renderTeamTemplatePreview());
-
-taskBuild.addEventListener("change", () => {
-  state.selectedBuildId = taskBuild.value || null;
-  if (state.selectedBuildId) {
-    state.selectedTaskTeamDefinitionId = null;
-    state.selectedBlueprintId = null;
-    if (taskTeamDefinition) {
-      taskTeamDefinition.value = "";
-    }
-    taskBlueprint.value = "";
-  }
-  syncTaskLaunchControls();
-});
-
-taskBlueprint.addEventListener("change", () => {
-  state.selectedBlueprintId = taskBlueprint.value || null;
-  if (state.selectedBlueprintId) {
-    state.selectedTaskTeamDefinitionId = null;
-    state.selectedBuildId = null;
-    if (taskTeamDefinition) {
-      taskTeamDefinition.value = "";
-    }
-    taskBuild.value = "";
-  }
-  syncTaskLaunchControls();
-});
 
 taskTeamDefinition?.addEventListener("change", () => {
   state.selectedTaskTeamDefinitionId = taskTeamDefinition.value || null;
-  if (state.selectedTaskTeamDefinitionId) {
-    state.selectedBuildId = null;
-    state.selectedBlueprintId = null;
-    taskBuild.value = "";
-    taskBlueprint.value = "";
-  }
-  syncTaskLaunchControls();
+  renderTaskSessionHint();
 });
+taskNewSession?.addEventListener("change", renderTaskSessionHint);
 
 document.addEventListener("click", async (event) => {
   if (!(event.target instanceof Element)) {
@@ -5784,10 +8024,136 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  const skillGroupButton = event.target.closest("[data-skill-group]");
+  if (skillGroupButton && !skillGroupButton.hasAttribute("disabled")) {
+    state.skillPage.groupKey = skillGroupButton.dataset.skillGroup || "";
+    state.skillPage.offset = 0;
+    await ensureSkillsPage(true);
+    return;
+  }
+
+  const skillPageButton = event.target.closest("[data-skill-page]");
+  if (skillPageButton && !skillPageButton.hasAttribute("disabled")) {
+    state.skillPage.offset = Number(skillPageButton.dataset.skillPage || 0);
+    await ensureSkillsPage(true);
+    return;
+  }
+
+  const skillPreviewFileButton = event.target.closest("[data-skill-preview-file]");
+  if (skillPreviewFileButton) {
+    await loadSkillPreviewFile(skillPreviewFileButton.dataset.skillPreviewFile || "");
+    return;
+  }
+
+  const skillGroupPageButton = event.target.closest("[data-skill-group-page]");
+  if (skillGroupPageButton && !skillGroupPageButton.hasAttribute("disabled")) {
+    state.skillGroupPage.offset = Number(skillGroupPageButton.dataset.skillGroupPage || 0);
+    await ensureSkillGroupManagementPage(true);
+    return;
+  }
+
+  const skillPreviewButton = event.target.closest("[data-skill-preview]");
+  if (skillPreviewButton) {
+    try {
+      await openSkillPreview(skillPreviewButton.dataset.skillPreview || "");
+    } catch (error) {
+      showSkillPageError(error);
+    }
+    return;
+  }
+
+  const skillEdit = event.target.closest("[data-skill-edit]");
+  if (skillEdit) {
+    try {
+      await switchPage("skills");
+      const skill = state.skills.find((item) => item.id === skillEdit.dataset.skillEdit) || (await api(`/api/agent-center/skills/${skillEdit.dataset.skillEdit}`));
+      fillSkillForm(skill, { openModal: true });
+    } catch (error) {
+      showSkillPageError(error);
+    }
+    return;
+  }
+
+  const skillDelete = event.target.closest("[data-skill-delete]");
+  if (skillDelete) {
+    const skillId = skillDelete.dataset.skillDelete;
+    const skill = state.skillPage.items.find((item) => item.id === skillId) || state.skills.find((item) => item.id === skillId) || null;
+    const skillNameText = skill?.name || skillId;
+    if (!window.confirm(`确认删除 Skill“${skillNameText}”？`)) {
+      return;
+    }
+    try {
+      if (state.skillPage.items.length === 1 && state.skillPage.offset > 0) {
+        state.skillPage.offset = Math.max(0, state.skillPage.offset - state.skillPage.limit);
+      }
+      await api(`/api/agent-center/skills/${skillId}`, { method: "DELETE" });
+      if (state.editingSkillId === skillId) {
+        resetSkillForm();
+        closeSkillModal();
+      }
+      invalidateData("skillGroupCatalog", "skillGroupPage", "skillRefs", "skillPage", "agentDefinitionRefs", "agentTemplateRefs", "controlPlane");
+      await ensureSkillsPage(true);
+    } catch (error) {
+      showSkillPageError(error);
+    }
+    return;
+  }
+
+  const skillGroupEdit = event.target.closest("[data-skill-group-edit]");
+  if (skillGroupEdit) {
+    try {
+      await ensureSkillsPage(true);
+      const group =
+        state.skillGroupCatalog.find((item) => item.id === skillGroupEdit.dataset.skillGroupEdit) ||
+        (await api(`/api/agent-center/skill-groups/${skillGroupEdit.dataset.skillGroupEdit}`));
+      fillSkillGroupForm(group);
+      setSkillManagementView("groups");
+      openSkillGroupModal();
+    } catch (error) {
+      showResult(skillGroupResult, errorResult(error));
+    }
+    return;
+  }
+
+  const skillGroupDelete = event.target.closest("[data-skill-group-delete]");
+  if (skillGroupDelete) {
+    const groupId = skillGroupDelete.dataset.skillGroupDelete;
+    const group = state.skillGroupCatalog.find((item) => item.id === groupId) || null;
+    const groupNameText = group?.name || groupId;
+    if (!window.confirm(`确认删除 Skill 分组“${groupNameText}”？删除后该分组下的 Skill 会变为未分组。`)) {
+      return;
+    }
+    try {
+      if (state.skillGroupPage.items.length === 1 && state.skillGroupPage.offset > 0) {
+        state.skillGroupPage.offset = Math.max(0, state.skillGroupPage.offset - state.skillGroupPage.limit);
+      }
+      await api(`/api/agent-center/skill-groups/${groupId}`, { method: "DELETE" });
+      if (state.editingSkillGroupId === groupId) {
+        resetSkillGroupForm();
+        closeSkillGroupModal();
+      }
+      invalidateData("skillGroupCatalog", "skillGroupPage", "skillRefs", "skillPage", "agentDefinitionRefs", "agentTemplateRefs", "controlPlane");
+      await ensureSkillGroupCatalog(true);
+      await ensureSkillsPage(true);
+      setSkillManagementView("groups");
+      showResult(skillGroupResult, { message: "Skill 分组已删除", id: groupId });
+    } catch (error) {
+      showResult(skillGroupResult, errorResult(error));
+    }
+    return;
+  }
+
   const agentDefinitionPageButton = event.target.closest("[data-agent-definition-page]");
   if (agentDefinitionPageButton && !agentDefinitionPageButton.hasAttribute("disabled")) {
     state.agentDefinitionPage.offset = Number(agentDefinitionPageButton.dataset.agentDefinitionPage || 0);
     await ensureAgentDefinitionsPage(true);
+    return;
+  }
+
+  const teamDefinitionPageButton = event.target.closest("[data-team-definition-page]");
+  if (teamDefinitionPageButton && !teamDefinitionPageButton.hasAttribute("disabled")) {
+    state.teamDefinitionPage.offset = Number(teamDefinitionPageButton.dataset.teamDefinitionPage || 0);
+    await ensureTeamDefinitionsPage(true);
     return;
   }
 
@@ -5809,6 +8175,13 @@ document.addEventListener("click", async (event) => {
   if (staticMemoryPageButton && !staticMemoryPageButton.hasAttribute("disabled")) {
     state.staticMemoryPage.offset = Number(staticMemoryPageButton.dataset.staticMemoryPage || 0);
     await ensureStaticMemoryCollections(true);
+    return;
+  }
+
+  const runPageButton = event.target.closest("[data-run-page]");
+  if (runPageButton && !runPageButton.hasAttribute("disabled")) {
+    state.runPage.offset = Number(runPageButton.dataset.runPage || 0);
+    await ensureRuntimePage(true);
     return;
   }
 
@@ -6033,6 +8406,7 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  /*
   const memoryProfileEdit = event.target.closest("[data-memory-profile-edit]");
   if (memoryProfileEdit) {
     try {
@@ -6067,6 +8441,7 @@ document.addEventListener("click", async (event) => {
     }
     return;
   }
+  */
 
   const agentDefinitionEdit = event.target.closest("[data-agent-definition-edit]");
   if (agentDefinitionEdit) {
@@ -6190,108 +8565,87 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
-  const teamDefinitionTask = event.target.closest("[data-team-definition-task]");
-  if (teamDefinitionTask) {
-    state.selectedTaskTeamDefinitionId = teamDefinitionTask.dataset.teamDefinitionTask || null;
-    state.selectedBuildId = null;
-    state.selectedBlueprintId = null;
-    await switchPage("runtime", { force: true });
-    return;
-  }
-
-  const teamDefinitionCompile = event.target.closest("[data-team-definition-compile]");
-  if (teamDefinitionCompile) {
+  const teamDefinitionDelete = event.target.closest("[data-team-definition-delete]");
+  if (teamDefinitionDelete) {
+    const definitionId = teamDefinitionDelete.dataset.teamDefinitionDelete;
+    const definition =
+      state.teamDefinitionPage.items.find((item) => item.id === definitionId) || state.teamDefinitions.find((item) => item.id === definitionId) || null;
+    const definitionName = definition?.name || definitionId;
+    if (!window.confirm(`确认删除团队“${definitionName}”？`)) {
+      return;
+    }
     try {
-      await switchPage("team-definitions");
-      const payload = await api(`/api/agent-center/team-definitions/${teamDefinitionCompile.dataset.teamDefinitionCompile}/compile`, {
-        method: "POST",
-        body: JSON.stringify({}),
-      });
-      showResult(teamDefinitionResult, payload);
+      if (state.teamDefinitionPage.items.length === 1 && state.teamDefinitionPage.offset > 0) {
+        state.teamDefinitionPage.offset = Math.max(0, state.teamDefinitionPage.offset - state.teamDefinitionPage.limit);
+      }
+      await api(`/api/agent-center/team-definitions/${definitionId}`, { method: "DELETE" });
+      if (state.editingTeamDefinitionId === definitionId) {
+        resetTeamDefinitionForm();
+        closeTeamDefinitionModal();
+      }
+      invalidateData("teamDefinitions", "teamDefinitionPage", "controlPlane");
+      await ensureTeamDefinitionsPage(true);
+      showResult(teamDefinitionResult, { message: "团队已删除", id: definitionId });
     } catch (error) {
       showResult(teamDefinitionResult, errorResult(error));
     }
     return;
   }
 
-  const teamDefinitionBuild = event.target.closest("[data-team-definition-build]");
-  if (teamDefinitionBuild) {
+  const teamDefinitionTest = event.target.closest("[data-team-definition-test]");
+  if (teamDefinitionTest) {
     try {
-      const payload = await api(`/api/agent-center/team-definitions/${teamDefinitionBuild.dataset.teamDefinitionBuild}/build`, {
+      await openTeamChatPageForTeamDefinition(teamDefinitionTest.dataset.teamDefinitionTest || null);
+    } catch (error) {
+      showResult(teamChatResult, errorResult(error));
+    }
+    return;
+  }
+
+  const teamDefinitionPreview = event.target.closest("[data-team-definition-preview]");
+  if (teamDefinitionPreview) {
+    const definitionId = teamDefinitionPreview.dataset.teamDefinitionPreview;
+    const definition =
+      state.teamDefinitionPage.items.find((item) => item.id === definitionId) || state.teamDefinitions.find((item) => item.id === definitionId) || null;
+    const previewSeed = definition ? { team_definition: definition } : { team_definition: { id: definitionId, name: definitionId } };
+    resetTeamDefinitionPreviewState();
+    openTeamDefinitionPreviewModal();
+    teamDefinitionPreviewPayload(previewSeed, { loading: true });
+    try {
+      const payload = await api(`/api/agent-center/team-definitions/${definitionId}/compile`, {
         method: "POST",
         body: JSON.stringify({}),
       });
-      if (payload.blueprint?.id) {
-        state.selectedBlueprintId = payload.blueprint.id;
-      }
-      invalidateData("blueprints", "controlPlane");
-      await switchPage("blueprints", { force: true });
-      if (payload.blueprint?.id) {
-        await openBlueprint(payload.blueprint.id);
-      }
+      teamDefinitionPreviewPayload(payload);
     } catch (error) {
-      showResult(teamDefinitionResult, errorResult(error));
+      teamDefinitionPreviewPayload(previewSeed, { errorText: teamDefinitionPreviewErrorText(error) });
     }
     return;
   }
 
-  const teamTemplateEdit = event.target.closest("[data-team-template-edit]");
-  if (teamTemplateEdit) {
-    const template = state.teamTemplates.find((item) => item.id === teamTemplateEdit.dataset.teamTemplateEdit);
-    if (template) {
-      fillTeamTemplateForm(template);
-      await switchPage("team-templates");
+  const teamChatThreadDeleteButton = event.target.closest("[data-team-chat-thread-delete]");
+  if (teamChatThreadDeleteButton) {
+    const threadRecordId = String(teamChatThreadDeleteButton.dataset.teamChatThreadDelete || "").trim();
+    const thread = state.teamChat.threads.find((item) => String(item.id || "") === threadRecordId) || null;
+    const threadTitle = thread?.title || "该会话";
+    if (!window.confirm(`确认删除团队测试会话“${threadTitle}”？删除后不可恢复。`)) {
+      return;
     }
-    return;
-  }
-
-  const teamBuild = event.target.closest("[data-team-build]");
-  if (teamBuild) {
     try {
-      const payload = await api(`/api/agent-center/team-templates/${teamBuild.dataset.teamBuild}/build`, {
-        method: "POST",
-        body: JSON.stringify({}),
-      });
-      state.selectedBuildId = payload.id;
-      if (payload.blueprint_id) {
-        state.selectedBlueprintId = payload.blueprint_id;
-      }
-      invalidateData("builds", "blueprints", "controlPlane");
-      await switchPage("builds", { force: true });
-      await openBuild(payload.id);
+      await deleteTeamChatThread(threadRecordId);
     } catch (error) {
-      showResult(buildResult, { error: error.message });
+      showResult(teamChatResult, errorResult(error));
     }
     return;
   }
 
-  const buildOpen = event.target.closest("[data-build-open]");
-  if (buildOpen) {
-    await switchPage("builds");
-    await openBuild(buildOpen.dataset.buildOpen);
-    return;
-  }
-
-  const buildUse = event.target.closest("[data-build-use]");
-  if (buildUse) {
-    state.selectedBuildId = buildUse.dataset.buildUse;
-    populateTaskOptions();
-    await switchPage("runtime");
-    return;
-  }
-
-  const blueprintOpen = event.target.closest("[data-blueprint-open]");
-  if (blueprintOpen) {
-    await switchPage("blueprints");
-    await openBlueprint(blueprintOpen.dataset.blueprintOpen);
-    return;
-  }
-
-  const blueprintUse = event.target.closest("[data-blueprint-use]");
-  if (blueprintUse) {
-    state.selectedBlueprintId = blueprintUse.dataset.blueprintUse;
-    populateTaskOptions();
-    await switchPage("runtime");
+  const teamChatThreadButton = event.target.closest("[data-team-chat-thread]");
+  if (teamChatThreadButton) {
+    try {
+      await selectTeamChatThread(teamChatThreadButton.dataset.teamChatThread);
+    } catch (error) {
+      showResult(teamChatResult, errorResult(error));
+    }
     return;
   }
 
@@ -6502,6 +8856,10 @@ document.addEventListener("click", (event) => {
 });
 
 initializeTagMultiSelects();
+resizeTeamChatInput();
+window.addEventListener("resize", syncTeamChatViewportHeight);
+window.visualViewport?.addEventListener("resize", syncTeamChatViewportHeight);
+window.visualViewport?.addEventListener("scroll", syncTeamChatViewportHeight);
 
 (async function bootstrap() {
   try {
@@ -6510,3 +8868,8 @@ initializeTagMultiSelects();
     showResult(taskResult, { error: error.message });
   }
 })();
+
+
+
+
+

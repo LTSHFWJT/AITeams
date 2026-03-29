@@ -5,22 +5,6 @@ from typing import Any
 
 
 @dataclass(slots=True)
-class MemoryProfileRuntimeSpec:
-    key: str
-    name: str
-    config: dict[str, Any] = field(default_factory=dict)
-    source: dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "key": self.key,
-            "name": self.name,
-            "config": dict(self.config),
-            "source": dict(self.source),
-        }
-
-
-@dataclass(slots=True)
 class TeamMemberRuntimeSpec:
     key: str
     name: str
@@ -32,7 +16,6 @@ class TeamMemberRuntimeSpec:
     static_memory: dict[str, Any] | None = None
     knowledge_bases: list[dict[str, Any]] = field(default_factory=list)
     review_policies: list[dict[str, Any]] = field(default_factory=list)
-    memory_profile: MemoryProfileRuntimeSpec | None = None
     reports_to: list[str] = field(default_factory=list)
     runtime_plugin_actions: list[dict[str, Any]] = field(default_factory=list)
     can_receive_task: bool = False
@@ -68,7 +51,6 @@ class TeamMemberRuntimeSpec:
                 }
                 for item in self.review_policies
             ],
-            "memory_profile": self.memory_profile.to_dict() if self.memory_profile else None,
             "reports_to": list(self.reports_to),
             "runtime_plugin_actions": [dict(item) for item in self.runtime_plugin_actions],
             "can_receive_task": self.can_receive_task,

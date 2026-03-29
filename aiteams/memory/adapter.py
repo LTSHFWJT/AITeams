@@ -6,13 +6,15 @@ import os
 import re
 import sqlite3
 import threading
-from collections.abc import Iterable
+from collections.abc import AsyncIterator, Iterable
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Protocol
 
 from langchain_core.messages import AIMessage, BaseMessage, ChatMessage, HumanMessage, SystemMessage, messages_from_dict, messages_to_dict
 from langchain_core.runnables import RunnableLambda
 from langgraph.store.sqlite import SqliteStore
+from langgraph.store.sqlite.aio import AsyncSqliteStore
 from langmem import create_manage_memory_tool, create_memory_store_manager, create_search_memory_tool
 from langmem.short_term import RunningSummary, summarize_messages
 
@@ -72,6 +74,7 @@ class MemoryAdapter(Protocol):
     ) -> list[dict[str, Any]]: ...
     async def feedback(self, scope: Scope, head_id: str, text: str) -> dict[str, Any]: ...
     def configure_retrieval(self, settings: dict[str, Any] | None = None) -> dict[str, Any]: ...
+    def async_langgraph_store(self) -> AsyncIterator[Any]: ...
 
 
 class WorkingMemoryStore:
@@ -571,14 +574,26 @@ class LangMemAdapter:
         store = SqliteStore(
             connection,
             index=index,
-            ttl={
-                "refresh_on_read": True,
-                "default_ttl": self._long_term_ttl,
-                "sweep_interval_minutes": 10,
-            },
+            ttl=self._store_ttl_config(),
         )
         store.setup()
         return store
+
+    def _store_ttl_config(self) -> dict[str, Any]:
+        return {
+            "refresh_on_read": True,
+            "default_ttl": self._long_term_ttl,
+            "sweep_interval_minutes": 10,
+        }
+
+    @asynccontextmanager
+    async def async_langgraph_store(self) -> AsyncIterator[AsyncSqliteStore]:
+        async with AsyncSqliteStore.from_conn_string(
+            str(self._store_path),
+            ttl=self._store_ttl_config(),
+        ) as store:
+            await store.setup()
+            yield store
 
     def _close_store(self, store: SqliteStore) -> None:
         stopper = getattr(store, "stop_ttl_sweeper", None)
@@ -997,9 +1012,7 @@ class LangMemAdapter:
 
     def _resolve_short_term_config(self, runtime: dict[str, Any] | None) -> dict[str, Any]:
         runtime = dict(runtime or {})
-        memory_profile = dict(runtime.get("memory_profile") or {})
-        memory_profile_config = dict(memory_profile.get("config") or memory_profile)
-        short_term = dict(memory_profile_config.get("short_term") or runtime.get("short_term") or {})
+        short_term = dict(runtime.get("short_term") or {})
         return {
             "enabled": bool(short_term.get("enabled", True)),
             "summary_trigger_tokens": max(int(short_term.get("summary_trigger_tokens", 1800) or 1800), 256),
@@ -1196,12 +1209,13 @@ class LangMemAdapter:
 
     async def _run_background_reflection(self, scope: Scope, model: Any, messages: list[BaseMessage]) -> None:
         try:
-            manager = create_memory_store_manager(
-                model,
-                namespace=self._namespace(scope),
-                store=self._store,
-            )
-            await manager.ainvoke({"messages": messages, "max_steps": 1})
+            async with self.async_langgraph_store() as store:
+                manager = create_memory_store_manager(
+                    model,
+                    namespace=self._namespace(scope),
+                    store=store,
+                )
+                await manager.ainvoke({"messages": messages, "max_steps": 1})
             self._maintain_long_term(scope)
         except Exception:
             return

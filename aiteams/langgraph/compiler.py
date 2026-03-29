@@ -5,7 +5,7 @@ from typing import Any
 
 from aiteams.catalog import preset_for
 from aiteams.langgraph.router import build_adjacency_map
-from aiteams.langgraph.state import MemoryProfileRuntimeSpec, TeamMemberRuntimeSpec
+from aiteams.langgraph.state import TeamMemberRuntimeSpec
 from aiteams.role_specs import normalize_role_spec, role_spec_system_prompt
 from aiteams.storage.metadata import MetadataStore
 from aiteams.utils import slugify
@@ -157,7 +157,7 @@ class LangGraphTeamCompiler:
             raise ValueError(f"Unknown provider profile `{provider_ref}`.")
         plugin_refs = list(spec.get("tool_plugin_refs") or spec.get("plugin_refs") or [])
         plugins = [self._resolve_plugin(ref) for ref in plugin_refs]
-        skills = [self._resolve_skill(ref) for ref in list(spec.get("skill_refs") or spec.get("skills") or [])]
+        skills = [self._resolve_skill(ref) for ref in list(spec.get("skill_refs") or [])]
         static_memory = None
         if spec.get("static_memory_ref"):
             static_memory = self.store.get_static_memory(str(spec["static_memory_ref"])) or self.store.get_static_memory_by_key(str(spec["static_memory_ref"]))
@@ -165,7 +165,6 @@ class LangGraphTeamCompiler:
                 raise ValueError(f"Unknown static memory `{spec['static_memory_ref']}`.")
         knowledge_bases = [self._resolve_knowledge_base(ref) for ref in list(spec.get("knowledge_base_refs") or [])]
         review_policies = [self._resolve_review_policy(ref) for ref in list(spec.get("review_policy_refs") or [])]
-        memory_profile = self._resolve_memory_profile(spec)
         level = int(payload.get("level") or 0)
         if level < 1 or level > 16:
             raise ValueError(f"Team member `{payload.get('key') or definition.get('id')}` level must be within 1-16.")
@@ -180,7 +179,6 @@ class LangGraphTeamCompiler:
             static_memory=static_memory,
             knowledge_bases=knowledge_bases,
             review_policies=review_policies,
-            memory_profile=memory_profile,
             reports_to=[str(item) for item in list(payload.get("reports_to") or []) if str(item).strip()],
             runtime_plugin_actions=[dict(item) for item in list(payload.get("runtime_plugin_actions") or []) if isinstance(item, dict)],
             can_receive_task=bool(payload.get("can_receive_task", False)),
@@ -231,25 +229,6 @@ class LangGraphTeamCompiler:
             raise ValueError(f"Unknown review policy `{reference}`.")
         return policy
 
-    def _resolve_memory_profile(self, definition_spec: dict[str, Any]) -> MemoryProfileRuntimeSpec | None:
-        reference = definition_spec.get("memory_profile_ref") or definition_spec.get("memory_profile_id")
-        if reference:
-            record = self.store.get_memory_profile(str(reference)) or self.store.get_memory_profile_by_key(str(reference))
-            if record is None:
-                raise ValueError(f"Unknown memory profile `{reference}`.")
-            return MemoryProfileRuntimeSpec(
-                key=str(record.get("key") or record.get("id") or ""),
-                name=str(record.get("name") or record.get("key") or ""),
-                config=dict(record.get("spec_json") or {}),
-                source={"id": record.get("id"), "key": record.get("key"), "version": record.get("version")},
-            )
-        inline = dict(definition_spec.get("memory_profile") or {})
-        if not inline:
-            return None
-        key = str(inline.get("key") or f"inline.{slugify(str(definition_spec.get('provider_ref') or 'memory_profile'), fallback='memory_profile')}").strip()
-        name = str(inline.get("name") or "Inline memory profile").strip()
-        return MemoryProfileRuntimeSpec(key=key, name=name, config=inline, source={"inline": True})
-
     def _normalize_review_override(
         self,
         payload: dict[str, Any],
@@ -297,7 +276,6 @@ class LangGraphTeamCompiler:
             "static_memories": [],
             "knowledge_bases": [],
             "review_policies": [],
-            "memory_profiles": [],
         }
         seen: dict[str, set[str]] = {key: set() for key in resource_lock}
 
@@ -346,18 +324,6 @@ class LangGraphTeamCompiler:
                 self._lock_resource(resource_lock, seen, "static_memories", member.static_memory, fields=("id", "key", "version"))
             for static_memory in team_shared_static_memories:
                 self._lock_resource(resource_lock, seen, "static_memories", static_memory, fields=("id", "key", "version"))
-            if member.memory_profile is not None and not member.memory_profile.source.get("inline"):
-                self._lock_resource(
-                    resource_lock,
-                    seen,
-                    "memory_profiles",
-                    {
-                        "id": member.memory_profile.source.get("id"),
-                        "key": member.memory_profile.source.get("key") or member.memory_profile.key,
-                        "version": member.memory_profile.source.get("version"),
-                    },
-                    fields=("id", "key", "version"),
-                )
             self._lock_resource(resource_lock, seen, "agent_definitions", definition, fields=("id", "version"))
             self._lock_resource(resource_lock, seen, "provider_profiles", provider, fields=("id", "name", "provider_type"))
 
@@ -377,7 +343,7 @@ class LangGraphTeamCompiler:
                 "temperature": float(definition_spec.get("temperature", provider_config.get("temperature", 0.2))),
                 "max_tokens": definition_spec.get("max_tokens", provider_config.get("max_tokens")),
                 "workbenches": workbench_keys,
-                "memory_policy": self._runtime_memory_policy(member.memory_profile),
+                "memory_policy": self._runtime_memory_policy(),
                 "extra_headers": dict(provider_config.get("extra_headers") or {}),
                 "extra_config": dict(provider_config.get("extra_config") or {}),
                 "metadata": {
@@ -399,7 +365,6 @@ class LangGraphTeamCompiler:
                         self._static_memory_binding_payload(item) for item in team_shared_static_memories
                     ],
                     "review_policy_refs": [policy["key"] for policy in member.review_policies],
-                    "memory_profile": member.memory_profile.to_dict() if member.memory_profile else None,
                     "plugins": plugin_entries,
                 },
             }
@@ -413,7 +378,6 @@ class LangGraphTeamCompiler:
                     "can_receive_task": member.can_receive_task,
                     "can_finish_task": member.can_finish_task,
                     "peer_chat_enabled": member.peer_chat_enabled,
-                    "memory_profile": member.memory_profile.to_dict() if member.memory_profile else None,
                     "knowledge_bases": [
                         self._knowledge_base_binding_payload(kb) for kb in effective_knowledge_bases
                     ],
@@ -446,13 +410,6 @@ class LangGraphTeamCompiler:
             if prompt:
                 blocks.append(f"Bound role spec `{memory_name}`:")
                 blocks.append(prompt)
-        if member.memory_profile is not None:
-            read_scopes = ", ".join(str(item) for item in member.memory_profile.config.get("read_scopes", []))
-            write_scopes = ", ".join(str(item) for item in member.memory_profile.config.get("write_scopes", []))
-            if read_scopes:
-                blocks.append(f"Memory read scopes: {read_scopes}.")
-            if write_scopes:
-                blocks.append(f"Memory write scopes: {write_scopes}.")
         for skill in member.skills:
             skill_spec = dict(skill.get("spec_json") or {})
             skill_instructions = [str(item).strip() for item in skill_spec.get("instructions", []) if str(item).strip()]
@@ -602,15 +559,8 @@ class LangGraphTeamCompiler:
         finishers = [member.key for member in members if member.can_finish_task]
         return finishers or [entry_agent_id]
 
-    def _runtime_memory_policy(self, profile: MemoryProfileRuntimeSpec | None) -> str:
-        if profile is None:
-            return "agent_private_plus_project"
-        read_scopes = {str(item) for item in profile.config.get("read_scopes", [])}
-        if "project" in read_scopes:
-            return "agent_private_plus_project"
-        if "team" in read_scopes:
-            return "project_shared"
-        return "agent_private"
+    def _runtime_memory_policy(self) -> str:
+        return "agent_private_plus_project"
 
     def _team_runtime_payload(
         self,

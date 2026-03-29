@@ -47,7 +47,9 @@ class LangGraphTeamRuntime:
         prompt: str,
         inputs: dict[str, Any],
         approval_mode: str,
+        session_thread_id: str | None = None,
     ) -> dict[str, Any]:
+        del session_thread_id
         team = deepcopy(dict((blueprint_spec.get("metadata") or {}).get("team_runtime") or {}))
         entry_agent_id = str(team.get("entry_agent_id") or "")
         initial_group_id = make_id("group")
@@ -101,7 +103,9 @@ class LangGraphTeamRuntime:
         project_id: str,
         title: str | None,
         prompt: str,
+        session_thread_id: str | None = None,
     ) -> dict[str, Any] | None:
+        del session_thread_id
         if not self.handles(blueprint_spec):
             return None
         existing = self.store.list_task_threads(run_id=run_id)
@@ -564,7 +568,6 @@ class LangGraphTeamRuntime:
                 {
                     "agent_id": agent_id,
                     "role": result.get("role"),
-                    "memory_profile": member.get("memory_profile"),
                     "summary": result.get("summary"),
                     "deliverables": list(result.get("deliverables") or []),
                     "risks": list(result.get("risks") or []),
@@ -816,11 +819,6 @@ class LangGraphTeamRuntime:
         team_id: str,
         effect: dict[str, Any],
     ) -> list[tuple[str, Any]]:
-        profile = dict(effect.get("memory_profile") or {})
-        config = dict(profile.get("config") or {})
-        write_scopes = {str(item).strip().lower() for item in list(config.get("write_scopes") or []) if str(item).strip()}
-        if not write_scopes:
-            return []
         agent_id = str(effect.get("agent_id") or "")
         base_scopes = MemoryScopes(
             workspace_id=workspace_id,
@@ -836,25 +834,15 @@ class LangGraphTeamRuntime:
             team_id=team_id or None,
         )
         targets: list[tuple[str, Any]] = []
-        if "team" in write_scopes and team_id:
+        if team_id:
             targets.append(("team", team_scopes.team_shared()))
-        if "project" in write_scopes:
-            targets.append(("project", base_scopes.project_shared()))
-        if "run" in write_scopes or "retrospective" in write_scopes:
-            targets.append(("run", team_scopes.run_retrospective()))
+        targets.append(("project", base_scopes.project_shared()))
         return targets
 
     def _memory_effect_records(self, *, team_id: str, effect: dict[str, Any]) -> list[dict[str, Any]]:
         summary = trim_text(str(effect.get("summary") or ""), limit=2000)
         if not summary:
             return []
-        profile = dict(effect.get("memory_profile") or {})
-        config = dict(profile.get("config") or {})
-        long_term = dict(config.get("long_term") or {})
-        ttl_days = long_term.get("ttl_days")
-        ttl_minutes = None
-        if isinstance(ttl_days, (int, float)) and float(ttl_days) > 0:
-            ttl_minutes = float(ttl_days) * 24.0 * 60.0
         metadata = {
             "team_definition_id": team_id or None,
             "agent": effect.get("agent_id"),
@@ -869,7 +857,6 @@ class LangGraphTeamRuntime:
                 "importance": 0.62,
                 "confidence": 0.8,
                 "metadata": metadata,
-                "expires_at": ttl_minutes,
             }
         ]
         next_focus = trim_text(str(effect.get("next_focus") or ""), limit=600)
@@ -882,7 +869,6 @@ class LangGraphTeamRuntime:
                     "importance": 0.5,
                     "confidence": 0.72,
                     "metadata": metadata | {"kind": "next_focus"},
-                    "expires_at": ttl_minutes,
                 }
             )
         for item in list(effect.get("deliverables") or [])[:3]:
@@ -897,7 +883,6 @@ class LangGraphTeamRuntime:
                     "importance": 0.54,
                     "confidence": 0.76,
                     "metadata": metadata | {"kind": "deliverable"},
-                    "expires_at": ttl_minutes,
                 }
             )
         for item in list(effect.get("risks") or [])[:2]:
@@ -912,7 +897,6 @@ class LangGraphTeamRuntime:
                     "importance": 0.58,
                     "confidence": 0.74,
                     "metadata": metadata | {"kind": "risk"},
-                    "expires_at": ttl_minutes,
                 }
             )
         return records

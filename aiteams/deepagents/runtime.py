@@ -4,10 +4,10 @@ import json
 from pathlib import Path
 from typing import Any
 
-from deepagents.backends.store import StoreBackend
+from deepagents.backends import CompositeBackend, FilesystemBackend, StoreBackend
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessageChunk, HumanMessage
 from langchain_core.runnables import RunnableLambda
 from langchain_core.tools import StructuredTool
 
@@ -22,17 +22,27 @@ from aiteams.plugins.manager import (
     BUILTIN_MEMORY_SEARCH_PLUGIN_KEY,
 )
 from aiteams.storage.metadata import MetadataStore
-from aiteams.utils import pretty_json, trim_text, utcnow_iso
+from aiteams.utils import make_uuid7, pretty_json, trim_text, utcnow_iso
 from aiteams.workspace.manager import WorkspaceManager
 
 
 class DeepAgentsTeamRuntime:
-    def __init__(self, *, store: MetadataStore, agent_kernel: AgentKernel, workspace: WorkspaceManager, checkpoint_db_path: str | Path):
+    def __init__(
+        self,
+        *,
+        store: MetadataStore,
+        agent_kernel: AgentKernel,
+        workspace: WorkspaceManager,
+        checkpoint_db_path: str | Path,
+        skill_storage_root: str | Path,
+    ):
         self.store = store
         self.agent_kernel = agent_kernel
         self.workspace = workspace
         self.checkpoint_db_path = Path(checkpoint_db_path).expanduser().resolve()
+        self.skill_storage_root = Path(skill_storage_root).expanduser().resolve()
         self.checkpoint_db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.skill_storage_root.mkdir(parents=True, exist_ok=True)
         leaf_compiler = AgentLeafCompiler(
             model_factory=self._build_chat_model,
             tools_factory=self._agent_tools,
@@ -43,6 +53,8 @@ class DeepAgentsTeamRuntime:
             model_factory=self._build_chat_model,
             tools_factory=self._agent_tools,
             backend_factory=self._backend_factory,
+            skill_backend_root_factory=self._skill_backend_root,
+            skill_library_root=self.skill_storage_root,
             interrupt_factory=self._interrupt_on,
             disabled_general_subagent_factory=self._disabled_general_purpose_subagent,
         )
@@ -64,8 +76,10 @@ class DeepAgentsTeamRuntime:
         prompt: str,
         inputs: dict[str, Any],
         approval_mode: str,
+        session_thread_id: str | None = None,
     ) -> dict[str, Any]:
         runtime = dict((blueprint_spec.get("metadata") or {}).get("deepagents_runtime") or {})
+        resolved_session_thread_id = str(session_thread_id or "").strip() or make_uuid7()
         return {
             "mode": "deepagents_hierarchy",
             "task": {
@@ -78,6 +92,7 @@ class DeepAgentsTeamRuntime:
             "history": [],
             "waiting": None,
             "thread_id": None,
+            "session_thread_id": resolved_session_thread_id,
         }
 
     def ensure_task_thread(
@@ -89,6 +104,7 @@ class DeepAgentsTeamRuntime:
         project_id: str,
         title: str | None,
         prompt: str,
+        session_thread_id: str | None = None,
     ) -> dict[str, Any] | None:
         if not self.handles(blueprint_spec):
             return None
@@ -97,6 +113,7 @@ class DeepAgentsTeamRuntime:
             return existing[0]
         runtime = dict((blueprint_spec.get("metadata") or {}).get("deepagents_runtime") or {})
         root = dict(runtime.get("root") or {})
+        resolved_session_thread_id = str(session_thread_id or "").strip() or make_uuid7()
         thread = self.store.create_task_thread(
             team_definition_id=str(runtime.get("team_definition_id") or "") or None,
             run_id=run_id,
@@ -108,6 +125,7 @@ class DeepAgentsTeamRuntime:
                 "team_definition_key": runtime.get("team_definition_key"),
                 "root_team_key": root.get("key"),
                 "root_team_name": root.get("name"),
+                "session_thread_id": resolved_session_thread_id,
                 "mode": "deepagents_hierarchy",
             },
         )
@@ -158,6 +176,8 @@ class DeepAgentsTeamRuntime:
         run, runtime_state, blueprint_spec = self._bundle(run_id)
         task = dict(runtime_state.get("task") or {})
         prompt = str(task.get("prompt") or "")
+        session_thread_id = str(runtime_state.get("session_thread_id") or "").strip() or make_uuid7()
+        runtime_state["session_thread_id"] = session_thread_id
         root = dict((runtime_state.get("deepagents_runtime") or {}).get("root") or {})
         if not root:
             raise ValueError("DeepAgents runtime payload is missing root node.")
@@ -174,46 +194,50 @@ class DeepAgentsTeamRuntime:
                 started_at=run.get("started_at"),
                 finished_at=run.get("finished_at"),
             )
+            memory = self.agent_kernel.memory
+            if not hasattr(memory, "async_langgraph_store"):
+                raise ValueError("DeepAgents runtime requires memory.async_langgraph_store() for async LangGraph storage.")
             async with AsyncSqliteSaver.from_conn_string(str(self.checkpoint_db_path)) as checkpointer:
-                compiled_tree = self.team_builder.build_for_run(
-                    root=root,
-                    resource_lock=dict((blueprint_spec.get("metadata") or {}).get("resource_lock") or {}),
-                    run_id=run_id,
-                    team_definition_id=str((runtime_state.get("deepagents_runtime") or {}).get("team_definition_id") or ""),
-                    workspace_id=str(blueprint_spec.get("workspace_id") or ""),
-                    project_id=str(blueprint_spec.get("project_id") or ""),
-                    checkpointer=checkpointer,
-                    langgraph_store=getattr(self.agent_kernel.memory, "_store", None),
-                )
-                runtime_state.setdefault("deepagents_runtime", {})["root"] = compiled_tree.runtime_tree_snapshot
-                root = dict(compiled_tree.runtime_tree_snapshot)
-                runtime_state["team_build_snapshot_id"] = (compiled_tree.snapshot_record or {}).get("id")
-                runtime_state["compiled_team_metadata"] = compiled_tree.compiled_metadata
-                self.store.update_run(
-                    run_id,
-                    status="running",
-                    current_node_id="deepagents_orchestrate",
-                    state=runtime_state,
-                    started_at=run.get("started_at"),
-                    finished_at=run.get("finished_at"),
-                )
-                agent = compiled_tree.root_runnable
-                graph_config = self._graph_config(run_id)
-                if resume is None:
-                    result = await agent.ainvoke({"messages": [HumanMessage(content=prompt)]}, graph_config)
-                else:
-                    result = await agent.ainvoke(Command(resume=resume), graph_config)
-                interrupted = self._interrupt_payload(result)
-                if interrupted is not None:
-                    executor = self._executor(root)
-                    self._pause_for_interrupt(
+                async with memory.async_langgraph_store() as langgraph_store:
+                    compiled_tree = await self.team_builder.build_for_run(
+                        root=root,
+                        resource_lock=dict((blueprint_spec.get("metadata") or {}).get("resource_lock") or {}),
                         run_id=run_id,
-                        step_id=str(step["id"]),
-                        runtime_state=runtime_state,
-                        executor=executor,
-                        interrupt_payload=interrupted,
+                        team_definition_id=str((runtime_state.get("deepagents_runtime") or {}).get("team_definition_id") or ""),
+                        workspace_id=str(blueprint_spec.get("workspace_id") or ""),
+                        project_id=str(blueprint_spec.get("project_id") or ""),
+                        checkpointer=checkpointer,
+                        langgraph_store=langgraph_store,
                     )
-                    return
+                    runtime_state.setdefault("deepagents_runtime", {})["root"] = compiled_tree.runtime_tree_snapshot
+                    root = dict(compiled_tree.runtime_tree_snapshot)
+                    runtime_state["team_build_snapshot_id"] = (compiled_tree.snapshot_record or {}).get("id")
+                    runtime_state["compiled_team_metadata"] = compiled_tree.compiled_metadata
+                    self.store.update_run(
+                        run_id,
+                        status="running",
+                        current_node_id="deepagents_orchestrate",
+                        state=runtime_state,
+                        started_at=run.get("started_at"),
+                        finished_at=run.get("finished_at"),
+                    )
+                    agent = compiled_tree.root_runnable
+                    graph_config = self._graph_config(run_id=run_id, session_thread_id=session_thread_id)
+                    if resume is None:
+                        result = await agent.ainvoke({"messages": [HumanMessage(content=prompt)]}, graph_config)
+                    else:
+                        result = await agent.ainvoke(Command(resume=resume), graph_config)
+                    interrupted = self._interrupt_payload(result)
+                    if interrupted is not None:
+                        executor = self._executor(root)
+                        self._pause_for_interrupt(
+                            run_id=run_id,
+                            step_id=str(step["id"]),
+                            runtime_state=runtime_state,
+                            executor=executor,
+                            interrupt_payload=interrupted,
+                        )
+                        return
             final_text = self._final_text(result)
             if self._should_review_final_delivery(self._executor(root)):
                 self._pause_for_final_delivery(
@@ -276,7 +300,7 @@ class DeepAgentsTeamRuntime:
         disabled = RunnableLambda(
             lambda _state: {
                 "messages": [
-                    AIMessage(
+                    AIMessageChunk(
                         content="The general-purpose subagent is disabled for this hierarchical team. Use explicit child subagents only."
                     )
                 ]
@@ -284,19 +308,31 @@ class DeepAgentsTeamRuntime:
         )
         return {"name": "general-purpose", "description": "Disabled in strict hierarchy mode.", "runnable": disabled}
 
-    def _backend_factory(self, *, run_id: str, executor: dict[str, Any]):
-        namespace = (
-            "agent_id",
-            str(executor.get("agent_id") or executor.get("runtime_key") or executor.get("key") or "agent"),
+    def _backend_namespace(self, *, run_id: str, executor: dict[str, Any]) -> tuple[str, ...]:
+        return (
             "deepagents",
-            "files",
+            "run",
             run_id,
+            "agent",
+            str(executor.get("agent_id") or executor.get("runtime_key") or executor.get("key") or "agent"),
+            "files",
         )
 
-        def _factory(runtime: Any) -> StoreBackend:
-            return StoreBackend(runtime, namespace=lambda _ctx, ns=namespace: ns)
+    def _backend_factory(self, *, run_id: str, executor: dict[str, Any]):
+        namespace = self._backend_namespace(run_id=run_id, executor=executor)
+
+        def _factory(runtime: Any) -> CompositeBackend:
+            return CompositeBackend(
+                default=StoreBackend(runtime, namespace=lambda _ctx, ns=namespace: ns),
+                routes={
+                    "/skills/": FilesystemBackend(root_dir=self.skill_storage_root, virtual_mode=True),
+                },
+            )
 
         return _factory
+
+    def _skill_backend_root(self, *, run_id: str, executor: dict[str, Any]) -> Path:
+        return self.skill_storage_root.joinpath(*self._backend_namespace(run_id=run_id, executor=executor), "skills")
 
     def _build_chat_model(self, executor: dict[str, Any]) -> Any:
         provider_payload = self._provider_payload(executor)
@@ -481,8 +517,9 @@ class DeepAgentsTeamRuntime:
     def _single_memory_scope(self, scopes: MemoryScopes, *, scope: str):
         return self._memory_scope_list(scopes, scope=scope)[0]
 
-    def _graph_config(self, run_id: str) -> dict[str, Any]:
-        return {"configurable": {"thread_id": f"deepagents:{run_id}"}}
+    def _graph_config(self, *, run_id: str, session_thread_id: str | None) -> dict[str, Any]:
+        resolved_thread_id = str(session_thread_id or "").strip() or make_uuid7()
+        return {"configurable": {"thread_id": resolved_thread_id, "run_id": run_id}}
 
     def _ensure_orchestrate_step(self, *, run_id: str, prompt: str, root: dict[str, Any]) -> dict[str, Any]:
         existing = self.store.latest_step_for_node(run_id, "deepagents_orchestrate")

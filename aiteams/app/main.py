@@ -35,6 +35,7 @@ def _build_container(settings: AppSettings) -> ServiceContainer:
         agent_kernel=agent_kernel,
         workspace=workspace,
         checkpoint_db_path=settings.checkpoint_db_path,
+        deepagents_skill_root=settings.deepagents_skill_root,
     )
     agent_center = AgentCenterService(store, plugin_manager=plugin_manager, gateway=gateway)
     if seed_agent_center_defaults:
@@ -43,7 +44,6 @@ def _build_container(settings: AppSettings) -> ServiceContainer:
     memory.start_background_maintenance()
     return ServiceContainer(
         store=store,
-        compiler=compiler,
         runtime=runtime,
         workspace=workspace,
         agent_center=agent_center,
@@ -67,6 +67,7 @@ def run() -> None:
     LOGGER.info("Checkpoint DB: %s", settings.checkpoint_db_path)
     LOGGER.info("Memory root: %s", settings.memory_root)
     LOGGER.info("Workspace root: %s", settings.workspace_root)
+    LOGGER.info("DeepAgents skill root: %s", settings.deepagents_skill_root)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
