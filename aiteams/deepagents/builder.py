@@ -313,10 +313,10 @@ class TeamCompositeCompiler:
         if not raw_path:
             return None
         parts = [part for part in raw_path.split("/") if part and part not in {".", ".."}]
-        if len(parts) < 2:
+        if not parts:
             return None
         parent = "/".join(parts[:-1])
-        return f"/skills/{parent}/"
+        return f"/skills/{parent}/" if parent else "/skills/"
 
     def _skill_slug(self, text: str, *, fallback: str) -> str:
         normalized = re.sub(r"[^a-z0-9]+", "-", text.strip().lower()).strip("-")

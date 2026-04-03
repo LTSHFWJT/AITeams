@@ -5,6 +5,7 @@ from aiteams.agent.kernel import AgentKernel
 from aiteams.ai_gateway import AIGateway
 from aiteams.api.application import AITeamsHTTPServer, LOGGER, ServiceContainer, WebApplication
 from aiteams.app.settings import AppSettings
+from aiteams.knowledge import KnowledgeBaseService
 from aiteams.memory.adapter import LangMemAdapter
 from aiteams.plugins import PluginManager
 from aiteams.runtime.compiler import BlueprintCompiler
@@ -26,8 +27,18 @@ def _build_container(settings: AppSettings) -> ServiceContainer:
     workspace = WorkspaceManager(settings.workspace_root)
     gateway = AIGateway()
     memory = LangMemAdapter(str(settings.memory_root), gateway=gateway)
+    knowledge_bases = KnowledgeBaseService(
+        store=store,
+        root_dir=settings.data_dir / "knowledge-bases",
+        gateway=gateway,
+    )
     compiler = BlueprintCompiler()
-    plugin_manager = PluginManager(store=store, install_root=settings.data_dir / "plugins", memory=memory)
+    plugin_manager = PluginManager(
+        store=store,
+        install_root=settings.data_dir / "plugins",
+        memory=memory,
+        knowledge_bases=knowledge_bases,
+    )
     agent_kernel = AgentKernel(memory=memory, gateway=gateway, plugin_manager=plugin_manager)
     runtime = RuntimeEngine(
         store=store,
@@ -37,10 +48,19 @@ def _build_container(settings: AppSettings) -> ServiceContainer:
         checkpoint_db_path=settings.checkpoint_db_path,
         deepagents_skill_root=settings.deepagents_skill_root,
     )
-    agent_center = AgentCenterService(store, plugin_manager=plugin_manager, gateway=gateway)
+    agent_center = AgentCenterService(
+        store,
+        plugin_manager=plugin_manager,
+        gateway=gateway,
+        local_models_root=settings.local_models_root,
+    )
     if seed_agent_center_defaults:
         agent_center.ensure_defaults()
-    memory.configure_retrieval(agent_center.retrieval_runtime_config())
+    agent_center.ensure_local_model_defaults()
+    agent_center.ensure_retrieval_settings_defaults()
+    retrieval_runtime = agent_center.retrieval_runtime_config()
+    memory.configure_retrieval(retrieval_runtime)
+    knowledge_bases.configure_retrieval(retrieval_runtime)
     memory.start_background_maintenance()
     return ServiceContainer(
         store=store,
@@ -48,7 +68,9 @@ def _build_container(settings: AppSettings) -> ServiceContainer:
         workspace=workspace,
         agent_center=agent_center,
         plugins=plugin_manager,
+        knowledge_bases=knowledge_bases,
         static_dir=settings.static_dir,
+        local_models_root=settings.local_models_root,
     )
 
 
@@ -68,6 +90,8 @@ def run() -> None:
     LOGGER.info("Memory root: %s", settings.memory_root)
     LOGGER.info("Workspace root: %s", settings.workspace_root)
     LOGGER.info("DeepAgents skill root: %s", settings.deepagents_skill_root)
+    LOGGER.info("Knowledge base root: %s", settings.data_dir / "knowledge-bases")
+    LOGGER.info("Local models root: %s", settings.local_models_root)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

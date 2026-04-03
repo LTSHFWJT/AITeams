@@ -186,6 +186,17 @@ SCHEMA = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS local_models (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        model_type TEXT NOT NULL,
+        model_path TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS plugins (
         id TEXT PRIMARY KEY,
         key TEXT NOT NULL,
@@ -258,7 +269,6 @@ SCHEMA = [
         id TEXT PRIMARY KEY,
         key TEXT NOT NULL,
         name TEXT NOT NULL,
-        description TEXT,
         config_json TEXT NOT NULL DEFAULT '{}',
         status TEXT NOT NULL DEFAULT 'active',
         created_at TEXT NOT NULL,
@@ -278,6 +288,19 @@ SCHEMA = [
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         FOREIGN KEY(knowledge_base_id) REFERENCES knowledge_bases(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS knowledge_pool_documents (
+        id TEXT PRIMARY KEY,
+        key TEXT NOT NULL,
+        title TEXT NOT NULL,
+        source_path TEXT,
+        content_text TEXT NOT NULL DEFAULT '',
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
     )
     """,
     """
@@ -385,12 +408,17 @@ SCHEMA = [
     "CREATE INDEX IF NOT EXISTS idx_skill_group_members_skill ON skill_group_members(skill_id, updated_at DESC)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_static_memories_key_version ON static_memories(key, version)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_bases_key ON knowledge_bases(key)",
+    "CREATE INDEX IF NOT EXISTS idx_knowledge_documents_kb_key ON knowledge_documents(knowledge_base_id, key)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_pool_documents_key ON knowledge_pool_documents(key)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_review_policies_key_version ON review_policies(key, version)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_team_definitions_key_version ON team_definitions(key, version)",
     "CREATE INDEX IF NOT EXISTS idx_provider_profiles_type ON provider_profiles(provider_type, updated_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_local_models_type ON local_models(model_type, updated_at DESC)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_local_models_path ON local_models(model_path)",
     "CREATE INDEX IF NOT EXISTS idx_skills_updated ON skills(updated_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_static_memories_updated ON static_memories(updated_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_knowledge_documents_kb ON knowledge_documents(knowledge_base_id, updated_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_knowledge_pool_documents_updated ON knowledge_pool_documents(updated_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_review_policies_updated ON review_policies(updated_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_agent_definitions_role ON agent_definitions(role, updated_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_team_definitions_updated ON team_definitions(updated_at DESC)",
@@ -464,6 +492,7 @@ class MetadataStore:
         self._ensure_skill_group_members_table()
         self._migrate_skills_table()
         self._normalize_skill_storage_layout()
+        self._migrate_knowledge_bases_table()
         self._migrate_agent_templates_to_definitions()
         self._connection.execute("DROP INDEX IF EXISTS idx_agent_templates_role")
         self._connection.execute("DROP INDEX IF EXISTS idx_skills_key_version")
@@ -511,7 +540,7 @@ class MetadataStore:
             folder_name = record_id
         if Path(folder_name).name != folder_name or any(part in {"", ".", ".."} for part in Path(folder_name).parts):
             folder_name = record_id
-        return f"{record_id}/{folder_name}"
+        return folder_name
 
     def _legacy_skill_group_ids(self, row: dict[str, Any]) -> list[str]:
         spec = json_loads(row.get("spec_json"), {})
@@ -681,6 +710,64 @@ class MetadataStore:
                 "UPDATE skills SET storage_path = ?, updated_at = ? WHERE id = ?",
                 (desired_relative, now, record_id),
             )
+
+    def _migrate_knowledge_bases_table(self) -> None:
+        if not self._table_exists("knowledge_bases"):
+            return
+        columns = {str(row["name"]) for row in self.fetch_all("PRAGMA table_info(knowledge_bases)")}
+        if "description" not in columns:
+            return
+        try:
+            self._connection.execute("ALTER TABLE knowledge_bases DROP COLUMN description")
+            return
+        except sqlite3.OperationalError:
+            pass
+
+        now = utcnow_iso()
+        self._connection.commit()
+        foreign_keys = int((self.fetch_one("PRAGMA foreign_keys") or {}).get("foreign_keys", 1) or 1)
+        if foreign_keys:
+            self._connection.execute("PRAGMA foreign_keys=OFF")
+        try:
+            self._connection.execute("BEGIN IMMEDIATE")
+            self._connection.execute("DROP TABLE IF EXISTS knowledge_bases__new")
+            self._connection.execute(
+                """
+                CREATE TABLE knowledge_bases__new (
+                    id TEXT PRIMARY KEY,
+                    key TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    config_json TEXT NOT NULL DEFAULT '{}',
+                    status TEXT NOT NULL DEFAULT 'active',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            self._connection.execute(
+                f"""
+                INSERT INTO knowledge_bases__new(id, key, name, config_json, status, created_at, updated_at)
+                SELECT
+                    id,
+                    key,
+                    name,
+                    {"config_json" if "config_json" in columns else "'{}'"},
+                    {"status" if "status" in columns else "'active'"},
+                    {"created_at" if "created_at" in columns else f"'{now}'"},
+                    {"updated_at" if "updated_at" in columns else f"'{now}'"}
+                FROM knowledge_bases
+                """
+            )
+            self._connection.execute("DROP TABLE knowledge_bases")
+            self._connection.execute("ALTER TABLE knowledge_bases__new RENAME TO knowledge_bases")
+            self._connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_bases_key ON knowledge_bases(key)")
+            self._connection.commit()
+        except Exception:
+            self._connection.rollback()
+            raise
+        finally:
+            if foreign_keys:
+                self._connection.execute("PRAGMA foreign_keys=ON")
 
     def _migrate_agent_templates_to_definitions(self) -> None:
         if not self._table_exists("agent_templates"):
@@ -1105,6 +1192,101 @@ class MetadataStore:
         if include_secret:
             item["secret_json"] = secret
         return item
+
+    def save_local_model(
+        self,
+        *,
+        local_model_id: str | None,
+        name: str,
+        model_type: str,
+        model_path: str,
+        status: str = "active",
+    ) -> dict[str, Any]:
+        record_id = local_model_id or make_uuid7()
+        now = utcnow_iso()
+        normalized_name = trim_text(name, limit=255)
+        normalized_type = trim_text(model_type, limit=32)
+        normalized_path = trim_text(model_path, limit=2048)
+        if not normalized_name:
+            raise ValueError("Local model name is required.")
+        if not normalized_type:
+            raise ValueError("Local model type is required.")
+        if not normalized_path:
+            raise ValueError("Local model path is required.")
+        self.execute(
+            """
+            INSERT INTO local_models(id, name, model_type, model_path, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM local_models WHERE id = ?), ?), ?)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                model_type = excluded.model_type,
+                model_path = excluded.model_path,
+                status = excluded.status,
+                updated_at = excluded.updated_at
+            """,
+            (record_id, normalized_name, normalized_type, normalized_path, status, record_id, now, now),
+        )
+        saved = self.get_local_model(record_id)
+        assert saved is not None
+        return saved
+
+    def get_local_model(self, local_model_id: str) -> dict[str, Any] | None:
+        return self._deserialize(self.fetch_one("SELECT * FROM local_models WHERE id = ?", (local_model_id,)))
+
+    def get_local_model_by_path(self, model_path: str) -> dict[str, Any] | None:
+        normalized_path = trim_text(model_path, limit=2048)
+        if not normalized_path:
+            return None
+        return self._deserialize(self.fetch_one("SELECT * FROM local_models WHERE model_path = ? ORDER BY updated_at DESC LIMIT 1", (normalized_path,)))
+
+    def list_local_models(self) -> list[dict[str, Any]]:
+        return self._deserialize_many(self.fetch_all("SELECT * FROM local_models ORDER BY updated_at DESC, created_at DESC"))
+
+    def list_local_models_page(
+        self,
+        *,
+        query: str | None = None,
+        model_type: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        conditions: list[str] = []
+        params: list[Any] = []
+        keyword = str(query or "").strip().lower()
+        if keyword:
+            like = f"%{keyword}%"
+            conditions.append("(LOWER(name) LIKE ? OR LOWER(model_type) LIKE ? OR LOWER(model_path) LIKE ?)")
+            params.extend([like, like, like])
+        selected_type = str(model_type or "").strip()
+        if selected_type:
+            conditions.append("model_type = ?")
+            params.append(selected_type)
+        where_sql = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        total = int(
+            (self.fetch_one(f"SELECT COUNT(*) AS count FROM local_models{where_sql}", tuple(params)) or {}).get("count", 0) or 0
+        )
+        safe_offset = max(0, int(offset or 0))
+        sql = f"SELECT * FROM local_models{where_sql} ORDER BY updated_at DESC, created_at DESC"
+        query_params = list(params)
+        if limit is not None:
+            safe_limit = max(1, int(limit))
+            sql += " LIMIT ? OFFSET ?"
+            query_params.extend([safe_limit, safe_offset])
+        else:
+            safe_limit = total or 0
+        return {
+            "items": self._deserialize_many(self.fetch_all(sql, tuple(query_params))),
+            "total": total,
+            "offset": safe_offset,
+            "limit": safe_limit,
+        }
+
+    def delete_local_model(self, local_model_id: str) -> dict[str, Any] | None:
+        existing = self.get_local_model(local_model_id)
+        if existing is None:
+            return None
+        self.execute("DELETE FROM local_models WHERE id = ?", (local_model_id,))
+        return existing
 
     def save_plugin(
         self,
@@ -1632,7 +1814,6 @@ class MetadataStore:
         knowledge_base_id: str | None,
         key: str,
         name: str,
-        description: str,
         config: dict[str, Any],
         status: str = "active",
     ) -> dict[str, Any]:
@@ -1640,17 +1821,16 @@ class MetadataStore:
         now = utcnow_iso()
         self.execute(
             """
-            INSERT INTO knowledge_bases(id, key, name, description, config_json, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM knowledge_bases WHERE id = ?), ?), ?)
+            INSERT INTO knowledge_bases(id, key, name, config_json, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM knowledge_bases WHERE id = ?), ?), ?)
             ON CONFLICT(id) DO UPDATE SET
                 key = excluded.key,
                 name = excluded.name,
-                description = excluded.description,
                 config_json = excluded.config_json,
                 status = excluded.status,
                 updated_at = excluded.updated_at
             """,
-            (record_id, key, name, description, json_dumps(config), status, record_id, now, now),
+            (record_id, key, name, json_dumps(config), status, record_id, now, now),
         )
         saved = self.get_knowledge_base(record_id)
         assert saved is not None
@@ -1663,7 +1843,64 @@ class MetadataStore:
         return self._deserialize(self.fetch_one("SELECT * FROM knowledge_bases WHERE key = ? ORDER BY updated_at DESC LIMIT 1", (key,)))
 
     def list_knowledge_bases(self) -> list[dict[str, Any]]:
-        return self._deserialize_many(self.fetch_all("SELECT * FROM knowledge_bases ORDER BY updated_at DESC"))
+        return self.list_knowledge_bases_page()["items"]
+
+    def list_knowledge_bases_page(self, *, limit: int | None = None, offset: int = 0, query: str | None = None) -> dict[str, Any]:
+        safe_offset = max(0, int(offset or 0))
+        query_text = str(query or "").strip()
+        where = ["1 = 1"]
+        params: list[Any] = []
+        if query_text:
+            like = f"%{query_text}%"
+            where.append("(kb.name LIKE ? OR kb.id LIKE ?)")
+            params.extend([like, like])
+        where_sql = " AND ".join(where)
+        total = int(
+            (
+                self.fetch_one(
+                    f"""
+                    SELECT COUNT(*) AS count
+                    FROM knowledge_bases kb
+                    WHERE {where_sql}
+                    """,
+                    tuple(params),
+                )
+                or {}
+            ).get("count", 0)
+            or 0
+        )
+        sql = f"""
+            SELECT
+                kb.*,
+                COUNT(d.id) AS document_count
+            FROM knowledge_bases kb
+            LEFT JOIN knowledge_documents d
+                ON d.knowledge_base_id = kb.id
+                AND d.status = 'active'
+            WHERE {where_sql}
+            GROUP BY kb.id
+            ORDER BY kb.updated_at DESC, kb.created_at DESC
+        """
+        page_params = list(params)
+        if limit is not None:
+            safe_limit = max(1, int(limit))
+            sql += " LIMIT ? OFFSET ?"
+            page_params.extend([safe_limit, safe_offset])
+        else:
+            safe_limit = total or 0
+        return {
+            "items": self._deserialize_many(self.fetch_all(sql, tuple(page_params))),
+            "total": total,
+            "offset": safe_offset,
+            "limit": safe_limit,
+        }
+
+    def touch_knowledge_base(self, knowledge_base_id: str) -> dict[str, Any] | None:
+        existing = self.get_knowledge_base(knowledge_base_id)
+        if existing is None:
+            return None
+        self.execute("UPDATE knowledge_bases SET updated_at = ? WHERE id = ?", (utcnow_iso(), knowledge_base_id))
+        return self.get_knowledge_base(knowledge_base_id)
 
     def delete_knowledge_base(self, knowledge_base_id: str) -> dict[str, Any] | None:
         existing = self.get_knowledge_base(knowledge_base_id)
@@ -1709,6 +1946,20 @@ class MetadataStore:
     def get_knowledge_document(self, knowledge_document_id: str) -> dict[str, Any] | None:
         return self._deserialize(self.fetch_one("SELECT * FROM knowledge_documents WHERE id = ?", (knowledge_document_id,)))
 
+    def get_knowledge_document_by_key(self, *, knowledge_base_id: str, key: str) -> dict[str, Any] | None:
+        return self._deserialize(
+            self.fetch_one(
+                """
+                SELECT *
+                FROM knowledge_documents
+                WHERE knowledge_base_id = ? AND key = ?
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (knowledge_base_id, key),
+            )
+        )
+
     def list_knowledge_documents(self, *, knowledge_base_id: str | None = None) -> list[dict[str, Any]]:
         if knowledge_base_id:
             return self._deserialize_many(
@@ -1716,11 +1967,103 @@ class MetadataStore:
             )
         return self._deserialize_many(self.fetch_all("SELECT * FROM knowledge_documents ORDER BY updated_at DESC"))
 
+    def list_knowledge_documents_page(
+        self,
+        *,
+        knowledge_base_id: str,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        safe_offset = max(0, int(offset or 0))
+        total = int(
+            (
+                self.fetch_one(
+                    "SELECT COUNT(*) AS count FROM knowledge_documents WHERE knowledge_base_id = ?",
+                    (knowledge_base_id,),
+                )
+                or {}
+            ).get("count", 0)
+            or 0
+        )
+        sql = "SELECT * FROM knowledge_documents WHERE knowledge_base_id = ? ORDER BY updated_at DESC"
+        params: list[Any] = [knowledge_base_id]
+        if limit is not None:
+            safe_limit = max(1, int(limit))
+            sql += " LIMIT ? OFFSET ?"
+            params.extend([safe_limit, safe_offset])
+        else:
+            safe_limit = total or 0
+        return {
+            "items": self._deserialize_many(self.fetch_all(sql, tuple(params))),
+            "total": total,
+            "offset": safe_offset,
+            "limit": safe_limit,
+        }
+
     def delete_knowledge_document(self, knowledge_document_id: str) -> dict[str, Any] | None:
         existing = self.get_knowledge_document(knowledge_document_id)
         if existing is None:
             return None
         self.execute("DELETE FROM knowledge_documents WHERE id = ?", (knowledge_document_id,))
+        return existing
+
+    def save_knowledge_pool_document(
+        self,
+        *,
+        knowledge_pool_document_id: str | None,
+        key: str,
+        title: str,
+        source_path: str | None,
+        content_text: str,
+        metadata: dict[str, Any],
+        status: str = "active",
+    ) -> dict[str, Any]:
+        record_id = knowledge_pool_document_id or make_uuid7()
+        now = utcnow_iso()
+        self.execute(
+            """
+            INSERT INTO knowledge_pool_documents(id, key, title, source_path, content_text, metadata_json, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM knowledge_pool_documents WHERE id = ?), ?), ?)
+            ON CONFLICT(id) DO UPDATE SET
+                key = excluded.key,
+                title = excluded.title,
+                source_path = excluded.source_path,
+                content_text = excluded.content_text,
+                metadata_json = excluded.metadata_json,
+                status = excluded.status,
+                updated_at = excluded.updated_at
+            """,
+            (record_id, key, title, source_path, content_text, json_dumps(metadata), status, record_id, now, now),
+        )
+        saved = self.get_knowledge_pool_document(record_id)
+        assert saved is not None
+        return saved
+
+    def get_knowledge_pool_document(self, knowledge_pool_document_id: str) -> dict[str, Any] | None:
+        return self._deserialize(self.fetch_one("SELECT * FROM knowledge_pool_documents WHERE id = ?", (knowledge_pool_document_id,)))
+
+    def get_knowledge_pool_document_by_key(self, key: str) -> dict[str, Any] | None:
+        return self._deserialize(
+            self.fetch_one(
+                """
+                SELECT *
+                FROM knowledge_pool_documents
+                WHERE key = ?
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (key,),
+            )
+        )
+
+    def list_knowledge_pool_documents(self) -> list[dict[str, Any]]:
+        return self._deserialize_many(self.fetch_all("SELECT * FROM knowledge_pool_documents ORDER BY updated_at DESC"))
+
+    def delete_knowledge_pool_document(self, knowledge_pool_document_id: str) -> dict[str, Any] | None:
+        existing = self.get_knowledge_pool_document(knowledge_pool_document_id)
+        if existing is None:
+            return None
+        self.execute("DELETE FROM knowledge_pool_documents WHERE id = ?", (knowledge_pool_document_id,))
         return existing
 
     def search_knowledge_documents(
@@ -1746,8 +2089,7 @@ class MetadataStore:
         SELECT
             d.*,
             kb.key AS knowledge_base_key,
-            kb.name AS knowledge_base_name,
-            kb.description AS knowledge_base_description
+            kb.name AS knowledge_base_name
         FROM knowledge_documents d
         JOIN knowledge_bases kb ON kb.id = d.knowledge_base_id
         """
@@ -2536,6 +2878,7 @@ class MetadataStore:
             "run_count": int((self.fetch_one("SELECT COUNT(*) AS count FROM runs") or {}).get("count", 0) or 0),
             "pending_approval_count": int((self.fetch_one("SELECT COUNT(*) AS count FROM approvals WHERE status = 'pending'") or {}).get("count", 0) or 0),
             "provider_profile_count": int((self.fetch_one("SELECT COUNT(*) AS count FROM provider_profiles") or {}).get("count", 0) or 0),
+            "local_model_count": int((self.fetch_one("SELECT COUNT(*) AS count FROM local_models") or {}).get("count", 0) or 0),
             "plugin_count": int((self.fetch_one("SELECT COUNT(*) AS count FROM plugins") or {}).get("count", 0) or 0),
             "skill_count": int((self.fetch_one("SELECT COUNT(*) AS count FROM skills") or {}).get("count", 0) or 0),
             "static_memory_count": int((self.fetch_one("SELECT COUNT(*) AS count FROM static_memories") or {}).get("count", 0) or 0),

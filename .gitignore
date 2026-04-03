@@ -4,9 +4,10 @@ __pycache__/
 .venv/
 *.egg-info/
 data/
+models/
 examples/
 selfdoc/
-tests/
+
 edict/
 ms-agent/
 agentscope/
@@ -17,6 +18,7 @@ owl/
 AgentMesh/
 autogen/
 Clawith/
+anything-llm/
 
 openclaw/
 docs/

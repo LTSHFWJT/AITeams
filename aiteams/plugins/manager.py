@@ -99,11 +99,19 @@ def builtin_plugin_ref(plugin_key: str, **overrides: Any) -> dict[str, Any]:
 
 
 class PluginManager:
-    def __init__(self, *, store: MetadataStore, install_root: str | Path, memory: Any | None = None):
+    def __init__(
+        self,
+        *,
+        store: MetadataStore,
+        install_root: str | Path,
+        memory: Any | None = None,
+        knowledge_bases: Any | None = None,
+    ):
         self.store = store
         self.install_root = Path(install_root).expanduser().resolve()
         self.install_root.mkdir(parents=True, exist_ok=True)
         self.memory = memory
+        self.knowledge_bases = knowledge_bases
         self._sandboxes: dict[str, PluginSandbox] = {}
 
     def close(self) -> None:
@@ -343,12 +351,20 @@ class PluginManager:
             knowledge_base_keys = [str(item.get("key") or "") for item in knowledge_bases if str(item.get("key") or "").strip()]
             query = str(payload.get("query") or "").strip()
             limit = max(1, int(payload.get("limit", 4) or 4))
-            items = self.store.search_knowledge_documents(
-                query=query,
-                knowledge_base_ids=knowledge_base_ids or None,
-                knowledge_base_keys=knowledge_base_keys or None,
-                limit=limit,
-            )
+            if self.knowledge_bases is not None:
+                items = self.knowledge_bases.search(
+                    query=query,
+                    knowledge_base_ids=knowledge_base_ids or None,
+                    knowledge_base_keys=knowledge_base_keys or None,
+                    limit=limit,
+                )
+            else:
+                items = self.store.search_knowledge_documents(
+                    query=query,
+                    knowledge_base_ids=knowledge_base_ids or None,
+                    knowledge_base_keys=knowledge_base_keys or None,
+                    limit=limit,
+                )
             return {
                 "query": query,
                 "count": len(items),

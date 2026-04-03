@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import ssl
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit, urlunsplit
@@ -24,8 +25,24 @@ from aiteams.storage.metadata import MetadataStore
 from aiteams.utils import pretty_json, trim_text
 
 MODEL_TYPES = {"chat", "embedding", "rerank"}
+LOCAL_MODEL_TYPES = {"Embed", "Rerank", "Chat"}
+LOCAL_MODEL_TYPE_BY_KIND = {
+    "embedding": "Embed",
+    "rerank": "Rerank",
+    "chat": "Chat",
+}
+LOCAL_MODEL_TYPE_ALIASES = {
+    "embed": "Embed",
+    "embedding": "Embed",
+    "rerank": "Rerank",
+    "reranker": "Rerank",
+    "chat": "Chat",
+    "llm": "Chat",
+}
 DEFAULT_MEMORY_PLUGIN_KEY = "memory_core"
 RETRIEVAL_SETTINGS_KEY = "retrieval_models"
+DEFAULT_LOCAL_EMBEDDING_MODEL = "BAAI/bge-m3"
+DEFAULT_LOCAL_RERANK_MODEL = "BAAI/bge-reranker-v2-m3"
 LEGACY_DEFAULT_SKILL_KEYS = {
     "planning_skill",
     "architecture_skill",
@@ -105,12 +122,21 @@ AGENT_CENTER_UI_METADATA = {
 
 
 class AgentCenterService:
-    def __init__(self, store: MetadataStore, plugin_manager: PluginManager | None = None, gateway: AIGateway | None = None):
+    def __init__(
+        self,
+        store: MetadataStore,
+        plugin_manager: PluginManager | None = None,
+        gateway: AIGateway | None = None,
+        local_models_root: str | Path | None = None,
+    ):
         self.store = store
         self.team_compiler = LangGraphTeamCompiler(store)
         self.deep_team_compiler = DeepAgentsTeamCompiler(store)
         self.plugin_manager = plugin_manager
         self.gateway = gateway or AIGateway()
+        self.local_models_root = Path(local_models_root).expanduser().resolve() if local_models_root is not None else None
+        if self.local_models_root is not None:
+            self.local_models_root.mkdir(parents=True, exist_ok=True)
 
     def ensure_defaults(self) -> None:
         provider_id_map: dict[str, str] = {}
@@ -218,6 +244,82 @@ class AgentCenterService:
                     spec=self._default_team_definition_spec(team_definition),
                 )
 
+    def ensure_local_model_defaults(self) -> None:
+        manifest_paths = self._local_model_manifest_paths()
+        existing_models = [self.normalize_local_model(item) for item in self.store.list_local_models()]
+        default_specs = [
+            {
+                "name": DEFAULT_LOCAL_EMBEDDING_MODEL,
+                "model_type": "Embed",
+                "model_path": manifest_paths.get(DEFAULT_LOCAL_EMBEDDING_MODEL) or self._default_local_model_path(DEFAULT_LOCAL_EMBEDDING_MODEL),
+            },
+            {
+                "name": DEFAULT_LOCAL_RERANK_MODEL,
+                "model_type": "Rerank",
+                "model_path": manifest_paths.get(DEFAULT_LOCAL_RERANK_MODEL) or self._default_local_model_path(DEFAULT_LOCAL_RERANK_MODEL),
+            },
+        ]
+        for spec in default_specs:
+            existing = self.store.get_local_model_by_path(str(spec["model_path"]))
+            if existing is None:
+                existing = next(
+                    (
+                        item
+                        for item in existing_models
+                        if item is not None
+                        and str(item.get("name") or "") == str(spec["name"])
+                        and str(item.get("model_type") or "") == str(spec["model_type"])
+                    ),
+                    None,
+                )
+            if existing is not None:
+                continue
+            self.store.save_local_model(
+                local_model_id=None,
+                name=str(spec["name"]),
+                model_type=str(spec["model_type"]),
+                model_path=str(spec["model_path"]),
+            )
+
+    def ensure_retrieval_settings_defaults(self) -> None:
+        if self.store.get_platform_setting_record(RETRIEVAL_SETTINGS_KEY) is not None:
+            return
+        self.save_retrieval_settings(self._default_retrieval_settings_payload())
+
+    def _default_retrieval_settings_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "embedding": {
+                "mode": "local",
+                "model_name": DEFAULT_LOCAL_EMBEDDING_MODEL,
+            },
+            "rerank": {"mode": "disabled"},
+        }
+        default_local_model = self._preferred_default_local_embedding_model()
+        if default_local_model is not None:
+            payload["embedding"] = {
+                "mode": "local",
+                "local_model_id": str(default_local_model.get("id") or ""),
+            }
+        return payload
+
+    def _preferred_default_local_embedding_model(self) -> dict[str, Any] | None:
+        default_model_path = self._default_local_model_path(DEFAULT_LOCAL_EMBEDDING_MODEL)
+        preferred_path = self._local_model_manifest_paths().get(DEFAULT_LOCAL_EMBEDDING_MODEL) or default_model_path
+        for item in self.store.list_local_models():
+            normalized = self.normalize_local_model(item)
+            if normalized is None:
+                continue
+            if str(normalized.get("model_type") or "") != "Embed":
+                continue
+            name = str(normalized.get("name") or "").strip()
+            model_path = str(normalized.get("model_path") or "").strip()
+            if name != DEFAULT_LOCAL_EMBEDDING_MODEL and model_path != preferred_path:
+                continue
+            resolved_path = self._resolve_local_model_path(model_path)
+            if resolved_path and Path(resolved_path).exists():
+                return normalized
+        return None
+
     def provider_types(self) -> list[dict[str, Any]]:
         return list_provider_presets()
 
@@ -242,6 +344,86 @@ class AgentCenterService:
             "offset": page["offset"],
             "limit": page["limit"],
         }
+
+    def normalize_local_model_type(self, value: Any) -> str:
+        normalized = str(value or "").strip()
+        if normalized in LOCAL_MODEL_TYPES:
+            return normalized
+        alias = LOCAL_MODEL_TYPE_ALIASES.get(normalized.lower())
+        if alias:
+            return alias
+        raise ValueError("本地模型类型必须为 Embed / Rerank / Chat。")
+
+    def local_model_kind(self, model_type: Any) -> str:
+        canonical = self.normalize_local_model_type(model_type)
+        for kind, label in LOCAL_MODEL_TYPE_BY_KIND.items():
+            if label == canonical:
+                return kind
+        return "chat"
+
+    def normalize_local_model(self, model: dict[str, Any] | None) -> dict[str, Any] | None:
+        if model is None:
+            return None
+        item = dict(model)
+        try:
+            item["model_type"] = self.normalize_local_model_type(item.get("model_type"))
+            item["model_kind"] = self.local_model_kind(item.get("model_type"))
+        except ValueError:
+            item["model_type"] = str(item.get("model_type") or "").strip()
+            item["model_kind"] = "chat"
+        item["label"] = str(item.get("name") or item.get("id") or "")
+        return item
+
+    def prepare_local_model(self, payload: dict[str, Any], *, existing: dict[str, Any] | None = None) -> dict[str, Any]:
+        existing_item = self.normalize_local_model(existing) if existing else None
+        name = trim_text(payload.get("name") or (existing_item or {}).get("name") or "", limit=255)
+        if not name:
+            raise ValueError("本地模型名称不能为空。")
+        model_type = self.normalize_local_model_type(payload.get("model_type") or payload.get("type") or (existing_item or {}).get("model_type") or "")
+        model_path = str(payload.get("model_path") or payload.get("path") or (existing_item or {}).get("model_path") or "").strip()
+        if not model_path:
+            raise ValueError("本地模型路径不能为空。")
+        return {
+            "name": name,
+            "model_type": model_type,
+            "model_path": model_path,
+        }
+
+    def _default_local_model_path(self, repo_id: str) -> str:
+        directory = str(repo_id or "").strip().replace("\\", "_").replace("/", "__")
+        if self.local_models_root is None:
+            return directory
+        return f"{self.local_models_root.name}/{directory}"
+
+    def _local_model_manifest_paths(self) -> dict[str, str]:
+        if self.local_models_root is None:
+            return {}
+        manifest_path = self.local_models_root / "model-manifest.json"
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        items = payload.get("downloaded")
+        if not isinstance(items, list):
+            return {}
+        resolved: dict[str, str] = {}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            repo_id = str(item.get("repo_id") or "").strip()
+            local_dir = str(item.get("local_dir") or "").strip()
+            if not repo_id or not local_dir:
+                continue
+            target = Path(local_dir).expanduser().resolve()
+            try:
+                relative = target.relative_to(self.local_models_root.parent).as_posix()
+            except ValueError:
+                try:
+                    relative = target.relative_to(self.local_models_root).as_posix()
+                except ValueError:
+                    relative = self._default_local_model_path(repo_id)
+            resolved[repo_id] = relative
+        return resolved
 
     def prepare_provider_profile(self, payload: dict[str, Any], *, existing: dict[str, Any] | None = None) -> dict[str, Any]:
         existing_item = self.normalize_provider_profile(existing) if existing else None
@@ -671,6 +853,97 @@ class AgentCenterService:
                 {"mode": "disabled"},
             )
 
+        def _resolve_runtime_local_model_name(model_name: str) -> str:
+            candidate = str(model_name or "").strip()
+            if not candidate:
+                return candidate
+            if candidate.startswith("models/") or candidate.startswith("models\\") or Path(candidate).expanduser().is_absolute():
+                return self._resolve_local_model_path(candidate)
+            return candidate
+
+        def _resolve_managed_local_model(
+            raw: dict[str, Any],
+            *,
+            kind: str,
+            backend: str,
+        ) -> tuple[dict[str, Any], dict[str, Any]] | None:
+            local_model_id = str(raw.get("local_model_id") or raw.get("model_id") or "").strip()
+            if not local_model_id:
+                return None
+            local_model = self.normalize_local_model(self.store.get_local_model(local_model_id))
+            if local_model is None:
+                raise ValueError(f"{kind} 本地模型 `{local_model_id}` 不存在。")
+            expected_type = LOCAL_MODEL_TYPE_BY_KIND[kind]
+            actual_type = str(local_model.get("model_type") or "").strip()
+            if actual_type != expected_type:
+                raise ValueError(f"{kind} 本地模型 `{local_model.get('name') or local_model_id}` 类型必须是 {expected_type}。")
+            model_path = str(local_model.get("model_path") or "").strip()
+            if not model_path:
+                raise ValueError(f"{kind} 本地模型 `{local_model.get('name') or local_model_id}` 缺少模型路径。")
+            resolved_path = self._resolve_local_model_path(model_path)
+            if not Path(resolved_path).exists():
+                raise ValueError(f"{kind} 本地模型路径不存在：{model_path}")
+            public = {
+                "mode": "local",
+                "backend": backend,
+                "local_model_id": local_model_id,
+                "model_name": model_path,
+                "model_path": model_path,
+                "model_label": str(local_model.get("name") or local_model_id),
+                "model_type": actual_type,
+            }
+            runtime = {
+                "mode": "local",
+                "backend": backend,
+                "local_model_id": local_model_id,
+                "model_name": resolved_path,
+                "model": resolved_path,
+                "model_path": model_path,
+                "model_label": public["model_label"],
+                "model_type": actual_type,
+            }
+            return public, runtime
+
+        def _resolve_local_embedding(raw: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+            managed = _resolve_managed_local_model(raw, kind="embedding", backend="huggingface")
+            if managed is not None:
+                return managed
+            model_name = str(raw.get("model_name") or raw.get("model") or DEFAULT_LOCAL_EMBEDDING_MODEL).strip()
+            if not model_name:
+                raise ValueError("本地 embedding model_name 不能为空。")
+            public = {
+                "mode": "local",
+                "backend": "huggingface",
+                "model_name": model_name,
+            }
+            runtime = {
+                "mode": "local",
+                "backend": "huggingface",
+                "model_name": _resolve_runtime_local_model_name(model_name),
+                "model": _resolve_runtime_local_model_name(model_name),
+            }
+            return public, runtime
+
+        def _resolve_local_rerank(raw: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+            managed = _resolve_managed_local_model(raw, kind="rerank", backend="flag_embedding")
+            if managed is not None:
+                return managed
+            model_name = str(raw.get("model_name") or raw.get("model") or DEFAULT_LOCAL_RERANK_MODEL).strip()
+            if not model_name:
+                raise ValueError("本地 rerank model_name 不能为空。")
+            public = {
+                "mode": "local",
+                "backend": "flag_embedding",
+                "model_name": model_name,
+            }
+            runtime = {
+                "mode": "local",
+                "backend": "flag_embedding",
+                "model_name": _resolve_runtime_local_model_name(model_name),
+                "model": _resolve_runtime_local_model_name(model_name),
+            }
+            return public, runtime
+
         def _resolve_model_selection(
             raw: dict[str, Any],
             *,
@@ -678,6 +951,10 @@ class AgentCenterService:
             allowed_types: set[str],
         ) -> tuple[dict[str, Any], dict[str, Any]] | None:
             mode = str(raw.get("mode") or "").strip().lower()
+            if kind == "embedding" and mode == "local":
+                return _resolve_local_embedding(raw)
+            if kind == "rerank" and mode == "local":
+                return _resolve_local_rerank(raw)
             if kind == "embedding" and mode != "provider":
                 return _fallback_embedding()
             if kind == "rerank" and mode != "provider":
@@ -711,6 +988,7 @@ class AgentCenterService:
                 "provider_name": public["provider_name"],
                 "provider_type": public["provider_type"],
                 "model_name": model_name,
+                "model_type": model_type,
                 "provider": runtime_provider,
                 "model": model_name,
             }
@@ -750,6 +1028,22 @@ class AgentCenterService:
             },
             warnings,
         )
+
+    def _resolve_local_model_path(self, raw_path: str) -> str:
+        text = str(raw_path or "").strip()
+        if not text:
+            return text
+        candidate = Path(text).expanduser()
+        if candidate.is_absolute():
+            return str(candidate.resolve())
+        if self.local_models_root is None:
+            return str(candidate)
+        parts = [part for part in candidate.parts if part and part != "."]
+        if not parts:
+            return str(self.local_models_root)
+        if parts[0] == self.local_models_root.name:
+            return str((self.local_models_root.parent / Path(*parts)).resolve())
+        return str((self.local_models_root / Path(*parts)).resolve())
 
     def _stored_runtime_provider(self, payload: dict[str, Any]) -> dict[str, Any] | None:
         provider_id = str(payload.get("id") or "").strip()

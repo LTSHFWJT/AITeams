@@ -610,7 +610,6 @@ class LangGraphTeamCompiler:
             "id": knowledge_base.get("id"),
             "key": knowledge_base.get("key"),
             "name": knowledge_base.get("name"),
-            "description": knowledge_base.get("description"),
             "config": dict(knowledge_base.get("config_json") or {}),
             "status": knowledge_base.get("status"),
         }

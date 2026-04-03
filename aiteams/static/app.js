@@ -102,9 +102,10 @@ const state = {
   uiMetadata: null,
   recentRuns: [],
   providers: [],
+  localModels: [],
   retrievalSettings: {
     settings: {
-      embedding: { mode: "hash" },
+      embedding: { mode: "disabled" },
       rerank: { mode: "disabled" },
     },
     warnings: [],
@@ -117,6 +118,13 @@ const state = {
     offset: 0,
     query: "",
     providerType: "",
+  },
+  localModelPage: {
+    items: [],
+    total: 0,
+    limit: 10,
+    offset: 0,
+    query: "",
   },
   plugins: [],
   builtinPlugins: [],
@@ -151,6 +159,12 @@ const state = {
     offset: 0,
   },
   knowledgeBases: [],
+  knowledgeBasePage: {
+    items: [],
+    total: 0,
+    limit: 10,
+    offset: 0,
+  },
   reviewPolicies: [],
   agentTemplates: [],
   agentTemplatePage: {
@@ -194,6 +208,7 @@ const state = {
   activePage: "overview",
   activeNavSection: "overview",
   editingProviderId: null,
+  editingLocalModelId: null,
   editingPluginId: null,
   editingSkillId: null,
   skillModalMode: "import",
@@ -215,14 +230,35 @@ const state = {
   editingStaticMemoryId: null,
   staticMemoryEditorMode: "role",
   editingKnowledgeBaseId: null,
+  localModelUploadFiles: [],
+  localModelUploadDragActive: false,
+  localModelUploadBusy: false,
   editingReviewPolicyId: null,
   editingAgentDefinitionId: null,
   editingAgentTemplateId: null,
   editingTeamDefinitionId: null,
   editingTeamTemplateId: null,
   knowledgeBaseDocuments: [],
-  knowledgeBasePersistedDocumentIds: [],
-  knowledgeBaseBaseConfig: {},
+  knowledgeBasePoolPage: {
+    items: [],
+    total: 0,
+    limit: 8,
+    offset: 0,
+    query: "",
+  },
+  knowledgeBaseDocumentPage: {
+    items: [],
+    total: 0,
+    limit: 8,
+    offset: 0,
+    query: "",
+  },
+  knowledgeBaseDocumentSelection: [],
+  knowledgeBaseDocumentActionBusy: false,
+  knowledgeBaseUploadFiles: [],
+  knowledgeBaseStagedSelection: [],
+  knowledgeBaseUploadDragActive: false,
+  knowledgeBaseUploadBusy: false,
   reviewPolicyBaseSpec: {},
   agentDefinitionBaseSpec: {},
   teamDefinitionBaseSpec: {},
@@ -243,8 +279,10 @@ const state = {
     providerTypes: false,
     uiMetadata: false,
     providerRefs: false,
+    localModelRefs: false,
     retrievalSettings: false,
     providerPage: false,
+    localModelPage: false,
     builtinPluginRefs: false,
     pluginRefs: false,
     pluginPage: false,
@@ -255,6 +293,7 @@ const state = {
     staticMemoryRefs: false,
     staticMemoryPage: false,
     knowledgeBaseRefs: false,
+    knowledgeBasePage: false,
     reviewPolicyRefs: false,
     agentTemplateRefs: false,
     agentTemplatePage: false,
@@ -275,10 +314,14 @@ const state = {
   },
 };
 
+const DEFAULT_LOCAL_EMBEDDING_MODEL = "BAAI/bge-m3";
+const DEFAULT_LOCAL_RERANK_MODEL = "BAAI/bge-reranker-v2-m3";
+
 const PAGE_SECTIONS = {
   overview: "overview",
   providers: "resources",
-  "retrieval-config": "resources",
+  "local-models": "resources",
+  "retrieval-config": "config",
   plugins: "resources",
   skills: "resources",
   "responsibility-specs": "resources",
@@ -295,6 +338,12 @@ const MODEL_TYPE_LABELS = {
   chat: "\u804a\u5929",
   embedding: "\u5d4c\u5165",
   rerank: "\u91cd\u6392",
+};
+
+const LOCAL_MODEL_TYPE_LABELS = {
+  Embed: "Embed",
+  Rerank: "Rerank",
+  Chat: "Chat",
 };
 
 const STATIC_MEMORY_MODE_CONFIG = {
@@ -341,16 +390,47 @@ const providerOpenCreate = document.querySelector("#provider-open-create");
 const providerList = document.querySelector("#provider-list");
 const providerPaginationMeta = document.querySelector("#provider-pagination-meta");
 const providerResult = document.querySelector("#provider-result");
+const localModelForm = document.querySelector("#local-model-form");
+const localModelName = document.querySelector("#local-model-name");
+const localModelType = document.querySelector("#local-model-type");
+const localModelPath = document.querySelector("#local-model-path");
+const localModelOpenCreate = document.querySelector("#local-model-open-create");
+const localModelPageSize = document.querySelector("#local-model-page-size");
+const localModelList = document.querySelector("#local-model-list");
+const localModelPaginationMeta = document.querySelector("#local-model-pagination-meta");
+const localModelResult = document.querySelector("#local-model-result");
+const localModelModal = document.querySelector("#local-model-modal");
+const localModelModalTitle = document.querySelector("#local-model-modal-title");
+const localModelModalCloseButtons = Array.from(document.querySelectorAll("[data-local-model-modal-close]"));
+const localModelCancel = document.querySelector("#local-model-cancel");
+const localModelFolderInput = document.querySelector("#local-model-folder-input");
+const localModelUploadFolderButton = document.querySelector("#local-model-upload-folder");
+const localModelDropzone = document.querySelector("#local-model-dropzone");
+const localModelUploadSelection = document.querySelector("#local-model-upload-selection");
+const localModelModalResult = document.querySelector("#local-model-modal-result");
+const localModelSave = document.querySelector("#local-model-save");
 const retrievalSettingsForm = document.querySelector("#retrieval-settings-form");
 const retrievalSummary = document.querySelector("#retrieval-summary");
 const retrievalEmbeddingMode = document.querySelector("#retrieval-embedding-mode");
+const retrievalEmbeddingFields = document.querySelector("#retrieval-embedding-fields");
+const retrievalEmbeddingProviderWrap = document.querySelector("#retrieval-embedding-provider-wrap");
 const retrievalEmbeddingProvider = document.querySelector("#retrieval-embedding-provider");
+const retrievalEmbeddingModelWrap = document.querySelector("#retrieval-embedding-model-wrap");
 const retrievalEmbeddingModel = document.querySelector("#retrieval-embedding-model");
+const retrievalEmbeddingLocalModelWrap = document.querySelector("#retrieval-embedding-local-model-wrap");
+const retrievalEmbeddingLocalModel = document.querySelector("#retrieval-embedding-local-model");
 const retrievalRerankMode = document.querySelector("#retrieval-rerank-mode");
+const retrievalRerankFields = document.querySelector("#retrieval-rerank-fields");
+const retrievalRerankProviderWrap = document.querySelector("#retrieval-rerank-provider-wrap");
 const retrievalRerankProvider = document.querySelector("#retrieval-rerank-provider");
+const retrievalRerankModelWrap = document.querySelector("#retrieval-rerank-model-wrap");
 const retrievalRerankModel = document.querySelector("#retrieval-rerank-model");
+const retrievalRerankLocalModelWrap = document.querySelector("#retrieval-rerank-local-model-wrap");
+const retrievalRerankLocalModel = document.querySelector("#retrieval-rerank-local-model");
 const retrievalSettingsRefresh = document.querySelector("#retrieval-settings-refresh");
 const retrievalSettingsResult = document.querySelector("#retrieval-settings-result");
+let knowledgeBasePoolQueryTimer = 0;
+let knowledgeBaseDocumentQueryTimer = 0;
 const providerModal = document.querySelector("#provider-modal");
 const providerModalTitle = document.querySelector("#provider-modal-title");
 const providerModalCloseButtons = Array.from(document.querySelectorAll("[data-provider-modal-close]"));
@@ -404,10 +484,6 @@ const skillOpenCreate = document.querySelector("#skill-open-create");
 const skillManagementSkillsView = document.querySelector("#skill-management-skills-view");
 const skillManagementGroupsView = document.querySelector("#skill-management-groups-view");
 const skillGroupOpenManageInline = document.querySelector("#skill-group-open-manage-inline");
-const skillSearchForm = document.querySelector("#skill-search-form");
-const skillSearchInput = document.querySelector("#skill-search-input");
-const skillSearchReset = document.querySelector("#skill-search-reset");
-const skillGroupList = document.querySelector("#skill-group-list");
 const skillGroupPageSize = document.querySelector("#skill-group-page-size");
 const skillGroupPaginationMeta = document.querySelector("#skill-group-pagination-meta");
 const skillPageSize = document.querySelector("#skill-page-size");
@@ -474,16 +550,36 @@ const staticMemoryDescription = document.querySelector("#static-memory-descripti
 const staticMemorySystemPrompt = document.querySelector("#static-memory-system-prompt");
 const staticMemoryCancel = document.querySelector("#static-memory-cancel");
 
-const knowledgeBaseForm = document.querySelector("#knowledge-base-form");
-const knowledgeBaseKey = document.querySelector("#knowledge-base-key");
-const knowledgeBaseName = document.querySelector("#knowledge-base-name");
-const knowledgeBaseDescription = document.querySelector("#knowledge-base-description");
-const knowledgeBaseDocumentAdd = document.querySelector("#knowledge-base-document-add");
-const knowledgeBaseDocumentList = document.querySelector("#knowledge-base-document-list");
-const knowledgeBaseDocuments = document.querySelector("#knowledge-base-documents");
-const knowledgeBaseReset = document.querySelector("#knowledge-base-reset");
+const knowledgeBaseOpenCreate = document.querySelector("#knowledge-base-open-create");
+const knowledgeBasePageSize = document.querySelector("#knowledge-base-page-size");
+const knowledgeBasePaginationMeta = document.querySelector("#knowledge-base-pagination-meta");
 const knowledgeBaseList = document.querySelector("#knowledge-base-list");
 const knowledgeBaseResult = document.querySelector("#knowledge-base-result");
+const knowledgeBaseModal = document.querySelector("#knowledge-base-modal");
+const knowledgeBaseModalTitle = document.querySelector("#knowledge-base-modal-title");
+const knowledgeBaseModalCloseButtons = Array.from(document.querySelectorAll("[data-knowledge-base-modal-close]"));
+const knowledgeBaseForm = document.querySelector("#knowledge-base-form");
+const knowledgeBaseName = document.querySelector("#knowledge-base-name");
+const knowledgeBaseFileInput = document.querySelector("#knowledge-base-file-input");
+const knowledgeBaseFolderInput = document.querySelector("#knowledge-base-folder-input");
+const knowledgeBaseDropzone = document.querySelector("#knowledge-base-dropzone");
+const knowledgeBaseUploadFolder = document.querySelector("#knowledge-base-upload-folder");
+const knowledgeBasePoolQuery = document.querySelector("#knowledge-base-pool-query");
+const knowledgeBaseUploadSelection = document.querySelector("#knowledge-base-upload-selection");
+const knowledgeBaseStageSelectAll = document.querySelector("#knowledge-base-stage-select-all");
+const knowledgeBaseStageSelectionActions = document.querySelector("#knowledge-base-stage-selection-actions");
+const knowledgeBaseStageRemove = document.querySelector("#knowledge-base-stage-remove");
+const knowledgeBaseStageMove = document.querySelector("#knowledge-base-stage-move");
+const knowledgeBaseDocumentMoveBack = document.querySelector("#knowledge-base-document-move-back");
+const knowledgeBaseDocumentQuery = document.querySelector("#knowledge-base-document-query");
+const knowledgeBaseDocumentList = document.querySelector("#knowledge-base-document-list");
+const knowledgeDocumentSelectionActions = document.querySelector("#knowledge-document-selection-actions");
+const knowledgeDocumentSelectAll = document.querySelector("#knowledge-document-select-all");
+const knowledgeDocumentEmbedAdd = document.querySelector("#knowledge-document-embed-add");
+const knowledgeDocumentEmbedDelete = document.querySelector("#knowledge-document-embed-delete");
+const knowledgeBaseCancel = document.querySelector("#knowledge-base-cancel");
+const knowledgeBaseSave = document.querySelector("#knowledge-base-save");
+const knowledgeBaseModalResult = document.querySelector("#knowledge-base-modal-result");
 
 const reviewPolicyForm = document.querySelector("#review-policy-form");
 const reviewPolicyKey = document.querySelector("#review-policy-key");
@@ -1983,6 +2079,10 @@ function providerOptionsByModelType(modelType) {
   return state.providers.filter((item) => providerModelsByType(item.id, modelType).length > 0);
 }
 
+function localModelsByType(modelType) {
+  return state.localModels.filter((item) => item.model_type === modelType);
+}
+
 function renderProviderSelect(select, items, selectedValue = "") {
   if (!select) {
     return;
@@ -2015,6 +2115,80 @@ function renderModelSelect(select, models, selectedValue = "") {
     return;
   }
   select.value = models[0]?.name || "";
+}
+
+function retrievalLocalModelOptions(kind, settings = {}, currentValue = "") {
+  const selectedSettings = settings && typeof settings === "object" ? settings : {};
+  const modelType = kind === "rerank" ? "Rerank" : "Embed";
+  const defaultModelName = kind === "rerank" ? DEFAULT_LOCAL_RERANK_MODEL : DEFAULT_LOCAL_EMBEDDING_MODEL;
+  const records = localModelsByType(modelType);
+  const items = records.map((item) => ({
+    value: item.id,
+    label: item.name || item.path_display || item.model_path || item.id,
+  }));
+  let selectedValue = "";
+  let usesFallbackDefault = false;
+  let usesLegacyManual = false;
+  if (selectedSettings.local_model_id && records.some((item) => item.id === selectedSettings.local_model_id)) {
+    selectedValue = selectedSettings.local_model_id;
+  } else if (selectedSettings.model_name) {
+    const matched = records.find((item) =>
+      [item.model_path, item.path_display, item.resolved_path].some((value) => value && value === selectedSettings.model_name),
+    );
+    if (matched) {
+      selectedValue = matched.id;
+    } else {
+      const manualValue = `manual:${selectedSettings.model_name}`;
+      items.unshift({
+        value: manualValue,
+        label: selectedSettings.model_label || selectedSettings.model_name,
+      });
+      selectedValue = manualValue;
+      usesLegacyManual = true;
+    }
+  }
+  if (!items.length) {
+    const defaultValue = `manual:${defaultModelName}`;
+    items.push({
+      value: defaultValue,
+      label: defaultModelName,
+    });
+    if (!selectedValue) {
+      selectedValue = defaultValue;
+    }
+    usesFallbackDefault = true;
+  }
+  if (currentValue && items.some((item) => item.value === currentValue)) {
+    selectedValue = currentValue;
+  }
+  if (!selectedValue) {
+    selectedValue = items[0]?.value || "";
+  }
+  return {
+    items,
+    selectedValue,
+    hasManaged: records.length > 0,
+    managedCount: records.length,
+    usesFallbackDefault,
+    usesLegacyManual,
+  };
+}
+
+function parseRetrievalLocalModelSelection(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return { local_model_id: "", model_name: "" };
+  }
+  if (raw.startsWith("manual:")) {
+    return {
+      local_model_id: "",
+      model_name: raw.slice("manual:".length),
+    };
+  }
+  return {
+    local_model_id: raw,
+    model_name: "",
+  };
 }
 
 function renderSingleSelect(select, items, selectedValue = "", fallbackLabel = "暂无数据", options = {}) {
@@ -2332,7 +2506,7 @@ function populateAgentDefinitionReferenceOptions(includeStaticMemoryRefs = []) {
   );
   renderSingleSelect(
     agentDefinitionKnowledgeBases,
-    state.knowledgeBases.map((item) => ({ value: item.id, label: `${item.name || item.key || item.id} / ${item.key || item.id}` })),
+    state.knowledgeBases.map((item) => ({ value: item.id, label: `${item.name || item.id}` })),
     agentDefinitionKnowledgeBases?.value || "",
     "暂无知识库",
     { allowBlank: true, blankLabel: "不选择" },
@@ -3301,59 +3475,117 @@ function providerPreset(type = providerType.value) {
 }
 
 function retrievalSettingsSnapshot() {
-  return state.retrievalSettings?.settings || { embedding: { mode: "hash" }, rerank: { mode: "disabled" } };
+  return state.retrievalSettings?.settings || { embedding: { mode: "disabled" }, rerank: { mode: "disabled" } };
+}
+
+function selectCurrentLabel(select) {
+  if (!select) {
+    return "";
+  }
+  const option = select.options?.[select.selectedIndex >= 0 ? select.selectedIndex : 0] || null;
+  return String(option?.textContent || option?.label || "").trim();
+}
+
+function setRetrievalFieldVisibility(wrap, field, visible) {
+  if (wrap) {
+    wrap.classList.toggle("hidden", !visible);
+    wrap.hidden = !visible;
+    wrap.style.display = visible ? "" : "none";
+    wrap.setAttribute("aria-hidden", visible ? "false" : "true");
+  }
+  if (field) {
+    field.hidden = !visible;
+    field.setAttribute("aria-hidden", visible ? "false" : "true");
+  }
+}
+
+function setRetrievalFieldGroupVisibility(group, visible) {
+  if (!group) {
+    return;
+  }
+  group.classList.toggle("hidden", !visible);
+  group.hidden = !visible;
+  group.style.display = visible ? "" : "none";
+  group.setAttribute("aria-hidden", visible ? "false" : "true");
+}
+
+function syncRetrievalDynamicBlock(kind) {
+  const settings = retrievalSettingsSnapshot();
+  const isEmbedding = kind === "embedding";
+  const modeSelect = isEmbedding ? retrievalEmbeddingMode : retrievalRerankMode;
+  const fieldsGroup = isEmbedding ? retrievalEmbeddingFields : retrievalRerankFields;
+  const providerWrap = isEmbedding ? retrievalEmbeddingProviderWrap : retrievalRerankProviderWrap;
+  const providerSelect = isEmbedding ? retrievalEmbeddingProvider : retrievalRerankProvider;
+  const modelWrap = isEmbedding ? retrievalEmbeddingModelWrap : retrievalRerankModelWrap;
+  const modelSelect = isEmbedding ? retrievalEmbeddingModel : retrievalRerankModel;
+  const localWrap = isEmbedding ? retrievalEmbeddingLocalModelWrap : retrievalRerankLocalModelWrap;
+  const localSelect = isEmbedding ? retrievalEmbeddingLocalModel : retrievalRerankLocalModel;
+  const providerModelType = isEmbedding ? "embedding" : "rerank";
+  const localKind = isEmbedding ? "embedding" : "rerank";
+  const localTypeLabel = isEmbedding ? "Embed" : "Rerank";
+  const mode = modeSelect?.value || "disabled";
+  const currentSettings = (isEmbedding ? settings.embedding : settings.rerank) || {};
+
+  const providerItems = providerOptionsByModelType(providerModelType);
+  renderProviderSelect(providerSelect, providerItems, providerSelect?.value || currentSettings.provider_id || "");
+  const providerModels = providerModelsByType(providerSelect?.value || "", providerModelType);
+  renderModelSelect(modelSelect, providerModels, modelSelect?.value || currentSettings.model_name || "");
+
+  const localOptions = retrievalLocalModelOptions(localKind, currentSettings, localSelect?.value || "");
+  renderSingleSelect(
+    localSelect,
+    localOptions.items,
+    localOptions.selectedValue,
+    `暂无本地 ${localTypeLabel} 模型`,
+  );
+
+  const providerEnabled = mode === "provider";
+  const localEnabled = mode === "local";
+  setRetrievalFieldGroupVisibility(fieldsGroup, providerEnabled || localEnabled);
+  setRetrievalFieldVisibility(providerWrap, providerSelect, providerEnabled);
+  setRetrievalFieldVisibility(modelWrap, modelSelect, providerEnabled);
+  setRetrievalFieldVisibility(localWrap, localSelect, localEnabled);
+
+  if (providerSelect) {
+    providerSelect.disabled = !providerEnabled || !providerItems.length;
+  }
+  if (modelSelect) {
+    modelSelect.disabled = !providerEnabled || !providerModels.length;
+  }
+  if (localSelect) {
+    localSelect.disabled = !localEnabled;
+  }
+}
+
+function syncRetrievalDynamicForm() {
+  syncRetrievalDynamicBlock("embedding");
+  syncRetrievalDynamicBlock("rerank");
+  renderRetrievalSummary();
 }
 
 function syncRetrievalProviderOptions() {
-  const settings = retrievalSettingsSnapshot();
-  const embeddingProviders = providerOptionsByModelType("embedding");
-  const rerankProviders = providerOptionsByModelType("rerank");
-  renderProviderSelect(retrievalEmbeddingProvider, embeddingProviders, settings.embedding?.provider_id || "");
-  renderProviderSelect(retrievalRerankProvider, rerankProviders, settings.rerank?.provider_id || "");
-  syncRetrievalModelOptions();
+  syncRetrievalDynamicForm();
 }
 
 function syncRetrievalModelOptions() {
-  const settings = retrievalSettingsSnapshot();
-  renderModelSelect(
-    retrievalEmbeddingModel,
-    providerModelsByType(retrievalEmbeddingProvider?.value || "", "embedding"),
-    settings.embedding?.model_name || "",
-  );
-  renderModelSelect(
-    retrievalRerankModel,
-    providerModelsByType(retrievalRerankProvider?.value || "", "rerank"),
-    settings.rerank?.model_name || "",
-  );
-  const embeddingProviderEnabled = retrievalEmbeddingMode?.value === "provider";
-  const rerankProviderEnabled = retrievalRerankMode?.value === "provider";
-  if (retrievalEmbeddingProvider) {
-    retrievalEmbeddingProvider.disabled = !embeddingProviderEnabled;
-  }
-  if (retrievalEmbeddingModel) {
-    retrievalEmbeddingModel.disabled = !embeddingProviderEnabled;
-  }
-  if (retrievalRerankProvider) {
-    retrievalRerankProvider.disabled = !rerankProviderEnabled;
-  }
-  if (retrievalRerankModel) {
-    retrievalRerankModel.disabled = !rerankProviderEnabled;
-  }
+  syncRetrievalDynamicForm();
 }
 
 function fillRetrievalSettingsForm() {
   const settings = retrievalSettingsSnapshot();
   if (retrievalEmbeddingMode) {
-    retrievalEmbeddingMode.value = settings.embedding?.mode || "hash";
+    retrievalEmbeddingMode.value = settings.embedding?.mode || "disabled";
   }
   if (retrievalRerankMode) {
     retrievalRerankMode.value = settings.rerank?.mode || "disabled";
   }
-  syncRetrievalProviderOptions();
+  syncRetrievalDynamicForm();
   renderRetrievalSettings();
 }
 
 function buildRetrievalPayloadFromForm() {
+  const embeddingLocalSelection = parseRetrievalLocalModelSelection(retrievalEmbeddingLocalModel?.value || "");
+  const rerankLocalSelection = parseRetrievalLocalModelSelection(retrievalRerankLocalModel?.value || "");
   return {
     embedding:
       retrievalEmbeddingMode.value === "provider"
@@ -3362,7 +3594,17 @@ function buildRetrievalPayloadFromForm() {
             provider_id: retrievalEmbeddingProvider.value,
             model_name: retrievalEmbeddingModel.value,
           }
-        : { mode: "hash" },
+        : retrievalEmbeddingMode.value === "local"
+          ? embeddingLocalSelection.local_model_id
+            ? {
+                mode: "local",
+                local_model_id: embeddingLocalSelection.local_model_id,
+              }
+            : {
+                mode: "local",
+                model_name: embeddingLocalSelection.model_name || DEFAULT_LOCAL_EMBEDDING_MODEL,
+              }
+        : { mode: "disabled" },
     rerank:
       retrievalRerankMode.value === "provider"
         ? {
@@ -3370,21 +3612,78 @@ function buildRetrievalPayloadFromForm() {
             provider_id: retrievalRerankProvider.value,
             model_name: retrievalRerankModel.value,
           }
+        : retrievalRerankMode.value === "local"
+          ? rerankLocalSelection.local_model_id
+            ? {
+                mode: "local",
+                local_model_id: rerankLocalSelection.local_model_id,
+              }
+            : {
+                mode: "local",
+                model_name: rerankLocalSelection.model_name || DEFAULT_LOCAL_RERANK_MODEL,
+              }
         : { mode: "disabled" },
   };
 }
 
-function renderRetrievalSettings() {
+function retrievalSummarySnapshot() {
   const settings = retrievalSettingsSnapshot();
-  const warnings = state.retrievalSettings?.warnings || [];
+  const embeddingMode = retrievalEmbeddingMode?.value || settings.embedding?.mode || "disabled";
+  const rerankMode = retrievalRerankMode?.value || settings.rerank?.mode || "disabled";
+  const embeddingProvider =
+    state.providers.find((item) => item.id === (retrievalEmbeddingProvider?.value || "")) || null;
+  const rerankProvider =
+    state.providers.find((item) => item.id === (retrievalRerankProvider?.value || "")) || null;
+  const embeddingLocalSelection = parseRetrievalLocalModelSelection(retrievalEmbeddingLocalModel?.value || "");
+  const rerankLocalSelection = parseRetrievalLocalModelSelection(retrievalRerankLocalModel?.value || "");
+  return {
+    embedding:
+      embeddingMode === "provider"
+        ? {
+            mode: "provider",
+            provider_id: retrievalEmbeddingProvider?.value || settings.embedding?.provider_id || "",
+            provider_name: embeddingProvider?.name || settings.embedding?.provider_name || "",
+            model_name: retrievalEmbeddingModel?.value || settings.embedding?.model_name || "",
+          }
+        : embeddingMode === "local"
+          ? {
+              mode: "local",
+              model_name: embeddingLocalSelection.model_name || settings.embedding?.model_name || DEFAULT_LOCAL_EMBEDDING_MODEL,
+              model_label: selectCurrentLabel(retrievalEmbeddingLocalModel) || settings.embedding?.model_label || "",
+            }
+          : { mode: "disabled" },
+    rerank:
+      rerankMode === "provider"
+        ? {
+            mode: "provider",
+            provider_id: retrievalRerankProvider?.value || settings.rerank?.provider_id || "",
+            provider_name: rerankProvider?.name || settings.rerank?.provider_name || "",
+            model_name: retrievalRerankModel?.value || settings.rerank?.model_name || "",
+          }
+        : rerankMode === "local"
+          ? {
+              mode: "local",
+              model_name: rerankLocalSelection.model_name || settings.rerank?.model_name || DEFAULT_LOCAL_RERANK_MODEL,
+              model_label: selectCurrentLabel(retrievalRerankLocalModel) || settings.rerank?.model_label || "",
+            }
+          : { mode: "disabled" },
+  };
+}
+
+function renderRetrievalSummary() {
+  const settings = retrievalSummarySnapshot();
   if (retrievalSummary) {
     const embeddingLabel =
       settings.embedding?.mode === "provider"
         ? `${settings.embedding.provider_name || settings.embedding.provider_id || "-"} / ${settings.embedding.model_name || "-"}`
-        : "HashEmbedder";
+        : settings.embedding?.mode === "local"
+          ? `Local HF / ${settings.embedding.model_label || settings.embedding.model_name || DEFAULT_LOCAL_EMBEDDING_MODEL}`
+        : "关闭";
     const rerankLabel =
       settings.rerank?.mode === "provider"
         ? `${settings.rerank.provider_name || settings.rerank.provider_id || "-"} / ${settings.rerank.model_name || "-"}`
+        : settings.rerank?.mode === "local"
+          ? `Local Flag / ${settings.rerank.model_label || settings.rerank.model_name || DEFAULT_LOCAL_RERANK_MODEL}`
         : "关闭";
     retrievalSummary.innerHTML = [
       chip("Embedding", embeddingLabel),
@@ -3392,11 +3691,242 @@ function renderRetrievalSettings() {
       chip("更新时间", state.retrievalSettings?.updated_at || "-"),
     ].join("");
   }
+}
+
+function renderRetrievalSettings() {
+  const warnings = state.retrievalSettings?.warnings || [];
+  renderRetrievalSummary();
   if (warnings.length) {
     showResult(retrievalSettingsResult, { warnings });
   } else {
     hideResult(retrievalSettingsResult);
   }
+}
+
+function buildRetrievalSaveResult(payload) {
+  const runtimeApplied = payload?.runtime_applied || payload?.applied || null;
+  const knowledgeApplied = payload?.knowledge_applied || null;
+  const settings = payload?.settings || { embedding: { mode: "disabled" }, rerank: { mode: "disabled" } };
+  const usesLocal = settings.embedding?.mode === "local" || settings.rerank?.mode === "local";
+  const result = {
+    message: "检索配置已保存",
+    settings,
+  };
+  if (knowledgeApplied) {
+    result.knowledge_applied = knowledgeApplied;
+  }
+  if (runtimeApplied) {
+    result.runtime_memory_applied = runtimeApplied;
+  }
+  if (usesLocal) {
+    result.note =
+      "知识库检索以 knowledge_applied 为准；runtime_memory_applied 是运行时记忆模块结果，当前本地模式不会在该模块启用。";
+  }
+  return result;
+}
+
+function openLocalModelModal() {
+  localModelModal?.classList.remove("hidden");
+}
+
+function closeLocalModelModal() {
+  localModelModal?.classList.add("hidden");
+  hideResult(localModelModalResult);
+}
+
+function inferUploadSourceName(entries) {
+  const files = normalizeSkillImportEntries(entries);
+  if (!files.length) {
+    return "";
+  }
+  const roots = Array.from(new Set(files.map((item) => item.path.split("/")[0] || item.path)));
+  const hasNested = files.some((item) => item.path.includes("/"));
+  if (hasNested && roots.length === 1) {
+    return roots[0];
+  }
+  return roots[0] || fileNameFromPath(files[0].path || "");
+}
+
+function syncLocalModelPathPreview() {
+  if (!localModelPath) {
+    return;
+  }
+  const current =
+    state.localModels.find((item) => item.id === state.editingLocalModelId) ||
+    state.localModelPage.items.find((item) => item.id === state.editingLocalModelId) ||
+    null;
+  const sourceName = inferUploadSourceName(state.localModelUploadFiles);
+  localModelPath.value = sourceName ? `models/${sourceName}` : current?.model_path || "";
+}
+
+function renderLocalModelUploadSelection() {
+  localModelDropzone?.classList.toggle("drag-active", Boolean(state.localModelUploadDragActive));
+  const files = Array.isArray(state.localModelUploadFiles) ? state.localModelUploadFiles : [];
+  if (!localModelUploadSelection) {
+    syncLocalModelPathPreview();
+    return;
+  }
+  if (!files.length) {
+    localModelUploadSelection.classList.add("empty");
+    localModelUploadSelection.innerHTML = '<span class="skill-import-selection-placeholder">未选择待上传模型文件</span>';
+    syncLocalModelPathPreview();
+    return;
+  }
+  const roots = Array.from(new Set(files.map((item) => item.path.split("/")[0] || item.path))).slice(0, 3);
+  const totalBytes = files.reduce((sum, item) => sum + Number(item.file?.size || 0), 0);
+  const suffix = roots.length < new Set(files.map((item) => item.path.split("/")[0] || item.path)).size ? " ..." : "";
+  localModelUploadSelection.classList.remove("empty");
+  localModelUploadSelection.innerHTML = `
+    <strong title="${escapeAttribute(roots.join(" / ") + suffix)}">${escapeHtml(roots.join(" / ") + suffix)}</strong>
+    <div class="skill-import-selection-meta">
+      <span class="skill-import-selection-stat">${escapeHtml(`${files.length} 个文件`)}</span>
+      <span class="skill-import-selection-stat">${escapeHtml(formatFileSize(totalBytes))}</span>
+    </div>
+  `;
+  syncLocalModelPathPreview();
+}
+
+function resetLocalModelUploadState() {
+  state.localModelUploadFiles = [];
+  state.localModelUploadDragActive = false;
+  if (localModelFolderInput) {
+    localModelFolderInput.value = "";
+  }
+  setLocalModelUploadBusy(false);
+  renderLocalModelUploadSelection();
+}
+
+function setLocalModelUploadFiles(entries, { append = false } = {}) {
+  const normalized = normalizeSkillImportEntries(entries);
+  state.localModelUploadFiles = append
+    ? normalizeSkillImportEntries([...(state.localModelUploadFiles || []), ...normalized])
+    : normalized;
+  state.localModelUploadDragActive = false;
+  hideResult(localModelModalResult);
+  renderLocalModelUploadSelection();
+}
+
+function setLocalModelUploadBusy(busy) {
+  state.localModelUploadBusy = Boolean(busy);
+  localModelDropzone?.classList.toggle("busy", state.localModelUploadBusy);
+  if (localModelFolderInput) {
+    localModelFolderInput.disabled = state.localModelUploadBusy;
+  }
+  if (localModelUploadFolderButton) {
+    localModelUploadFolderButton.disabled = state.localModelUploadBusy;
+  }
+  if (localModelSave) {
+    localModelSave.disabled = state.localModelUploadBusy;
+  }
+}
+
+async function buildLocalModelUploadPayload() {
+  const files = normalizeSkillImportEntries(state.localModelUploadFiles);
+  if (!files.length) {
+    return null;
+  }
+  return {
+    source_name: inferUploadSourceName(files),
+    files: await Promise.all(
+      files.map(async (item) => ({
+        path: item.path,
+        content_base64: await readFileAsBase64(item.file),
+      })),
+    ),
+  };
+}
+
+function resetLocalModelForm({ openModal = false } = {}) {
+  state.editingLocalModelId = null;
+  if (localModelName) {
+    localModelName.value = "";
+  }
+  if (localModelType) {
+    localModelType.value = "Embed";
+  }
+  if (localModelPath) {
+    localModelPath.value = "";
+  }
+  if (localModelModalTitle) {
+    localModelModalTitle.textContent = "新增本地模型";
+  }
+  resetLocalModelUploadState();
+  hideResult(localModelResult);
+  hideResult(localModelModalResult);
+  renderLocalModels();
+  if (openModal) {
+    openLocalModelModal();
+  }
+}
+
+function fillLocalModelForm(item, { openModal = false } = {}) {
+  state.editingLocalModelId = item.id || null;
+  if (localModelName) {
+    localModelName.value = item.name || "";
+  }
+  if (localModelType) {
+    localModelType.value = item.model_type || "Embed";
+  }
+  if (localModelPath) {
+    localModelPath.value = item.model_path || "";
+  }
+  if (localModelModalTitle) {
+    localModelModalTitle.textContent = "编辑本地模型";
+  }
+  resetLocalModelUploadState();
+  if (localModelPath) {
+    localModelPath.value = item.model_path || "";
+  }
+  hideResult(localModelResult);
+  hideResult(localModelModalResult);
+  renderLocalModels();
+  if (openModal) {
+    openLocalModelModal();
+  }
+}
+
+function buildLocalModelPayloadFromForm() {
+  return {
+    id: state.editingLocalModelId,
+    name: localModelName?.value?.trim() || "",
+    model_type: localModelType?.value || "Embed",
+    model_path: localModelPath?.value?.trim() || "",
+  };
+}
+
+function renderLocalModels() {
+  if (!localModelList) {
+    return;
+  }
+  localModelList.innerHTML = state.localModelPage.items.length
+    ? state.localModelPage.items
+        .map((item) => {
+          const updatedAt = formatTeamChatTime(item.updated_at) || item.updated_at || "-";
+          const pathText = item.path_display || item.model_path || "-";
+          return `
+            <article class="provider-row local-model-row${item.id === state.editingLocalModelId ? " active" : ""}">
+              <div class="provider-main">
+                <strong title="${escapeAttribute(item.name || item.id || "-")}">${escapeHtml(item.name || item.id || "-")}</strong>
+              </div>
+              <div class="provider-cell">
+                <strong>${escapeHtml(LOCAL_MODEL_TYPE_LABELS[item.model_type] || item.model_type || "-")}</strong>
+              </div>
+              <div class="provider-cell">
+                <strong title="${escapeAttribute(pathText)}">${escapeHtml(pathText)}</strong>
+              </div>
+              <div class="provider-cell">
+                <strong title="${escapeAttribute(item.updated_at || "-")}">${escapeHtml(updatedAt)}</strong>
+              </div>
+              <div class="provider-row-actions">
+                <button type="button" data-local-model-edit="${escapeAttribute(item.id || "")}">编辑</button>
+                <button type="button" class="ghost warn" data-local-model-delete="${escapeAttribute(item.id || "")}">删除</button>
+              </div>
+            </article>
+          `;
+        })
+        .join("")
+    : '<div class="detail empty compact-detail"><strong>暂无本地模型</strong><p>先上传一个本地模型文件夹。</p></div>';
+  renderOffsetPagination(state.localModelPage, localModelPaginationMeta, "local-model-page");
 }
 
 function openProviderModal() {
@@ -4490,7 +5020,6 @@ function renderSkillManagementView() {
   const isSkillsView = state.skillManagementView !== "groups";
   skillManagementSkillsView?.classList.toggle("hidden", !isSkillsView);
   skillManagementGroupsView?.classList.toggle("hidden", isSkillsView);
-  skillSearchForm?.classList.toggle("hidden", !isSkillsView);
   skillViewSkills?.classList.toggle("active", isSkillsView);
   skillViewSkills?.classList.toggle("ghost", !isSkillsView);
   skillViewGroups?.classList.toggle("active", !isSkillsView);
@@ -4585,10 +5114,9 @@ function renderSkillGroupManagementList() {
             <article class="provider-row skill-group-management-row${active ? " active" : ""}">
               <div class="provider-main">
                 <strong title="${escapeAttribute(group.name || group.key || group.id || "-")}">${escapeHtml(group.name || group.key || group.id || "-")}</strong>
-                <span title="${escapeAttribute(group.key || group.id || "-")}">${escapeHtml(group.key || group.id || "-")}</span>
               </div>
               <div class="provider-cell">
-                <span title="${escapeAttribute(group.description || "未填写分组简介")}">${escapeHtml(group.description || "未填写分组简介")}</span>
+                <strong title="${escapeAttribute(group.description || "未填写分组简介")}">${escapeHtml(group.description || "未填写分组简介")}</strong>
               </div>
               <div class="provider-cell">
                 <strong>${escapeHtml(countText)}</strong>
@@ -4655,6 +5183,7 @@ function fillTeamTemplateForm(template) {
 function renderOverview() {
   const items = [
     ["Provider", state.summary.provider_profile_count || 0],
+    ["本地模型", state.summary.local_model_count || 0],
     ["插件", state.summary.plugin_count || 0],
     ["技能", state.summary.skill_count || 0],
     ["角色管理", state.summary.static_memory_count || 0],
@@ -4804,33 +5333,6 @@ function renderPlugins() {
   renderOffsetPagination(state.pluginPage, pluginPaginationMeta, "plugin-page");
 }
 
-function renderSkillGroupFilters() {
-  if (!skillGroupList) {
-    return;
-  }
-  const totalCount = state.skills.length;
-  const groups = Array.isArray(state.skillGroups) ? state.skillGroups : [];
-  const currentGroupKey = state.skillPage.groupKey || "";
-  const allButtons = [
-    { key: "", name: "全部", count: totalCount },
-    ...groups.map((group) => ({ key: group.key || "", name: group.name || "未分组", count: group.count || 0 })),
-  ];
-  skillGroupList.innerHTML = allButtons
-    .map(
-      (group) => `
-        <button
-          type="button"
-          class="skill-group-chip${group.key === currentGroupKey ? " active" : ""}"
-          data-skill-group="${escapeAttribute(group.key)}"
-        >
-          <strong>${escapeHtml(group.name)}</strong>
-          <span>${escapeHtml(group.count || 0)}</span>
-        </button>
-      `,
-    )
-    .join("");
-}
-
 function renderSkills() {
   if (!skillList) {
     return;
@@ -4840,21 +5342,17 @@ function renderSkills() {
         .map((item) => {
           const groups = skillGroupsForItem(item);
           const groupNameSummary = groups.length ? groups.map((entry) => entry.name || entry.key || "-").join("、") : "未分组";
-          const groupKeySummary = groups.length ? groups.map((entry) => entry.key || entry.id || "-").join(" / ") : "可在导入时归组";
           const description = String(item.description || "").trim() || "暂无简介";
           return `
             <article class="provider-row skill-management-row">
               <div class="provider-main">
                 <strong title="${escapeAttribute(item.name || item.id || "-")}">${escapeHtml(item.name || item.id || "-")}</strong>
-                <span title="${escapeAttribute(item.storage_path || item.id || "-")}">${escapeHtml(item.storage_path || item.id || "-")}</span>
               </div>
               <div class="provider-cell">
                 <strong title="${escapeAttribute(groupNameSummary)}">${escapeHtml(groupNameSummary)}</strong>
-                <span title="${escapeAttribute(groupKeySummary)}">${escapeHtml(groupKeySummary)}</span>
               </div>
               <div class="provider-cell">
                 <strong title="${escapeAttribute(description)}">${escapeHtml(description)}</strong>
-                <span title="${escapeAttribute(item.description || "")}">${escapeHtml(item.description || "来自 SKILL.md")}</span>
               </div>
               <div class="provider-row-actions skill-row-actions">
                 <button type="button" class="ghost" data-skill-preview="${item.id}">预览</button>
@@ -5872,142 +6370,835 @@ function renderStaticMemories() {
   renderOffsetPagination(state.staticMemoryPage, staticMemoryPaginationMeta, "static-memory-page");
 }
 
-function knowledgeBaseDocumentsValue() {
-  try {
-    const parsed = safeParseJson(knowledgeBaseDocuments?.value, []);
-    return Array.isArray(parsed) ? parsed.filter((item) => item && typeof item === "object") : [];
-  } catch (error) {
-    return Array.isArray(state.knowledgeBaseDocuments) ? state.knowledgeBaseDocuments.filter((item) => item && typeof item === "object") : [];
+function formatFileSize(value) {
+  const bytes = Number(value || 0);
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "-";
+  }
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+  if (bytes < 1024 * 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+function openKnowledgeBaseModal() {
+  knowledgeBaseModal?.classList.remove("hidden");
+  knowledgeBaseDropzone?.focus();
+}
+
+function closeKnowledgeBaseModal() {
+  knowledgeBaseModal?.classList.add("hidden");
+  hideResult(knowledgeBaseModalResult);
+}
+
+function knowledgeBaseStageItemId(kind, path, extra = "") {
+  return `${kind}:${path}:${extra}`;
+}
+
+function normalizeKnowledgeBaseStagedItems(entries) {
+  return normalizeSkillImportEntries(entries).map((item) => ({
+    id: knowledgeBaseStageItemId("file", item.path, `${item.file?.size || 0}:${item.file?.lastModified || 0}`),
+    kind: "file",
+    file: item.file,
+    path: item.path,
+    title: fileNameFromPath(item.path || item.file?.name || "") || item.path,
+    size: Number(item.file?.size || 0),
+    preview: "",
+    content_text: "",
+    source_label: "本地上传",
+  }));
+}
+
+function buildKnowledgeBaseStagedDocumentItem(document, contentText = "") {
+  const path = String(document?.source_path || document?.title || document?.id || "document").trim();
+  return {
+    id: knowledgeBaseStageItemId("document", path, String(document?.id || "")),
+    kind: "document",
+    file: null,
+    path,
+    title: String(document?.title || fileNameFromPath(path) || document?.id || "文档").trim(),
+    size: Number(document?.file_size || 0),
+    preview: String(document?.preview || "").trim(),
+    content_text: String(contentText || "").trim(),
+    source_label: "从知识库移出",
+  };
+}
+
+function mergeKnowledgeBaseStagedItems(currentItems, nextItems) {
+  const merged = new Map();
+  [...(currentItems || []), ...(nextItems || [])].forEach((item) => {
+    const key = String(item?.path || "").trim().toLowerCase() || String(item?.id || "");
+    if (!key) {
+      return;
+    }
+    if (!merged.has(key) || item.kind === "file") {
+      merged.set(key, item);
+    }
+  });
+  return Array.from(merged.values()).sort((left, right) => String(left.path || "").localeCompare(String(right.path || "")));
+}
+
+function formatKnowledgeDocumentMetaTime(value) {
+  if (value == null || value === "") {
+    return "-";
+  }
+  if (typeof value === "number") {
+    const date = new Date(value);
+    if (!Number.isNaN(date.getTime())) {
+      return date.toLocaleString("zh-CN", {
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+    }
+  }
+  return formatTeamChatTime(value) || String(value || "").trim() || "-";
+}
+
+function knowledgeDocumentTypeLabel(item) {
+  const candidate = String(item?.path || item?.source_path || item?.title || "").trim();
+  const fileName = fileNameFromPath(candidate);
+  const extensionIndex = fileName.lastIndexOf(".");
+  if (extensionIndex > -1 && extensionIndex < fileName.length - 1) {
+    return fileName.slice(extensionIndex + 1).toUpperCase();
+  }
+  if (item?.kind === "document") {
+    return "文档";
+  }
+  return "文件";
+}
+
+function knowledgeDocumentHoverSummary(item) {
+  const timeValue = item?.updated_at || item?.created_at || item?.file?.lastModified || "";
+  return ["时间: " + formatKnowledgeDocumentMetaTime(timeValue), "类型: " + knowledgeDocumentTypeLabel(item), "大小: " + formatFileSize(item?.file_size || item?.size || 0)].join("\n");
+}
+
+function knowledgeDocumentDisplayName(item) {
+  return String(
+    fileNameFromPath(item?.source_path || item?.path || item?.title || "") || item?.title || item?.path || item?.source_path || item?.id || "-",
+  ).trim();
+}
+
+function selectedKnowledgeStageIds() {
+  const active = new Set((state.knowledgeBaseUploadFiles || []).map((item) => item.id).filter(Boolean));
+  return Array.from(new Set(state.knowledgeBaseStagedSelection || [])).filter((item) => active.has(item));
+}
+
+function syncKnowledgeBasePoolFilterControls() {
+  if (knowledgeBasePoolQuery) {
+    knowledgeBasePoolQuery.value = state.knowledgeBasePoolPage.query || "";
   }
 }
 
-function setKnowledgeBaseDocuments(items) {
-  state.knowledgeBaseDocuments = (items || []).map((item) => ({ ...item }));
-  if (knowledgeBaseDocuments) {
-    knowledgeBaseDocuments.value = prettyJson(state.knowledgeBaseDocuments);
+function syncKnowledgeBaseStageSelection() {
+  state.knowledgeBaseStagedSelection = selectedKnowledgeStageIds();
+}
+
+function toggleKnowledgeBaseStageSelection(stageId, selected) {
+  const current = new Set(selectedKnowledgeStageIds());
+  if (selected) {
+    current.add(stageId);
+  } else {
+    current.delete(stageId);
   }
+  state.knowledgeBaseStagedSelection = Array.from(current);
+  renderKnowledgeBaseUploadSelection();
+}
+
+function setAllKnowledgeBaseStageSelections(selected) {
+  state.knowledgeBaseStagedSelection = selected
+    ? (state.knowledgeBaseUploadFiles || []).map((item) => item.id).filter(Boolean)
+    : [];
+  renderKnowledgeBaseUploadSelection();
+}
+
+function renderKnowledgeBaseUploadSelection() {
+  knowledgeBaseDropzone?.classList.toggle("drag-active", Boolean(state.knowledgeBaseUploadDragActive));
+  syncKnowledgeBasePoolFilterControls();
+  syncKnowledgeBaseStageSelection();
+  const files = Array.isArray(state.knowledgeBaseUploadFiles) ? state.knowledgeBaseUploadFiles : [];
+  const selectedIds = new Set(selectedKnowledgeStageIds());
+  const selectedCount = selectedIds.size;
+  const hasFilters = Boolean(String(state.knowledgeBasePoolPage.query || "").trim());
+  const allSelected = files.length > 0 && selectedCount === files.length;
+  const partiallySelected = selectedCount > 0 && selectedCount < files.length;
+  if (knowledgeBaseStageSelectAll) {
+    knowledgeBaseStageSelectAll.checked = allSelected;
+    knowledgeBaseStageSelectAll.indeterminate = partiallySelected;
+    knowledgeBaseStageSelectAll.disabled = state.knowledgeBaseUploadBusy || !files.length;
+  }
+  if (knowledgeBaseStageSelectionActions) {
+    knowledgeBaseStageSelectionActions.classList.toggle("hidden", !selectedCount);
+    knowledgeBaseStageSelectionActions.hidden = !selectedCount;
+  }
+  if (knowledgeBaseStageRemove) {
+    knowledgeBaseStageRemove.disabled = state.knowledgeBaseUploadBusy || !selectedCount;
+  }
+  if (knowledgeBaseStageMove) {
+    knowledgeBaseStageMove.disabled = state.knowledgeBaseUploadBusy || !selectedCount;
+  }
+  if (!knowledgeBaseUploadSelection) {
+    return;
+  }
+  if (!files.length) {
+    knowledgeBaseUploadSelection.classList.add("empty");
+    knowledgeBaseUploadSelection.innerHTML = `<span class="skill-import-selection-placeholder">${escapeHtml(
+      hasFilters ? "当前筛选条件下没有匹配文档。" : "文档池暂无可用文档",
+    )}</span>`;
+    return;
+  }
+  knowledgeBaseUploadSelection.classList.remove("empty");
+  knowledgeBaseUploadSelection.innerHTML = files
+    .map(
+      (item) => `
+        <article
+          class="knowledge-stage-card${selectedIds.has(item.id) ? " active" : ""}"
+          data-knowledge-stage-open="${escapeAttribute(item.id || "")}"
+          title="${escapeAttribute(knowledgeDocumentHoverSummary(item))}"
+        >
+          <div class="knowledge-stage-card-head">
+            <div class="knowledge-document-select-cell">
+              <input
+                type="checkbox"
+                data-knowledge-stage-select="${escapeAttribute(item.id || "")}"
+                ${selectedIds.has(item.id) ? "checked" : ""}
+                ${state.knowledgeBaseUploadBusy ? "disabled" : ""}
+                aria-label="选择文档池文档 ${escapeAttribute(item.title || item.path || "-")}"
+              />
+            </div>
+            <div class="knowledge-stage-card-main">
+              <strong>${escapeHtml(knowledgeDocumentDisplayName(item))}</strong>
+            </div>
+          </div>
+        </article>
+      `,
+    )
+    .join("");
+}
+
+function resetKnowledgeBaseUploadState() {
+  window.clearTimeout(knowledgeBasePoolQueryTimer);
+  state.knowledgeBaseUploadFiles = [];
+  state.knowledgeBaseStagedSelection = [];
+  state.knowledgeBaseUploadDragActive = false;
+  state.knowledgeBaseUploadBusy = false;
+  state.knowledgeBasePoolPage = {
+    ...state.knowledgeBasePoolPage,
+    items: [],
+    total: 0,
+    limit: Math.max(1, Number(state.knowledgeBasePoolPage.limit || 8)),
+    offset: 0,
+    query: "",
+  };
+  if (knowledgeBaseFileInput) {
+    knowledgeBaseFileInput.value = "";
+  }
+  if (knowledgeBaseFolderInput) {
+    knowledgeBaseFolderInput.value = "";
+  }
+  syncKnowledgeBasePoolFilterControls();
+  renderKnowledgeBaseUploadSelection();
+}
+
+function setKnowledgeBasePoolDocuments(items) {
+  state.knowledgeBaseUploadFiles = Array.isArray(items) ? items : [];
+  state.knowledgeBasePoolPage.items = state.knowledgeBaseUploadFiles;
+  syncKnowledgeBaseStageSelection();
+  renderKnowledgeBaseUploadSelection();
+}
+
+function setKnowledgeBaseUploadBusy(busy) {
+  state.knowledgeBaseUploadBusy = Boolean(busy);
+  knowledgeBaseDropzone?.classList.toggle("busy", state.knowledgeBaseUploadBusy);
+  if (knowledgeBaseFileInput) {
+    knowledgeBaseFileInput.disabled = state.knowledgeBaseUploadBusy;
+  }
+  if (knowledgeBaseFolderInput) {
+    knowledgeBaseFolderInput.disabled = state.knowledgeBaseUploadBusy;
+  }
+  if (knowledgeBaseUploadFolder) {
+    knowledgeBaseUploadFolder.disabled = state.knowledgeBaseUploadBusy;
+  }
+  if (knowledgeBasePoolQuery) {
+    knowledgeBasePoolQuery.disabled = state.knowledgeBaseUploadBusy;
+  }
+  if (knowledgeBaseStageSelectAll) {
+    knowledgeBaseStageSelectAll.disabled = state.knowledgeBaseUploadBusy || !(state.knowledgeBaseUploadFiles || []).length;
+  }
+  if (knowledgeBaseStageRemove) {
+    knowledgeBaseStageRemove.disabled = state.knowledgeBaseUploadBusy || !selectedKnowledgeStageIds().length;
+  }
+  if (knowledgeBaseStageMove) {
+    knowledgeBaseStageMove.disabled = state.knowledgeBaseUploadBusy || !selectedKnowledgeStageIds().length;
+  }
+  if (knowledgeBaseDocumentMoveBack) {
+    knowledgeBaseDocumentMoveBack.disabled = state.knowledgeBaseUploadBusy || state.knowledgeBaseDocumentActionBusy || !selectedKnowledgeDocumentIds().length;
+  }
+  if (knowledgeBaseSave) {
+    knowledgeBaseSave.disabled = state.knowledgeBaseUploadBusy;
+  }
+}
+
+async function buildKnowledgePoolUploadPayload(entries) {
+  const files = normalizeSkillImportEntries(entries);
+  if (!files.length) {
+    return null;
+  }
+  return {
+    files: await Promise.all(
+      files.map(async (item) => ({
+        path: item.path,
+        content_base64: await readFileAsBase64(item.file),
+      })),
+    ),
+  };
+}
+
+async function loadKnowledgeBasePoolDocuments() {
+  const params = new URLSearchParams();
+  const query = String(state.knowledgeBasePoolPage.query || "").trim();
+  if (query) {
+    params.set("query", query);
+  }
+  if (state.editingKnowledgeBaseId) {
+    params.set("exclude_knowledge_base_id", state.editingKnowledgeBaseId);
+  }
+  const payload = await api(`/api/agent-center/knowledge-pool-documents${params.toString() ? `?${params.toString()}` : ""}`);
+  setKnowledgeBasePoolDocuments(payload.items || []);
+  state.knowledgeBasePoolPage.total = payload.total || 0;
+  state.knowledgeBasePoolPage.limit = payload.limit || state.knowledgeBasePoolPage.limit;
+  state.knowledgeBasePoolPage.offset = 0;
+  state.knowledgeBasePoolPage.query = payload.filters?.query ?? query;
+}
+
+async function refreshKnowledgeBasePoolDocuments({ resetOffset = false, preferredIds = [] } = {}) {
+  if (resetOffset || (preferredIds || []).length) {
+    state.knowledgeBasePoolPage.offset = 0;
+  }
+  await loadKnowledgeBasePoolDocuments();
+  const active = new Set((state.knowledgeBaseUploadFiles || []).map((item) => item.id).filter(Boolean));
+  const wanted = Array.from(new Set((preferredIds || []).map((item) => String(item || "").trim()).filter(Boolean))).filter((item) => active.has(item));
+  if (wanted.length) {
+    state.knowledgeBaseStagedSelection = wanted;
+  } else {
+    syncKnowledgeBaseStageSelection();
+  }
+  renderKnowledgeBaseUploadSelection();
+}
+
+async function uploadKnowledgeBasePoolEntries(entries) {
+  const payload = await buildKnowledgePoolUploadPayload(entries);
+  if (!payload) {
+    return null;
+  }
+  setKnowledgeBaseUploadBusy(true);
+  hideResult(knowledgeBaseModalResult);
+  try {
+    const result = await api("/api/agent-center/knowledge-pool-documents/upload", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    await refreshKnowledgeBasePoolDocuments({ preferredIds: (result.items || []).map((item) => item.id) });
+    showResult(knowledgeBaseModalResult, buildKnowledgeStageTransferResult("已上传到文档池。", result.items || [], result.skipped || []));
+    return result;
+  } finally {
+    setKnowledgeBaseUploadBusy(false);
+    renderKnowledgeBaseUploadSelection();
+  }
+}
+
+async function deleteKnowledgeBasePoolDocuments(documentIds) {
+  const ids = Array.from(new Set((documentIds || []).map((item) => String(item || "").trim()).filter(Boolean)));
+  if (!ids.length) {
+    throw new Error("请先选择左侧文档池中的文档。");
+  }
+  const result = await api("/api/agent-center/knowledge-pool-documents/actions", {
+    method: "POST",
+    body: JSON.stringify({
+      action: "delete",
+      document_ids: ids,
+    }),
+  });
+  await refreshKnowledgeBasePoolDocuments();
+  showResult(knowledgeBaseModalResult, buildKnowledgeStageTransferResult("已删除文档池中的选中文档。", result.items || [], result.skipped || []));
+  return result;
+}
+
+function selectedKnowledgeDocumentIds() {
+  const active = new Set((state.knowledgeBaseDocuments || []).map((item) => item.id).filter(Boolean));
+  return Array.from(new Set(state.knowledgeBaseDocumentSelection || [])).filter((item) => active.has(item));
+}
+
+function syncKnowledgeBaseDocumentFilterControls() {
+  if (knowledgeBaseDocumentQuery) {
+    knowledgeBaseDocumentQuery.value = state.knowledgeBaseDocumentPage.query || "";
+  }
+}
+
+function syncKnowledgeBaseDocumentSelection() {
+  state.knowledgeBaseDocumentSelection = selectedKnowledgeDocumentIds();
+}
+
+function toggleKnowledgeBaseDocumentSelection(documentId, selected) {
+  const current = new Set(selectedKnowledgeDocumentIds());
+  if (selected) {
+    current.add(documentId);
+  } else {
+    current.delete(documentId);
+  }
+  state.knowledgeBaseDocumentSelection = Array.from(current);
   renderKnowledgeBaseDocuments();
 }
 
-function mutateKnowledgeBaseDocuments(mutator) {
-  const items = knowledgeBaseDocumentsValue().map((item) => ({ ...item }));
-  mutator(items);
-  setKnowledgeBaseDocuments(items);
+function setAllKnowledgeBaseDocumentSelections(selected) {
+  state.knowledgeBaseDocumentSelection = selected ? (state.knowledgeBaseDocuments || []).map((item) => item.id).filter(Boolean) : [];
+  renderKnowledgeBaseDocuments();
+}
+
+function setKnowledgeBaseDocumentActionBusy(busy) {
+  state.knowledgeBaseDocumentActionBusy = Boolean(busy);
+  const disabled = state.knowledgeBaseDocumentActionBusy;
+  const hasSelection = selectedKnowledgeDocumentIds().length > 0;
+  if (knowledgeDocumentSelectionActions) {
+    knowledgeDocumentSelectionActions.classList.toggle("hidden", !hasSelection);
+    knowledgeDocumentSelectionActions.hidden = !hasSelection;
+  }
+  syncKnowledgeDocumentBulkActionLabel();
+  if (knowledgeDocumentEmbedAdd) {
+    knowledgeDocumentEmbedAdd.disabled = disabled || !hasSelection;
+  }
+  if (knowledgeDocumentEmbedDelete) {
+    knowledgeDocumentEmbedDelete.disabled = disabled || !hasSelection;
+  }
+  if (knowledgeDocumentSelectAll) {
+    knowledgeDocumentSelectAll.disabled = disabled || !(state.knowledgeBaseDocuments || []).length;
+  }
+  if (knowledgeBaseDocumentMoveBack) {
+    knowledgeBaseDocumentMoveBack.disabled = disabled || state.knowledgeBaseUploadBusy || !selectedKnowledgeDocumentIds().length;
+  }
+  if (knowledgeBaseDocumentQuery) {
+    knowledgeBaseDocumentQuery.disabled = disabled;
+  }
+}
+
+function classifyKnowledgeDocumentEmbeddingTargets(documentIds) {
+  const documents = Array.isArray(state.knowledgeBaseDocuments) ? state.knowledgeBaseDocuments : [];
+  const index = new Map(documents.map((item) => [item.id, item]));
+  const addIds = [];
+  const reembedIds = [];
+  Array.from(new Set((documentIds || []).map((item) => String(item || "").trim()).filter(Boolean))).forEach((id) => {
+    const document = index.get(id);
+    if (document?.embedding_status === "embedded") {
+      reembedIds.push(id);
+    } else {
+      addIds.push(id);
+    }
+  });
+  return { addIds, reembedIds };
+}
+
+function syncKnowledgeDocumentBulkActionLabel(documentIds = selectedKnowledgeDocumentIds()) {
+  if (!knowledgeDocumentEmbedAdd) {
+    return;
+  }
+  const ids = Array.from(new Set((documentIds || []).map((item) => String(item || "").trim()).filter(Boolean)));
+  const { addIds, reembedIds } = classifyKnowledgeDocumentEmbeddingTargets(ids);
+  let mode = "sync";
+  let label = "同步嵌入";
+  if (addIds.length && !reembedIds.length) {
+    mode = "add";
+    label = ids.length === 1 ? "新增嵌入" : "嵌入所选";
+  } else if (reembedIds.length && !addIds.length) {
+    mode = "reembed";
+    label = ids.length === 1 ? "重新嵌入" : "重嵌所选";
+  }
+  knowledgeDocumentEmbedAdd.dataset.bulkEmbeddingMode = mode;
+  knowledgeDocumentEmbedAdd.textContent = label;
+}
+
+function buildKnowledgeDocumentEmbeddingResult(payload) {
+  const message = String(payload?.message || "知识库文件嵌入操作已完成。").trim();
+  const skipped = Array.isArray(payload?.skipped) ? payload.skipped : [];
+  const lines = [message];
+  if (skipped.length) {
+    lines.push(`跳过 ${skipped.length} 个文件。`);
+    skipped.slice(0, 3).forEach((item) => {
+      const title = String(item?.title || item?.id || "未命名文件").trim();
+      const detail = String(item?.message || "当前文件无需执行该操作。").trim();
+      lines.push(`- ${title}: ${detail}`);
+    });
+    if (skipped.length > 3) {
+      lines.push(`其余 ${skipped.length - 3} 个文件未展开。`);
+    }
+  }
+  return lines.join("\n");
 }
 
 function renderKnowledgeBaseDocuments() {
   if (!knowledgeBaseDocumentList) {
     return;
   }
-  const documents = knowledgeBaseDocumentsValue();
+  syncKnowledgeBaseDocumentFilterControls();
+  syncKnowledgeBaseDocumentSelection();
+  const documents = Array.isArray(state.knowledgeBaseDocuments) ? state.knowledgeBaseDocuments : [];
+  const selectedIds = new Set(selectedKnowledgeDocumentIds());
+  const selectedCount = selectedIds.size;
+  const query = String(state.knowledgeBaseDocumentPage.query || "").trim();
+  const hasFilters = Boolean(query);
+  const allSelected = documents.length > 0 && selectedCount === documents.length;
+  const partiallySelected = selectedCount > 0 && selectedCount < documents.length;
+  if (knowledgeDocumentSelectionActions) {
+    knowledgeDocumentSelectionActions.classList.toggle("hidden", !selectedCount);
+    knowledgeDocumentSelectionActions.hidden = !selectedCount;
+  }
+  syncKnowledgeDocumentBulkActionLabel(Array.from(selectedIds));
+  if (knowledgeDocumentSelectAll) {
+    knowledgeDocumentSelectAll.checked = allSelected;
+    knowledgeDocumentSelectAll.indeterminate = partiallySelected;
+  }
+  setKnowledgeBaseDocumentActionBusy(state.knowledgeBaseDocumentActionBusy);
   knowledgeBaseDocumentList.innerHTML = documents.length
     ? documents
         .map(
-          (item, index) => `
-            <article class="member-card">
-              <div class="member-card-head">
-                <strong>${escapeHtml(item.title || item.key || `文档 ${index + 1}`)}</strong>
-                <button type="button" class="ghost" data-knowledge-document-remove="${index}">移除</button>
+          (item) => `
+            <article
+              class="knowledge-document-card${selectedIds.has(item.id) ? " active" : ""}"
+              data-knowledge-document-open="${escapeAttribute(item.id || "")}"
+              title="${escapeAttribute(knowledgeDocumentHoverSummary(item))}"
+            >
+              <div class="knowledge-document-card-head">
+                <div class="knowledge-document-select-cell">
+                  <input
+                    type="checkbox"
+                    data-knowledge-document-select="${escapeAttribute(item.id || "")}"
+                    ${selectedIds.has(item.id) ? "checked" : ""}
+                    ${state.knowledgeBaseDocumentActionBusy ? "disabled" : ""}
+                    aria-label="选择文件 ${escapeAttribute(item.title || item.source_path || item.id || "-")}"
+                  />
+                </div>
+                <div class="knowledge-document-card-main">
+                  <strong>${escapeHtml(knowledgeDocumentDisplayName(item))}</strong>
+                </div>
               </div>
-              <div class="form-grid two">
-                <label><span>Key</span><input data-knowledge-document-field="key" data-document-index="${index}" value="${escapeHtml(item.key || "")}" /></label>
-                <label><span>标题</span><input data-knowledge-document-field="title" data-document-index="${index}" value="${escapeHtml(item.title || "")}" /></label>
-              </div>
-              <label><span>来源路径</span><input data-knowledge-document-field="source_path" data-document-index="${index}" value="${escapeHtml(item.source_path || "")}" placeholder="可选" /></label>
-              <label><span>内容</span><textarea data-knowledge-document-field="content_text" data-document-index="${index}" rows="8" placeholder="输入文档正文">${escapeHtml(item.content_text || "")}</textarea></label>
             </article>
           `,
         )
         .join("")
-    : '<div class="detail empty compact-detail">暂无文档。先添加一篇供 `kb.retrieve` 检索的文档。</div>';
+    : `<div class="detail empty compact-detail">${escapeHtml(hasFilters ? "当前筛选条件下没有匹配文件。" : "当前知识库还没有入库文件。")}</div>`;
 }
 
-function addKnowledgeBaseDocument() {
-  mutateKnowledgeBaseDocuments((items) => {
-    const usedKeys = new Set(items.map((item) => String(item.key || "").trim()).filter(Boolean));
-    let index = 1;
-    let candidate = "doc_1";
-    while (usedKeys.has(candidate)) {
-      index += 1;
-      candidate = `doc_${index}`;
-    }
-    items.push({
-      key: candidate,
-      title: `文档 ${index}`,
-      source_path: "",
-      content_text: "",
+function resetKnowledgeBaseDocumentBrowser() {
+  window.clearTimeout(knowledgeBaseDocumentQueryTimer);
+  state.knowledgeBaseDocuments = [];
+  state.knowledgeBaseDocumentPage = {
+    ...state.knowledgeBaseDocumentPage,
+    items: [],
+    total: 0,
+    limit: Math.max(1, Number(state.knowledgeBaseDocumentPage.limit || 8)),
+    offset: 0,
+    query: "",
+  };
+  state.knowledgeBaseDocumentSelection = [];
+  state.knowledgeBaseDocumentActionBusy = false;
+  syncKnowledgeBaseDocumentFilterControls();
+}
+
+function buildKnowledgeStageTransferResult(message, moved = [], skipped = []) {
+  const lines = [message];
+  if (moved.length) {
+    lines.push(`成功处理 ${moved.length} 个文档。`);
+  }
+  if (skipped.length) {
+    lines.push(`跳过 ${skipped.length} 个文档。`);
+    skipped.slice(0, 4).forEach((item) => {
+      lines.push(`- ${item.title || item.id || "未命名文档"}: ${item.message || "操作失败"}`);
     });
-  });
-}
-
-function updateKnowledgeBaseDocumentField(index, field, value) {
-  mutateKnowledgeBaseDocuments((items) => {
-    const item = items[index];
-    if (!item) {
-      return;
+    if (skipped.length > 4) {
+      lines.push(`其余 ${skipped.length - 4} 个未展开。`);
     }
-    item[field] = value;
-  });
+  }
+  return lines.join("\n");
 }
 
-function removeKnowledgeBaseDocument(index) {
-  mutateKnowledgeBaseDocuments((items) => {
-    items.splice(index, 1);
-  });
-}
-
-function resetKnowledgeBaseForm() {
-  state.editingKnowledgeBaseId = null;
-  state.knowledgeBaseBaseConfig = {};
-  state.knowledgeBasePersistedDocumentIds = [];
-  knowledgeBaseKey.value = "";
-  knowledgeBaseName.value = "";
-  knowledgeBaseDescription.value = "";
-  setKnowledgeBaseDocuments([]);
-  hideResult(knowledgeBaseResult);
-  renderKnowledgeBases();
-}
-
-async function fillKnowledgeBaseForm(item) {
-  state.editingKnowledgeBaseId = item.id;
-  state.knowledgeBaseBaseConfig = clone(item.config_json || {});
-  knowledgeBaseKey.value = item.key || "";
-  knowledgeBaseName.value = item.name || "";
-  knowledgeBaseDescription.value = item.description || "";
-  await loadKnowledgeBaseDocuments(item.id);
+async function moveSelectedKnowledgeStageItemsToDocuments() {
+  const knowledgeBaseId = state.editingKnowledgeBaseId;
+  if (!knowledgeBaseId) {
+    throw new Error("请先保存知识库，再把左侧文档池中的文档移入知识库。");
+  }
+  const selectedIds = selectedKnowledgeStageIds();
+  if (!selectedIds.length) {
+    throw new Error("请先选择左侧文档池中的文档。");
+  }
+  setKnowledgeBaseUploadBusy(true);
+  setKnowledgeBaseDocumentActionBusy(true);
+  renderKnowledgeBaseUploadSelection();
   renderKnowledgeBaseDocuments();
+  hideResult(knowledgeBaseModalResult);
+  try {
+    const result = await api(`/api/agent-center/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/pool-documents`, {
+      method: "POST",
+      body: JSON.stringify({
+        document_ids: selectedIds,
+      }),
+    });
+    invalidateData("knowledgeBaseRefs", "knowledgeBasePage", "agentDefinitionRefs", "teamDefinitions", "controlPlane");
+    await ensureKnowledgeBasesPage(true);
+    await refreshKnowledgeBaseDocuments({ resetOffset: true });
+    await refreshKnowledgeBasePoolDocuments();
+    showResult(
+      knowledgeBaseModalResult,
+      buildKnowledgeStageTransferResult("已将左侧文档池中的文档移入知识库。", result.items || [], result.skipped || []),
+    );
+    return result;
+  } finally {
+    setKnowledgeBaseUploadBusy(false);
+    setKnowledgeBaseDocumentActionBusy(false);
+    renderKnowledgeBaseUploadSelection();
+    renderKnowledgeBaseDocuments();
+  }
+}
+
+async function moveSelectedKnowledgeDocumentsToStage() {
+  const knowledgeBaseId = state.editingKnowledgeBaseId;
+  if (!knowledgeBaseId) {
+    throw new Error("请先打开一个知识库。");
+  }
+  const selectedIds = selectedKnowledgeDocumentIds();
+  if (!selectedIds.length) {
+    throw new Error("请先选择右侧知识库文档。");
+  }
+  if (!window.confirm(`确认将选中的 ${selectedIds.length} 个知识库文档移回文档池？`)) {
+    return null;
+  }
+  const selectedDocuments = selectedIds
+    .map((id) => state.knowledgeBaseDocuments.find((item) => item.id === id) || null)
+    .filter(Boolean);
+  const movableDocuments = selectedDocuments.filter((item) => item.pool_document_id);
+  const preferredPoolIds = movableDocuments.map((item) => item.pool_document_id).filter(Boolean);
+  const movedIds = [];
+  const skipped = selectedDocuments
+    .filter((item) => !item.pool_document_id)
+    .map((item) => ({
+      id: item.id,
+      title: item.title || item.source_path || item.id,
+      message: "该文档不是从文档池加入的，不能移回。",
+    }));
+  setKnowledgeBaseUploadBusy(true);
+  setKnowledgeBaseDocumentActionBusy(true);
+  renderKnowledgeBaseUploadSelection();
+  renderKnowledgeBaseDocuments();
+  hideResult(knowledgeBaseModalResult);
+  try {
+    for (const document of movableDocuments) {
+      try {
+        await api(`/api/agent-center/knowledge-documents/${encodeURIComponent(document.id)}`, { method: "DELETE" });
+        movedIds.push(document.id);
+      } catch (error) {
+        skipped.push({
+          id: document.id,
+          title: document.title || document.source_path || document.id,
+          message: error?.message || "移回文档池失败。",
+        });
+      }
+    }
+    invalidateData("knowledgeBaseRefs", "knowledgeBasePage", "agentDefinitionRefs", "teamDefinitions", "controlPlane");
+    await ensureKnowledgeBasesPage(true);
+    await refreshKnowledgeBaseDocuments();
+    await refreshKnowledgeBasePoolDocuments({ preferredIds: preferredPoolIds });
+    showResult(
+      knowledgeBaseModalResult,
+      buildKnowledgeStageTransferResult("已将右侧知识库文档移回文档池。", movedIds, skipped),
+    );
+    return { movedIds, skipped };
+  } finally {
+    setKnowledgeBaseUploadBusy(false);
+    setKnowledgeBaseDocumentActionBusy(false);
+    renderKnowledgeBaseUploadSelection();
+    renderKnowledgeBaseDocuments();
+  }
+}
+
+async function runKnowledgeDocumentEmbeddingAction(action, documentIds) {
+  const knowledgeBaseId = state.editingKnowledgeBaseId;
+  if (!knowledgeBaseId) {
+    throw new Error("请先打开一个知识库。");
+  }
+  const ids = Array.from(new Set((documentIds || []).map((item) => String(item || "").trim()).filter(Boolean)));
+  if (!ids.length) {
+    throw new Error("请至少选择一个文件。");
+  }
+  if (action === "delete") {
+    const scopeLabel = ids.length === 1 ? "这个文件的已有嵌入" : `选中的 ${ids.length} 个文件嵌入`;
+    if (!window.confirm(`确认删除${scopeLabel}？`)) {
+      return null;
+    }
+  }
+  setKnowledgeBaseDocumentActionBusy(true);
+  renderKnowledgeBaseDocuments();
+  hideResult(knowledgeBaseModalResult);
+  try {
+    const payload = await api(`/api/agent-center/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/embeddings`, {
+      method: "POST",
+      body: JSON.stringify({
+        action,
+        document_ids: ids,
+      }),
+    });
+    invalidateData("knowledgeBaseRefs", "knowledgeBasePage", "agentDefinitionRefs", "teamDefinitions", "controlPlane");
+    await ensureKnowledgeBasesPage(true);
+    await loadKnowledgeBaseDocuments(knowledgeBaseId);
+    renderKnowledgeBaseDocuments();
+    showResult(knowledgeBaseModalResult, buildKnowledgeDocumentEmbeddingResult(payload));
+    return payload;
+  } finally {
+    setKnowledgeBaseDocumentActionBusy(false);
+    renderKnowledgeBaseDocuments();
+  }
+}
+
+async function runKnowledgeDocumentBulkEmbeddingAction(documentIds) {
+  const ids = Array.from(new Set((documentIds || []).map((item) => String(item || "").trim()).filter(Boolean)));
+  if (!ids.length) {
+    throw new Error("请至少选择一个文件。");
+  }
+  const mode = String(knowledgeDocumentEmbedAdd?.dataset.bulkEmbeddingMode || "sync").trim() || "sync";
+  if (mode === "add" || mode === "reembed") {
+    return runKnowledgeDocumentEmbeddingAction(mode, ids);
+  }
+  const knowledgeBaseId = state.editingKnowledgeBaseId;
+  if (!knowledgeBaseId) {
+    throw new Error("请先打开一个知识库。");
+  }
+  const { addIds, reembedIds } = classifyKnowledgeDocumentEmbeddingTargets(ids);
+  if (!addIds.length && !reembedIds.length) {
+    throw new Error("请至少选择一个文件。");
+  }
+  setKnowledgeBaseDocumentActionBusy(true);
+  renderKnowledgeBaseDocuments();
+  hideResult(knowledgeBaseModalResult);
+  try {
+    const payloads = [];
+    if (addIds.length) {
+      payloads.push(
+        await api(`/api/agent-center/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/embeddings`, {
+          method: "POST",
+          body: JSON.stringify({
+            action: "add",
+            document_ids: addIds,
+          }),
+        }),
+      );
+    }
+    if (reembedIds.length) {
+      payloads.push(
+        await api(`/api/agent-center/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/embeddings`, {
+          method: "POST",
+          body: JSON.stringify({
+            action: "reembed",
+            document_ids: reembedIds,
+          }),
+        }),
+      );
+    }
+    invalidateData("knowledgeBaseRefs", "knowledgeBasePage", "agentDefinitionRefs", "teamDefinitions", "controlPlane");
+    await ensureKnowledgeBasesPage(true);
+    await loadKnowledgeBaseDocuments(knowledgeBaseId);
+    renderKnowledgeBaseDocuments();
+    showResult(
+      knowledgeBaseModalResult,
+      payloads.map((payload) => buildKnowledgeDocumentEmbeddingResult(payload)).filter(Boolean).join("\n"),
+    );
+    return payloads;
+  } finally {
+    setKnowledgeBaseDocumentActionBusy(false);
+    renderKnowledgeBaseDocuments();
+  }
+}
+
+function resetKnowledgeBaseForm({ openModal = false } = {}) {
+  state.editingKnowledgeBaseId = null;
+  resetKnowledgeBaseDocumentBrowser();
+  if (knowledgeBaseName) {
+    knowledgeBaseName.value = "";
+  }
+  if (knowledgeBaseModalTitle) {
+    knowledgeBaseModalTitle.textContent = "新增知识库";
+  }
+  resetKnowledgeBaseUploadState();
+  void refreshKnowledgeBasePoolDocuments();
   hideResult(knowledgeBaseResult);
+  hideResult(knowledgeBaseModalResult);
+  renderKnowledgeBaseDocuments();
   renderKnowledgeBases();
+  if (openModal) {
+    openKnowledgeBaseModal();
+  }
+}
+
+async function fillKnowledgeBaseForm(item, { openModal = false } = {}) {
+  state.editingKnowledgeBaseId = item.id || null;
+  resetKnowledgeBaseDocumentBrowser();
+  if (knowledgeBaseName) {
+    knowledgeBaseName.value = item.name || "";
+  }
+  if (knowledgeBaseModalTitle) {
+    knowledgeBaseModalTitle.textContent = "编辑知识库";
+  }
+  resetKnowledgeBaseUploadState();
+  await loadKnowledgeBaseDocuments(item.id);
+  await refreshKnowledgeBasePoolDocuments();
+  hideResult(knowledgeBaseResult);
+  hideResult(knowledgeBaseModalResult);
+  renderKnowledgeBaseDocuments();
+  renderKnowledgeBases();
+  if (openModal) {
+    openKnowledgeBaseModal();
+  }
 }
 
 function buildKnowledgeBasePayloadFromForm() {
   return {
     id: state.editingKnowledgeBaseId,
-    key: knowledgeBaseKey.value.trim(),
     name: knowledgeBaseName.value.trim(),
-    description: knowledgeBaseDescription.value.trim(),
-    config: clone(state.knowledgeBaseBaseConfig || {}),
   };
 }
 
 function renderKnowledgeBases() {
-  knowledgeBaseList.innerHTML = state.knowledgeBases.length
-    ? state.knowledgeBases
+  if (!knowledgeBaseList) {
+    return;
+  }
+  knowledgeBaseList.innerHTML = state.knowledgeBasePage.items.length
+    ? state.knowledgeBasePage.items
         .map((item) => {
-          const documents = state.editingKnowledgeBaseId === item.id ? knowledgeBaseDocumentsValue().length : null;
-          return cardMarkup({
-            title: item.name || item.key || item.id,
-            body: item.description || "知识库",
-            meta: `key=${item.key || "-"}${documents === null ? "" : ` / docs=${documents}`}`,
-            actions: `
-              <button type="button" data-knowledge-base-edit="${item.id}">编辑</button>
-              <button type="button" class="ghost" data-knowledge-base-delete="${item.id}">删除</button>
-            `,
-            active: item.id === state.editingKnowledgeBaseId,
-          });
+          const updatedAt = formatTeamChatTime(item.updated_at) || item.updated_at || "-";
+          return `
+            <article class="provider-row knowledge-base-row${item.id === state.editingKnowledgeBaseId ? " active" : ""}">
+              <div class="provider-main">
+                <strong title="${escapeAttribute(item.name || item.id || "-")}">${escapeHtml(item.name || item.id || "-")}</strong>
+              </div>
+              <div class="provider-cell">
+                <strong>${escapeHtml(item.file_count || item.document_count || 0)}</strong>
+              </div>
+              <div class="provider-cell">
+                <strong title="${escapeAttribute(item.updated_at || "-")}">${escapeHtml(updatedAt)}</strong>
+              </div>
+              <div class="provider-row-actions">
+                <button type="button" data-knowledge-base-edit="${escapeAttribute(item.id || "")}">编辑</button>
+                <button type="button" class="ghost warn" data-knowledge-base-delete="${escapeAttribute(item.id || "")}">删除</button>
+              </div>
+            </article>
+          `;
         })
         .join("")
-    : cardMarkup({ title: "暂无知识库", body: "先创建第一个知识库。", meta: "" });
+    : '<div class="detail empty compact-detail"><strong>暂无知识库</strong><p>先创建第一个知识库并上传文件。</p></div>';
+  renderOffsetPagination(state.knowledgeBasePage, knowledgeBasePaginationMeta, "knowledge-base-page");
 }
 
 function resetReviewPolicyForm() {
@@ -6529,10 +7720,15 @@ async function loadProviders() {
   populateProviderOptions();
 }
 
+async function loadLocalModels() {
+  const payload = await api("/api/agent-center/local-models");
+  state.localModels = payload.items || [];
+}
+
 async function loadRetrievalSettings() {
   const payload = await api("/api/agent-center/retrieval-settings");
   state.retrievalSettings = {
-    settings: payload.settings || { embedding: { mode: "hash" }, rerank: { mode: "disabled" } },
+    settings: payload.settings || { embedding: { mode: "disabled" }, rerank: { mode: "disabled" } },
     warnings: payload.warnings || [],
     updated_at: payload.updated_at || null,
   };
@@ -6554,6 +7750,21 @@ async function loadProviderPage() {
   state.providerPage.total = payload.total || 0;
   state.providerPage.limit = payload.limit || state.providerPage.limit;
   state.providerPage.offset = payload.offset || 0;
+}
+
+async function loadLocalModelPage() {
+  const params = new URLSearchParams({
+    limit: String(state.localModelPage.limit || 10),
+    offset: String(state.localModelPage.offset || 0),
+  });
+  if (state.localModelPage.query) {
+    params.set("query", state.localModelPage.query);
+  }
+  const payload = await api(`/api/agent-center/local-models?${params.toString()}`);
+  state.localModelPage.items = payload.items || [];
+  state.localModelPage.total = payload.total || 0;
+  state.localModelPage.limit = payload.limit || state.localModelPage.limit;
+  state.localModelPage.offset = payload.offset || 0;
 }
 
 async function loadPlugins() {
@@ -6653,6 +7864,18 @@ async function loadKnowledgeBases() {
   state.knowledgeBases = payload.items || [];
 }
 
+async function loadKnowledgeBasePage() {
+  const params = new URLSearchParams({
+    limit: String(state.knowledgeBasePage.limit || 10),
+    offset: String(state.knowledgeBasePage.offset || 0),
+  });
+  const payload = await api(`/api/agent-center/knowledge-bases?${params.toString()}`);
+  state.knowledgeBasePage.items = payload.items || [];
+  state.knowledgeBasePage.total = payload.total || 0;
+  state.knowledgeBasePage.limit = payload.limit || state.knowledgeBasePage.limit;
+  state.knowledgeBasePage.offset = payload.offset || 0;
+}
+
 async function loadStaticMemories() {
   const payload = await api("/api/agent-center/static-memories");
   state.staticMemories = payload.items || [];
@@ -6673,20 +7896,37 @@ async function loadStaticMemoryPage() {
 async function loadKnowledgeBaseDocuments(knowledgeBaseId) {
   if (!knowledgeBaseId) {
     state.knowledgeBaseDocuments = [];
-    state.knowledgeBasePersistedDocumentIds = [];
-    if (knowledgeBaseDocuments) {
-      knowledgeBaseDocuments.value = prettyJson([]);
-    }
+    state.knowledgeBaseDocumentPage.items = [];
+    state.knowledgeBaseDocumentPage.total = 0;
+    state.knowledgeBaseDocumentPage.offset = 0;
+    state.knowledgeBaseDocumentSelection = [];
     return;
   }
-  const payload = await api(`/api/agent-center/knowledge-documents?knowledge_base_id=${encodeURIComponent(knowledgeBaseId)}`);
-  state.knowledgeBaseDocuments = payload.items || [];
-  state.knowledgeBasePersistedDocumentIds = state.knowledgeBaseDocuments
-    .map((item) => String(item.id || "").trim())
-    .filter(Boolean);
-  if (knowledgeBaseDocuments) {
-    knowledgeBaseDocuments.value = prettyJson(state.knowledgeBaseDocuments);
+  const params = new URLSearchParams();
+  const query = String(state.knowledgeBaseDocumentPage.query || "").trim();
+  if (query) {
+    params.set("query", query);
   }
+  const payload = await api(`/api/agent-center/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents?${params.toString()}`);
+  state.knowledgeBaseDocuments = payload.items || [];
+  state.knowledgeBaseDocumentPage.items = state.knowledgeBaseDocuments;
+  state.knowledgeBaseDocumentPage.total = payload.total || 0;
+  state.knowledgeBaseDocumentPage.limit = payload.limit || state.knowledgeBaseDocumentPage.limit;
+  state.knowledgeBaseDocumentPage.offset = 0;
+  state.knowledgeBaseDocumentPage.query = payload.filters?.query ?? query;
+  syncKnowledgeBaseDocumentSelection();
+}
+
+async function refreshKnowledgeBaseDocuments({ resetOffset = false } = {}) {
+  if (resetOffset) {
+    state.knowledgeBaseDocumentPage.offset = 0;
+  }
+  if (!state.editingKnowledgeBaseId) {
+    renderKnowledgeBaseDocuments();
+    return;
+  }
+  await loadKnowledgeBaseDocuments(state.editingKnowledgeBaseId);
+  renderKnowledgeBaseDocuments();
 }
 
 async function loadTeamDefinitions() {
@@ -6840,10 +8080,33 @@ async function ensureProvidersPage(force = false) {
   renderProviders();
 }
 
+async function ensureLocalModelsPage(force = false) {
+  if (!state.loaded.localModelRefs || force) {
+    await loadLocalModels();
+    state.loaded.localModelRefs = true;
+  }
+  if (!state.loaded.localModelPage || force) {
+    await loadLocalModelPage();
+    state.loaded.localModelPage = true;
+  }
+  if (localModelPageSize) {
+    localModelPageSize.value = String(state.localModelPage.limit || 10);
+  }
+  if (state.editingLocalModelId && !state.localModels.some((item) => item.id === state.editingLocalModelId)) {
+    resetLocalModelForm();
+    closeLocalModelModal();
+  }
+  renderLocalModels();
+}
+
 async function ensureRetrievalSettingsPage(force = false) {
   if (!state.loaded.providerRefs || force) {
     await loadProviders();
     state.loaded.providerRefs = true;
+  }
+  if (!state.loaded.localModelRefs || force) {
+    await loadLocalModels();
+    state.loaded.localModelRefs = true;
   }
   if (!state.loaded.retrievalSettings || force) {
     await loadRetrievalSettings();
@@ -6901,9 +8164,6 @@ async function ensureSkillsPage(force = false) {
   if (skillPageSize) {
     skillPageSize.value = String(state.skillPage.limit || 10);
   }
-  if (skillSearchInput) {
-    skillSearchInput.value = state.skillPage.query || "";
-  }
   renderSkillGroupSkillOptions();
   if (state.editingSkillId) {
     const current = state.skills.find((item) => item.id === state.editingSkillId) || null;
@@ -6923,7 +8183,6 @@ async function ensureSkillsPage(force = false) {
       fillSkillGroupForm(currentGroup);
     }
   }
-  renderSkillGroupFilters();
   renderSkills();
   renderSkillManagementView();
 }
@@ -6987,24 +8246,19 @@ async function ensureKnowledgeBasesPage(force = false) {
     await loadKnowledgeBases();
     state.loaded.knowledgeBaseRefs = true;
   }
-  if (state.editingKnowledgeBaseId) {
-    const current = state.knowledgeBases.find((item) => item.id === state.editingKnowledgeBaseId) || null;
-    if (!current) {
-      resetKnowledgeBaseForm();
-    } else if (force) {
-      await fillKnowledgeBaseForm(current);
-    } else {
-      renderKnowledgeBases();
-      renderKnowledgeBaseDocuments();
-    }
-  } else {
-    if (!knowledgeBaseKey.value.trim() && !knowledgeBaseName.value.trim() && !knowledgeBaseDocumentsValue().length) {
-      resetKnowledgeBaseForm();
-    } else {
-      renderKnowledgeBases();
-      renderKnowledgeBaseDocuments();
-    }
+  if (!state.loaded.knowledgeBasePage || force) {
+    await loadKnowledgeBasePage();
+    state.loaded.knowledgeBasePage = true;
   }
+  if (knowledgeBasePageSize) {
+    knowledgeBasePageSize.value = String(state.knowledgeBasePage.limit || 10);
+  }
+  if (state.editingKnowledgeBaseId && !state.knowledgeBases.some((item) => item.id === state.editingKnowledgeBaseId)) {
+    resetKnowledgeBaseForm();
+    closeKnowledgeBaseModal();
+  }
+  renderKnowledgeBases();
+  renderKnowledgeBaseDocuments();
 }
 
 async function ensureReviewPoliciesPage(force = false) {
@@ -7145,6 +8399,9 @@ async function ensurePageData(pageName, options = {}) {
     case "providers":
       await ensureProvidersPage(force);
       break;
+    case "local-models":
+      await ensureLocalModelsPage(force);
+      break;
     case "retrieval-config":
       await ensureRetrievalSettingsPage(force);
       break;
@@ -7246,13 +8503,13 @@ if (retrievalSettingsForm) {
         body: JSON.stringify(buildRetrievalPayloadFromForm()),
       });
       state.retrievalSettings = {
-        settings: payload.settings || { embedding: { mode: "hash" }, rerank: { mode: "disabled" } },
+        settings: payload.settings || { embedding: { mode: "disabled" }, rerank: { mode: "disabled" } },
         warnings: [],
         updated_at: payload.updated_at || null,
       };
       invalidateData("retrievalSettings", "controlPlane");
       fillRetrievalSettingsForm();
-      showResult(retrievalSettingsResult, payload.applied || { message: "检索配置已保存" });
+      showResult(retrievalSettingsResult, buildRetrievalSaveResult(payload));
     } catch (error) {
       showResult(retrievalSettingsResult, errorResult(error));
     }
@@ -7278,6 +8535,52 @@ pluginForm.addEventListener("submit", async (event) => {
     showResult(pluginResult, { message: "插件已保存", id: saved.id });
   } catch (error) {
     showResult(pluginModalResult, errorResult(error));
+  }
+});
+
+localModelForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  hideResult(localModelResult);
+  hideResult(localModelModalResult);
+  try {
+    const payload = buildLocalModelPayloadFromForm();
+    if (!payload.name) {
+      throw new Error("本地模型名称不能为空。");
+    }
+    if (!state.editingLocalModelId && !state.localModelUploadFiles.length && !payload.model_path) {
+      throw new Error("请先选择要上传的模型文件夹。");
+    }
+    const uploadPayload = await buildLocalModelUploadPayload();
+    const method = state.editingLocalModelId ? "PUT" : "POST";
+    const path = state.editingLocalModelId
+      ? `/api/agent-center/local-models/${state.editingLocalModelId}`
+      : "/api/agent-center/local-models";
+    const requestPayload = uploadPayload ? { ...payload, ...uploadPayload } : payload;
+    if (uploadPayload) {
+      setLocalModelUploadBusy(true);
+    }
+    let saved = null;
+    try {
+      saved = await api(path, { method, body: JSON.stringify(requestPayload) });
+    } finally {
+      if (uploadPayload) {
+        setLocalModelUploadBusy(false);
+      }
+    }
+    if (!state.editingLocalModelId) {
+      state.localModelPage.offset = 0;
+    }
+    invalidateData("localModelRefs", "localModelPage", "retrievalSettings", "controlPlane");
+    await ensureLocalModelsPage(true);
+    closeLocalModelModal();
+    showResult(localModelResult, {
+      message: uploadPayload ? "本地模型已上传并保存" : "本地模型已保存",
+      id: saved?.id || payload.id || null,
+      path: saved?.model_path || payload.model_path || "",
+    });
+  } catch (error) {
+    setLocalModelUploadBusy(false);
+    showResult(localModelModalResult, errorResult(error));
   }
 });
 
@@ -7351,54 +8654,29 @@ staticMemoryForm?.addEventListener("submit", async (event) => {
 knowledgeBaseForm?.addEventListener("submit", async (event) => {
   event.preventDefault();
   hideResult(knowledgeBaseResult);
+  hideResult(knowledgeBaseModalResult);
   try {
     const payload = buildKnowledgeBasePayloadFromForm();
-    const currentDocuments = knowledgeBaseDocumentsValue();
-    currentDocuments.forEach((item, index) => {
-      if (!String(item.key || "").trim()) {
-        throw new Error(`第 ${index + 1} 篇文档缺少 Key。`);
-      }
-      if (!String(item.title || "").trim()) {
-        throw new Error(`第 ${index + 1} 篇文档缺少标题。`);
-      }
-    });
+    if (!payload.name) {
+      throw new Error("知识库名称不能为空。");
+    }
     const method = state.editingKnowledgeBaseId ? "PUT" : "POST";
     const path = state.editingKnowledgeBaseId
       ? `/api/agent-center/knowledge-bases/${state.editingKnowledgeBaseId}`
       : "/api/agent-center/knowledge-bases";
     const saved = await api(path, { method, body: JSON.stringify(payload) });
-    const seenIds = new Set();
-    for (const item of currentDocuments) {
-      const documentPayload = {
-        id: item.id || null,
-        knowledge_base_id: saved.id,
-        key: String(item.key || "").trim(),
-        title: String(item.title || "").trim(),
-        source_path: String(item.source_path || "").trim() || null,
-        content_text: String(item.content_text || "").trim(),
-        metadata: dictOrEmpty(item.metadata_json || item.metadata),
-      };
-      const documentPath = item.id ? `/api/agent-center/knowledge-documents/${item.id}` : "/api/agent-center/knowledge-documents";
-      const savedDocument = await api(documentPath, {
-        method: item.id ? "PUT" : "POST",
-        body: JSON.stringify(documentPayload),
-      });
-      if (savedDocument?.id) {
-        seenIds.add(savedDocument.id);
-      }
+    if (!state.editingKnowledgeBaseId) {
+      state.knowledgeBasePage.offset = 0;
     }
-    for (const documentId of state.knowledgeBasePersistedDocumentIds || []) {
-      if (!seenIds.has(documentId)) {
-        await api(`/api/agent-center/knowledge-documents/${documentId}`, { method: "DELETE" });
-      }
-    }
-    invalidateData("knowledgeBaseRefs", "agentDefinitionRefs", "teamDefinitions", "controlPlane");
+    invalidateData("knowledgeBaseRefs", "knowledgeBasePage", "agentDefinitionRefs", "teamDefinitions", "controlPlane");
     await ensureKnowledgeBasesPage(true);
-    const refreshed = state.knowledgeBases.find((item) => item.id === saved.id) || saved;
+    const refreshed =
+      state.knowledgeBases.find((item) => item.id === saved.id) ||
+      (await api(`/api/agent-center/knowledge-bases/${saved.id}`));
     await fillKnowledgeBaseForm(refreshed);
-    showResult(knowledgeBaseResult, { message: "知识库已保存", id: saved.id, document_count: currentDocuments.length });
+    showResult(knowledgeBaseModalResult, "知识库已保存。可继续从左侧文档池移入右侧知识库。");
   } catch (error) {
-    showResult(knowledgeBaseResult, errorResult(error));
+    showResult(knowledgeBaseModalResult, errorResult(error));
   }
 });
 
@@ -7601,6 +8879,17 @@ providerPageSize.addEventListener("change", async () => {
   state.providerPage.offset = 0;
   await ensureProvidersPage(true);
 });
+localModelOpenCreate?.addEventListener("click", async () => {
+  await ensureLocalModelsPage(true);
+  resetLocalModelForm({ openModal: true });
+});
+localModelModalCloseButtons.forEach((button) => button.addEventListener("click", closeLocalModelModal));
+localModelCancel?.addEventListener("click", closeLocalModelModal);
+localModelPageSize?.addEventListener("change", async () => {
+  state.localModelPage.limit = Number(localModelPageSize.value || 10);
+  state.localModelPage.offset = 0;
+  await ensureLocalModelsPage(true);
+});
 skillOpenCreate?.addEventListener("click", async () => {
   if (state.skillManagementView === "groups") {
     await ensureSkillsPage(true);
@@ -7706,21 +8995,6 @@ skillGroupModalCloseButtons.forEach((button) => button.addEventListener("click",
 skillGroupCancel?.addEventListener("click", () => {
   closeSkillGroupModal();
 });
-skillSearchForm?.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  state.skillPage.query = skillSearchInput?.value?.trim() || "";
-  state.skillPage.offset = 0;
-  await ensureSkillsPage(true);
-});
-skillSearchReset?.addEventListener("click", async () => {
-  state.skillPage.query = "";
-  state.skillPage.groupKey = "";
-  state.skillPage.offset = 0;
-  if (skillSearchInput) {
-    skillSearchInput.value = "";
-  }
-  await ensureSkillsPage(true);
-});
 skillPageSize?.addEventListener("change", async () => {
   state.skillPage.limit = Number(skillPageSize.value || 10);
   state.skillPage.offset = 0;
@@ -7823,9 +9097,15 @@ retrievalRerankProvider?.addEventListener("change", () => {
   renderModelSelect(retrievalRerankModel, providerModelsByType(retrievalRerankProvider.value, "rerank"));
   syncRetrievalModelOptions();
 });
+retrievalEmbeddingLocalModel?.addEventListener("change", () => {
+  syncRetrievalDynamicForm();
+});
+retrievalRerankLocalModel?.addEventListener("change", () => {
+  syncRetrievalDynamicForm();
+});
 retrievalSettingsRefresh?.addEventListener("click", async () => {
   try {
-    invalidateData("retrievalSettings", "providerRefs", "controlPlane");
+    invalidateData("retrievalSettings", "providerRefs", "localModelRefs", "controlPlane");
     await ensureRetrievalSettingsPage(true);
   } catch (error) {
     showResult(retrievalSettingsResult, errorResult(error));
@@ -7894,11 +9174,232 @@ responsibilitySpecOpenRoleCreate?.addEventListener("click", async () => {
 });
 staticMemoryModalCloseButtons.forEach((button) => button.addEventListener("click", closeStaticMemoryModal));
 staticMemoryCancel?.addEventListener("click", closeStaticMemoryModal);
-knowledgeBaseReset?.addEventListener("click", async () => {
-  await ensureKnowledgeBasesPage(true);
-  resetKnowledgeBaseForm();
+localModelUploadFolderButton?.addEventListener("click", () => {
+  localModelFolderInput?.click();
 });
-knowledgeBaseDocumentAdd?.addEventListener("click", addKnowledgeBaseDocument);
+localModelFolderInput?.addEventListener("change", async () => {
+  try {
+    setLocalModelUploadFiles(await collectSkillImportEntriesFromInput(localModelFolderInput.files));
+  } catch (error) {
+    showResult(localModelModalResult, errorResult(error));
+  }
+});
+localModelDropzone?.addEventListener("click", () => {
+  if (!state.localModelUploadBusy) {
+    localModelFolderInput?.click();
+  }
+});
+localModelDropzone?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    if (!state.localModelUploadBusy) {
+      localModelFolderInput?.click();
+    }
+  }
+});
+localModelDropzone?.addEventListener("dragenter", (event) => {
+  event.preventDefault();
+  if (state.localModelUploadBusy) {
+    return;
+  }
+  state.localModelUploadDragActive = true;
+  renderLocalModelUploadSelection();
+});
+localModelDropzone?.addEventListener("dragover", (event) => {
+  event.preventDefault();
+  if (state.localModelUploadBusy) {
+    return;
+  }
+  state.localModelUploadDragActive = true;
+  renderLocalModelUploadSelection();
+});
+localModelDropzone?.addEventListener("dragleave", (event) => {
+  if (state.localModelUploadBusy) {
+    return;
+  }
+  if (!localModelDropzone?.contains(event.relatedTarget)) {
+    state.localModelUploadDragActive = false;
+    renderLocalModelUploadSelection();
+  }
+});
+localModelDropzone?.addEventListener("drop", async (event) => {
+  event.preventDefault();
+  if (state.localModelUploadBusy) {
+    return;
+  }
+  state.localModelUploadDragActive = false;
+  renderLocalModelUploadSelection();
+  try {
+    setLocalModelUploadFiles(await collectSkillImportEntriesFromDataTransfer(event.dataTransfer));
+  } catch (error) {
+    showResult(localModelModalResult, errorResult(error));
+  }
+});
+knowledgeBaseOpenCreate?.addEventListener("click", async () => {
+  await ensureKnowledgeBasesPage(true);
+  resetKnowledgeBaseForm({ openModal: true });
+  await refreshKnowledgeBasePoolDocuments();
+});
+knowledgeBaseModalCloseButtons.forEach((button) => button.addEventListener("click", closeKnowledgeBaseModal));
+knowledgeBaseCancel?.addEventListener("click", closeKnowledgeBaseModal);
+knowledgeBasePageSize?.addEventListener("change", async () => {
+  state.knowledgeBasePage.limit = Number(knowledgeBasePageSize.value || 10);
+  state.knowledgeBasePage.offset = 0;
+  await ensureKnowledgeBasesPage(true);
+});
+knowledgeBaseStageSelectAll?.addEventListener("change", () => {
+  setAllKnowledgeBaseStageSelections(Boolean(knowledgeBaseStageSelectAll.checked));
+});
+knowledgeBaseStageRemove?.addEventListener("click", () => {
+  const selectedIds = selectedKnowledgeStageIds();
+  if (!selectedIds.length) {
+    return;
+  }
+  if (!window.confirm(`确认从文档池删除选中的 ${selectedIds.length} 个文档？`)) {
+    return;
+  }
+  deleteKnowledgeBasePoolDocuments(selectedIds).catch((error) => {
+    showResult(knowledgeBaseModalResult, errorResult(error));
+  });
+});
+knowledgeBaseStageMove?.addEventListener("click", async () => {
+  try {
+    await moveSelectedKnowledgeStageItemsToDocuments();
+  } catch (error) {
+    showResult(knowledgeBaseModalResult, errorResult(error));
+  }
+});
+knowledgeBaseDocumentMoveBack?.addEventListener("click", async () => {
+  try {
+    await moveSelectedKnowledgeDocumentsToStage();
+  } catch (error) {
+    showResult(knowledgeBaseModalResult, errorResult(error));
+  }
+});
+knowledgeBaseDocumentQuery?.addEventListener("input", () => {
+  state.knowledgeBaseDocumentPage.query = knowledgeBaseDocumentQuery.value.trim();
+  window.clearTimeout(knowledgeBaseDocumentQueryTimer);
+  knowledgeBaseDocumentQueryTimer = window.setTimeout(async () => {
+    await refreshKnowledgeBaseDocuments({ resetOffset: true });
+  }, 220);
+});
+knowledgeBasePoolQuery?.addEventListener("input", () => {
+  state.knowledgeBasePoolPage.query = knowledgeBasePoolQuery.value.trim();
+  window.clearTimeout(knowledgeBasePoolQueryTimer);
+  knowledgeBasePoolQueryTimer = window.setTimeout(async () => {
+    await refreshKnowledgeBasePoolDocuments({ resetOffset: true });
+  }, 220);
+});
+knowledgeDocumentSelectAll?.addEventListener("change", () => {
+  setAllKnowledgeBaseDocumentSelections(Boolean(knowledgeDocumentSelectAll.checked));
+});
+knowledgeDocumentEmbedAdd?.addEventListener("click", async () => {
+  try {
+    await runKnowledgeDocumentBulkEmbeddingAction(selectedKnowledgeDocumentIds());
+  } catch (error) {
+    showResult(knowledgeBaseModalResult, errorResult(error));
+  }
+});
+knowledgeDocumentEmbedDelete?.addEventListener("click", async () => {
+  try {
+    await runKnowledgeDocumentEmbeddingAction("delete", selectedKnowledgeDocumentIds());
+  } catch (error) {
+    showResult(knowledgeBaseModalResult, errorResult(error));
+  }
+});
+knowledgeBaseUploadFolder?.addEventListener("click", () => {
+  knowledgeBaseFolderInput?.click();
+});
+knowledgeBaseFileInput?.addEventListener("change", async () => {
+  try {
+    await uploadKnowledgeBasePoolEntries(await collectSkillImportEntriesFromInput(knowledgeBaseFileInput.files));
+  } catch (error) {
+    showResult(knowledgeBaseModalResult, errorResult(error));
+  }
+});
+knowledgeBaseFolderInput?.addEventListener("change", async () => {
+  try {
+    await uploadKnowledgeBasePoolEntries(await collectSkillImportEntriesFromInput(knowledgeBaseFolderInput.files));
+  } catch (error) {
+    showResult(knowledgeBaseModalResult, errorResult(error));
+  }
+});
+knowledgeBaseDropzone?.addEventListener("click", (event) => {
+  if (event.target instanceof Element && event.target.closest("button")) {
+    return;
+  }
+  if (!state.knowledgeBaseUploadBusy) {
+    knowledgeBaseFileInput?.click();
+  }
+});
+knowledgeBaseDropzone?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    if (!state.knowledgeBaseUploadBusy) {
+      knowledgeBaseFileInput?.click();
+    }
+  }
+});
+knowledgeBaseDropzone?.addEventListener("dragenter", (event) => {
+  event.preventDefault();
+  if (state.knowledgeBaseUploadBusy) {
+    return;
+  }
+  state.knowledgeBaseUploadDragActive = true;
+  renderKnowledgeBaseUploadSelection();
+});
+knowledgeBaseDropzone?.addEventListener("dragover", (event) => {
+  event.preventDefault();
+  if (state.knowledgeBaseUploadBusy) {
+    return;
+  }
+  state.knowledgeBaseUploadDragActive = true;
+  renderKnowledgeBaseUploadSelection();
+});
+knowledgeBaseDropzone?.addEventListener("dragleave", (event) => {
+  if (state.knowledgeBaseUploadBusy) {
+    return;
+  }
+  if (!knowledgeBaseDropzone?.contains(event.relatedTarget)) {
+    state.knowledgeBaseUploadDragActive = false;
+    renderKnowledgeBaseUploadSelection();
+  }
+});
+knowledgeBaseDropzone?.addEventListener("drop", async (event) => {
+  event.preventDefault();
+  if (state.knowledgeBaseUploadBusy) {
+    return;
+  }
+  state.knowledgeBaseUploadDragActive = false;
+  renderKnowledgeBaseUploadSelection();
+  try {
+    await uploadKnowledgeBasePoolEntries(await collectSkillImportEntriesFromDataTransfer(event.dataTransfer));
+  } catch (error) {
+    showResult(knowledgeBaseModalResult, errorResult(error));
+  }
+});
+knowledgeBaseUploadSelection?.addEventListener("change", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLInputElement)) {
+    return;
+  }
+  const stageId = String(target.dataset.knowledgeStageSelect || "").trim();
+  if (!stageId) {
+    return;
+  }
+  toggleKnowledgeBaseStageSelection(stageId, target.checked);
+});
+knowledgeBaseDocumentList?.addEventListener("change", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLInputElement)) {
+    return;
+  }
+  const documentId = String(target.dataset.knowledgeDocumentSelect || "").trim();
+  if (!documentId) {
+    return;
+  }
+  toggleKnowledgeBaseDocumentSelection(documentId, target.checked);
+});
 reviewPolicyReset?.addEventListener("click", async () => {
   await ensureReviewPoliciesPage(true);
   resetReviewPolicyForm();
@@ -8024,11 +9525,10 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
-  const skillGroupButton = event.target.closest("[data-skill-group]");
-  if (skillGroupButton && !skillGroupButton.hasAttribute("disabled")) {
-    state.skillPage.groupKey = skillGroupButton.dataset.skillGroup || "";
-    state.skillPage.offset = 0;
-    await ensureSkillsPage(true);
+  const localModelPageButton = event.target.closest("[data-local-model-page]");
+  if (localModelPageButton && !localModelPageButton.hasAttribute("disabled")) {
+    state.localModelPage.offset = Number(localModelPageButton.dataset.localModelPage || 0);
+    await ensureLocalModelsPage(true);
     return;
   }
 
@@ -8036,6 +9536,13 @@ document.addEventListener("click", async (event) => {
   if (skillPageButton && !skillPageButton.hasAttribute("disabled")) {
     state.skillPage.offset = Number(skillPageButton.dataset.skillPage || 0);
     await ensureSkillsPage(true);
+    return;
+  }
+
+  const knowledgeBasePageButton = event.target.closest("[data-knowledge-base-page]");
+  if (knowledgeBasePageButton && !knowledgeBasePageButton.hasAttribute("disabled")) {
+    state.knowledgeBasePage.offset = Number(knowledgeBasePageButton.dataset.knowledgeBasePage || 0);
+    await ensureKnowledgeBasesPage(true);
     return;
   }
 
@@ -8337,9 +9844,48 @@ document.addEventListener("click", async (event) => {
       const item =
         state.knowledgeBases.find((entry) => entry.id === knowledgeBaseEdit.dataset.knowledgeBaseEdit) ||
         (await api(`/api/agent-center/knowledge-bases/${knowledgeBaseEdit.dataset.knowledgeBaseEdit}`));
-      await fillKnowledgeBaseForm(item);
+      await fillKnowledgeBaseForm(item, { openModal: true });
     } catch (error) {
       showResult(knowledgeBaseResult, errorResult(error));
+    }
+    return;
+  }
+
+  const localModelEdit = event.target.closest("[data-local-model-edit]");
+  if (localModelEdit) {
+    try {
+      await switchPage("local-models");
+      const item =
+        state.localModels.find((entry) => entry.id === localModelEdit.dataset.localModelEdit) ||
+        (await api(`/api/agent-center/local-models/${localModelEdit.dataset.localModelEdit}`));
+      fillLocalModelForm(item, { openModal: true });
+    } catch (error) {
+      showResult(localModelResult, errorResult(error));
+    }
+    return;
+  }
+
+  const localModelDelete = event.target.closest("[data-local-model-delete]");
+  if (localModelDelete) {
+    const itemId = localModelDelete.dataset.localModelDelete;
+    const item = state.localModels.find((entry) => entry.id === itemId) || null;
+    if (!window.confirm(`确认删除本地模型“${item?.name || item?.id || itemId}”？`)) {
+      return;
+    }
+    try {
+      if (state.localModelPage.items.length === 1 && state.localModelPage.offset > 0) {
+        state.localModelPage.offset = Math.max(0, state.localModelPage.offset - state.localModelPage.limit);
+      }
+      await api(`/api/agent-center/local-models/${itemId}`, { method: "DELETE" });
+      if (state.editingLocalModelId === itemId) {
+        resetLocalModelForm();
+        closeLocalModelModal();
+      }
+      invalidateData("localModelRefs", "localModelPage", "retrievalSettings", "controlPlane");
+      await ensureLocalModelsPage(true);
+      showResult(localModelResult, { message: "本地模型已删除", id: itemId });
+    } catch (error) {
+      showResult(localModelResult, errorResult(error));
     }
     return;
   }
@@ -8352,11 +9898,15 @@ document.addEventListener("click", async (event) => {
       return;
     }
     try {
+      if (state.knowledgeBasePage.items.length === 1 && state.knowledgeBasePage.offset > 0) {
+        state.knowledgeBasePage.offset = Math.max(0, state.knowledgeBasePage.offset - state.knowledgeBasePage.limit);
+      }
       await api(`/api/agent-center/knowledge-bases/${itemId}`, { method: "DELETE" });
       if (state.editingKnowledgeBaseId === itemId) {
         resetKnowledgeBaseForm();
+        closeKnowledgeBaseModal();
       }
-      invalidateData("knowledgeBaseRefs", "agentDefinitionRefs", "teamDefinitions", "controlPlane");
+      invalidateData("knowledgeBaseRefs", "knowledgeBasePage", "agentDefinitionRefs", "teamDefinitions", "controlPlane");
       await ensureKnowledgeBasesPage(true);
       showResult(knowledgeBaseResult, { message: "知识库已删除", id: itemId });
     } catch (error) {
@@ -8365,9 +9915,62 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
-  const knowledgeDocumentRemove = event.target.closest("[data-knowledge-document-remove]");
-  if (knowledgeDocumentRemove) {
-    removeKnowledgeBaseDocument(Number(knowledgeDocumentRemove.dataset.knowledgeDocumentRemove));
+  const knowledgeDocumentDelete = event.target.closest("[data-knowledge-document-delete]");
+  const knowledgeDocumentEmbeddingAction = event.target.closest("[data-knowledge-document-embedding-action]");
+  if (knowledgeDocumentEmbeddingAction) {
+    const action = String(knowledgeDocumentEmbeddingAction.dataset.knowledgeDocumentEmbeddingAction || "").trim();
+    const documentId = String(knowledgeDocumentEmbeddingAction.dataset.knowledgeDocumentId || "").trim();
+    if (!action || !documentId) {
+      return;
+    }
+    try {
+      await runKnowledgeDocumentEmbeddingAction(action, [documentId]);
+    } catch (error) {
+      showResult(knowledgeBaseModalResult, errorResult(error));
+    }
+    return;
+  }
+
+  if (knowledgeDocumentDelete) {
+    const documentId = knowledgeDocumentDelete.dataset.knowledgeDocumentDelete;
+    if (!documentId) {
+      return;
+    }
+    if (!window.confirm("确认删除这个已入库文件？")) {
+      return;
+    }
+    try {
+      await api(`/api/agent-center/knowledge-documents/${documentId}`, { method: "DELETE" });
+      invalidateData("knowledgeBaseRefs", "knowledgeBasePage", "agentDefinitionRefs", "teamDefinitions", "controlPlane");
+      await ensureKnowledgeBasesPage(true);
+      if (state.editingKnowledgeBaseId) {
+        await refreshKnowledgeBaseDocuments();
+        await refreshKnowledgeBasePoolDocuments();
+      }
+      showResult(knowledgeBaseModalResult, { message: "文件已从知识库移除", id: documentId });
+    } catch (error) {
+      showResult(knowledgeBaseModalResult, errorResult(error));
+    }
+    return;
+  }
+
+  const knowledgeStageOpen = event.target.closest("[data-knowledge-stage-open]");
+  if (knowledgeStageOpen && !event.target.closest("button, input, label, a")) {
+    const stageId = String(knowledgeStageOpen.dataset.knowledgeStageOpen || "").trim();
+    if (stageId) {
+      const selected = new Set(selectedKnowledgeStageIds());
+      toggleKnowledgeBaseStageSelection(stageId, !selected.has(stageId));
+    }
+    return;
+  }
+
+  const knowledgeDocumentOpen = event.target.closest("[data-knowledge-document-open]");
+  if (knowledgeDocumentOpen && !event.target.closest("button, input, label, a")) {
+    const documentId = String(knowledgeDocumentOpen.dataset.knowledgeDocumentOpen || "").trim();
+    if (documentId) {
+      const selected = new Set(selectedKnowledgeDocumentIds());
+      toggleKnowledgeBaseDocumentSelection(documentId, !selected.has(documentId));
+    }
     return;
   }
 
@@ -8729,15 +10332,6 @@ document.addEventListener("input", (event) => {
     );
     return;
   }
-  const knowledgeDocumentField = event.target.closest("[data-knowledge-document-field]");
-  if (knowledgeDocumentField) {
-    updateKnowledgeBaseDocumentField(
-      Number(knowledgeDocumentField.dataset.documentIndex),
-      knowledgeDocumentField.dataset.knowledgeDocumentField,
-      knowledgeDocumentField.value,
-    );
-    return;
-  }
   const memberField = event.target.closest("[data-team-member-field]");
   if (memberField) {
     updateMemberField(Number(memberField.dataset.memberIndex), memberField.dataset.teamMemberField, memberField.value);
@@ -8752,14 +10346,6 @@ document.addEventListener("input", (event) => {
 document.addEventListener("change", (event) => {
   if (!(event.target instanceof Element)) {
     return;
-  }
-  const knowledgeDocumentField = event.target.closest("[data-knowledge-document-field]");
-  if (knowledgeDocumentField) {
-    updateKnowledgeBaseDocumentField(
-      Number(knowledgeDocumentField.dataset.documentIndex),
-      knowledgeDocumentField.dataset.knowledgeDocumentField,
-      knowledgeDocumentField.value,
-    );
   }
   const teamDefinitionReviewOverrideField = event.target.closest("[data-team-definition-review-override-field]");
   if (teamDefinitionReviewOverrideField) {
@@ -8868,8 +10454,3 @@ window.visualViewport?.addEventListener("scroll", syncTeamChatViewportHeight);
     showResult(taskResult, { error: error.message });
   }
 })();
-
-
-
-
-

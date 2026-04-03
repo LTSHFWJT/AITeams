@@ -13,6 +13,7 @@ class AppSettings:
     memory_root: Path
     workspace_root: Path
     static_dir: Path
+    local_models_root: Path
     deepagents_skill_root: Path | None = None
     checkpoint_db_path: Path | None = None
     default_workspace_id: str = "local-workspace"
@@ -31,8 +32,10 @@ class AppSettings:
             self.deepagents_skill_root = (self.data_dir / "deepagents-skills").expanduser().resolve()
         else:
             self.deepagents_skill_root = Path(self.deepagents_skill_root).expanduser().resolve()
+        self.local_models_root = Path(self.local_models_root).expanduser().resolve()
         self.checkpoint_db_path.parent.mkdir(parents=True, exist_ok=True)
         self.deepagents_skill_root.mkdir(parents=True, exist_ok=True)
+        self.local_models_root.mkdir(parents=True, exist_ok=True)
 
     @classmethod
     def load(cls) -> "AppSettings":
@@ -43,6 +46,7 @@ class AppSettings:
         workspace_root = Path(os.getenv("AITEAMS_WORKSPACE_DIR", data_dir / "workspaces")).expanduser().resolve()
         deepagents_skill_root = Path(os.getenv("AITEAMS_DEEPAGENTS_SKILL_DIR", data_dir / "deepagents-skills")).expanduser().resolve()
         checkpoint_db_path = Path(os.getenv("AITEAMS_CHECKPOINT_DB", data_dir / "langgraph-checkpoints.sqlite")).expanduser().resolve()
+        local_models_root = Path(os.getenv("AITEAMS_LOCAL_MODELS_DIR", project_root / "models")).expanduser().resolve()
         static_dir = Path(__file__).resolve().parents[1] / "static"
 
         data_dir.mkdir(parents=True, exist_ok=True)
@@ -51,6 +55,7 @@ class AppSettings:
         workspace_root.mkdir(parents=True, exist_ok=True)
         deepagents_skill_root.mkdir(parents=True, exist_ok=True)
         checkpoint_db_path.parent.mkdir(parents=True, exist_ok=True)
+        local_models_root.mkdir(parents=True, exist_ok=True)
 
         return cls(
             project_root=project_root,
@@ -58,6 +63,7 @@ class AppSettings:
             metadata_db_path=metadata_db_path,
             memory_root=memory_root,
             workspace_root=workspace_root,
+            local_models_root=local_models_root,
             deepagents_skill_root=deepagents_skill_root,
             checkpoint_db_path=checkpoint_db_path,
             static_dir=static_dir,

@@ -18,6 +18,7 @@
         <div class="top-menu">
           <button type="button" class="top-nav-button active" data-nav-section="overview">总览</button>
           <button type="button" class="top-nav-button" data-nav-section="resources">资源中心</button>
+          <button type="button" class="top-nav-button" data-nav-section="config">配置中心</button>
           <button type="button" class="top-nav-button" data-nav-section="orchestration">编排中心</button>
           <button type="button" class="top-nav-button" data-nav-section="delivery">交付中心</button>
         </div>
@@ -35,8 +36,8 @@
               <button type="button" class="nav-button" data-page-target="providers">
                 <strong>模型提供方</strong>
               </button>
-              <button type="button" class="nav-button" data-page-target="retrieval-config">
-                <strong>检索配置</strong>
+              <button type="button" class="nav-button" data-page-target="local-models">
+                <strong>本地模型</strong>
               </button>
               <button type="button" class="nav-button" data-page-target="plugins">
                 <strong>插件中心</strong>
@@ -55,6 +56,11 @@
               </button>
               <button type="button" class="nav-button" data-page-target="agent-definitions">
                 <strong>Agent 管理</strong>
+              </button>
+            </div>
+            <div class="sub-menu" data-nav-panel="config">
+              <button type="button" class="nav-button" data-page-target="retrieval-config">
+                <strong>检索配置</strong>
               </button>
             </div>
             <div class="sub-menu" data-nav-panel="orchestration">
@@ -229,6 +235,113 @@
             </div>
           </section>
 
+          <section class="page-view" data-page="local-models">
+            <div class="page-head">
+              <div>
+                <h2>本地模型</h2>
+              </div>
+            </div>
+            <div class="page-grid provider-page-grid">
+              <section class="panel panel-wide">
+                <div class="provider-toolbar knowledge-base-toolbar">
+                  <div class="knowledge-base-toolbar-actions local-model-toolbar-actions">
+                    <button id="local-model-open-create" type="button">新增</button>
+                  </div>
+                </div>
+                <div class="provider-list-head local-model-list-head">
+                  <span>名称</span>
+                  <span>类型</span>
+                  <span>模型路径</span>
+                  <span>更新时间</span>
+                  <span>操作</span>
+                </div>
+                <div id="local-model-list" class="provider-list"></div>
+                <div class="provider-pagination">
+                  <div id="local-model-pagination-meta" class="provider-pagination-meta"></div>
+                  <label class="page-size-mini">
+                    <span>每页</span>
+                    <select id="local-model-page-size">
+                      <option value="10" selected>10</option>
+                      <option value="20">20</option>
+                      <option value="50">50</option>
+                    </select>
+                  </label>
+                </div>
+                <pre id="local-model-result" class="result hidden"></pre>
+              </section>
+            </div>
+          </section>
+
+          <div id="local-model-modal" class="modal-shell hidden">
+            <div class="modal-backdrop" data-local-model-modal-close></div>
+            <section class="modal-card resource-modal-card knowledge-base-modal-card local-model-modal-card">
+              <div class="modal-head">
+                <h3 id="local-model-modal-title">新增本地模型</h3>
+              </div>
+              <form id="local-model-form" class="form resource-editor-form">
+                <div class="form-grid two">
+                  <label><span>名称</span><input id="local-model-name" placeholder="BAAI bge-m3 本地模型" /></label>
+                  <label>
+                    <span>类型</span>
+                    <select id="local-model-type">
+                      <option value="Embed">Embed</option>
+                      <option value="Rerank">Rerank</option>
+                      <option value="Chat">Chat</option>
+                    </select>
+                  </label>
+                </div>
+                <label>
+                  <span>模型路径</span>
+                  <input id="local-model-path" placeholder="上传后自动写入 models/..." readonly />
+                  <small class="field-note">上传后会把模型目录复制到仓库 `models/` 下，并同步写入本地模型表。</small>
+                </label>
+
+                <div class="knowledge-base-upload-panel">
+                  <div class="knowledge-base-upload-head">
+                    <div>
+                      <h4>模型文件夹</h4>
+                      <p class="field-note">选择整个模型文件夹上传，目录结构会原样保留。</p>
+                    </div>
+                    <div class="modal-actions knowledge-base-upload-actions">
+                      <button id="local-model-upload-folder" type="button" class="ghost">选择文件夹</button>
+                    </div>
+                  </div>
+                  <input id="local-model-folder-input" type="file" class="hidden" aria-hidden="true" tabindex="-1" webkitdirectory directory multiple />
+                  <div
+                    id="local-model-dropzone"
+                    class="skill-import-dropzone knowledge-base-dropzone local-model-dropzone"
+                    role="button"
+                    tabindex="0"
+                    aria-label="点击选择模型文件夹，或将文件夹拖到这里"
+                  >
+                    <div class="skill-import-dropzone-icon" aria-hidden="true">
+                      <svg viewBox="0 0 24 24" fill="none">
+                        <path d="M12 15.5V7.25" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+                        <path d="M8.75 10.5 12 7.25l3.25 3.25" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+                        <path d="M8 17.25h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+                        <path d="M7.5 19.5h9a4.5 4.5 0 0 0 1-8.89A6 6 0 0 0 6.32 9.2 4 4 0 0 0 7.5 19.5Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"></path>
+                      </svg>
+                    </div>
+                    <strong>点击上传模型文件夹</strong>
+                    <span>或拖拽文件夹到这里</span>
+                    <span class="skill-import-dropzone-trigger">选择文件夹</span>
+                  </div>
+                  <div id="local-model-upload-selection" class="skill-import-selection empty" aria-live="polite">
+                    <span class="skill-import-selection-placeholder">未选择待上传模型文件</span>
+                  </div>
+                </div>
+
+                <div class="knowledge-base-modal-footer">
+                  <div id="local-model-modal-result" class="result hidden"></div>
+                  <div class="modal-actions">
+                    <button id="local-model-cancel" type="button" class="ghost">取消</button>
+                    <button id="local-model-save" type="submit">保存本地模型</button>
+                  </div>
+                </div>
+              </form>
+            </section>
+          </div>
+
           <section class="page-view" data-page="retrieval-config">
             <div class="page-head">
               <div>
@@ -242,55 +355,66 @@
                 </div>
                 <div id="retrieval-summary" class="system-banner"></div>
                 <form id="retrieval-settings-form" class="form resource-editor-form">
-                  <div class="retrieval-block">
-                    <div class="retrieval-block-head">
-                      <h4>Embedding</h4>
-                      <p class="field-note">默认走 `HashEmbedder`。切到 Provider 后会重建当前 LanceDB 索引。</p>
-                    </div>
-                    <div class="form-grid three">
-                      <label>
+                    <div class="retrieval-block">
+                      <div class="retrieval-block-head">
+                        <h4>Embedding</h4>
+                      </div>
+                    <div class="retrieval-inline-grid">
+                      <label class="retrieval-mode-wrap">
                         <span>模式</span>
                         <select id="retrieval-embedding-mode">
-                          <option value="hash">HashEmbedder</option>
+                          <option value="disabled">关闭</option>
+                          <option value="local">Local HuggingFace</option>
                           <option value="provider">Provider Embedding</option>
                         </select>
                       </label>
-                      <label>
-                        <span>Provider</span>
-                        <select id="retrieval-embedding-provider"></select>
-                      </label>
-                      <label>
-                        <span>模型</span>
-                        <select id="retrieval-embedding-model"></select>
-                      </label>
+                      <div id="retrieval-embedding-fields" class="retrieval-inline-fields hidden" hidden aria-hidden="true">
+                        <label id="retrieval-embedding-provider-wrap" class="hidden">
+                          <span>Provider</span>
+                          <select id="retrieval-embedding-provider"></select>
+                        </label>
+                        <label id="retrieval-embedding-model-wrap" class="hidden">
+                          <span>模型</span>
+                          <select id="retrieval-embedding-model"></select>
+                        </label>
+                        <label id="retrieval-embedding-local-model-wrap" class="hidden">
+                          <span>本地模型</span>
+                          <select id="retrieval-embedding-local-model"></select>
+                        </label>
+                      </div>
                     </div>
                   </div>
 
-                  <div class="retrieval-block">
-                    <div class="retrieval-block-head">
-                      <h4>Rerank</h4>
-                      <p class="field-note">可选增强阶段。关闭时仅走向量召回和词法融合。</p>
-                    </div>
-                    <div class="form-grid three">
-                      <label>
+                    <div class="retrieval-block">
+                      <div class="retrieval-block-head">
+                        <h4>Rerank</h4>
+                      </div>
+                    <div class="retrieval-inline-grid">
+                      <label class="retrieval-mode-wrap">
                         <span>模式</span>
                         <select id="retrieval-rerank-mode">
                           <option value="disabled">关闭</option>
+                          <option value="local">Local FlagEmbedding</option>
                           <option value="provider">Provider Rerank</option>
                         </select>
                       </label>
-                      <label>
-                        <span>Provider</span>
-                        <select id="retrieval-rerank-provider"></select>
-                      </label>
-                      <label>
-                        <span>模型</span>
-                        <select id="retrieval-rerank-model"></select>
-                      </label>
+                      <div id="retrieval-rerank-fields" class="retrieval-inline-fields hidden" hidden aria-hidden="true">
+                        <label id="retrieval-rerank-provider-wrap" class="hidden">
+                          <span>Provider</span>
+                          <select id="retrieval-rerank-provider"></select>
+                        </label>
+                        <label id="retrieval-rerank-model-wrap" class="hidden">
+                          <span>模型</span>
+                          <select id="retrieval-rerank-model"></select>
+                        </label>
+                        <label id="retrieval-rerank-local-model-wrap" class="hidden">
+                          <span>本地模型</span>
+                          <select id="retrieval-rerank-local-model"></select>
+                        </label>
+                      </div>
                     </div>
                   </div>
 
-                  <pre id="retrieval-settings-result" class="result hidden"></pre>
                   <div class="modal-actions">
                     <button id="retrieval-settings-refresh" type="button" class="ghost">刷新</button>
                     <button id="retrieval-settings-save" type="submit">保存</button>
@@ -583,14 +707,6 @@
             <div class="page-grid provider-page-grid">
               <section class="panel panel-wide">
                 <div class="provider-toolbar skill-toolbar">
-                  <form id="skill-search-form" class="skill-toolbar-form">
-                    <label class="skill-search-field">
-                      <span>搜索</span>
-                      <input id="skill-search-input" placeholder="按名称、简介或分组搜索" />
-                    </label>
-                    <button id="skill-search-submit" type="submit" class="ghost">搜索</button>
-                    <button id="skill-search-reset" type="button" class="ghost">重置</button>
-                  </form>
                   <div class="skill-toolbar-actions">
                     <div class="skill-view-switch">
                       <button id="skill-view-skills" type="button" class="skill-view-toggle active">Skill 列表</button>
@@ -600,7 +716,6 @@
                   </div>
                 </div>
                 <div id="skill-management-skills-view" class="skill-management-view">
-                  <div id="skill-group-list" class="skill-group-strip"></div>
                   <div class="provider-list-head skill-management-list-head">
                     <span>Skill</span>
                     <span>分组</span>
@@ -623,9 +738,6 @@
                 <div id="skill-management-groups-view" class="skill-management-view hidden">
                   <div class="skill-group-manager">
                     <section class="skill-group-manager-list-panel">
-                      <div class="skill-group-manager-toolbar">
-                        <h4>Skill 分组</h4>
-                      </div>
                       <div class="provider-list-head skill-group-management-list-head">
                         <span>分组</span>
                         <span>简介</span>
@@ -693,18 +805,20 @@
                       data-empty-list-label="暂无可选分组"
                     ></div>
                     <select id="skill-import-groups" multiple class="hidden" aria-hidden="true" tabindex="-1"></select>
-                    <div class="skill-group-picker">
-                      <button id="skill-group-open-manage-inline" type="button" class="ghost">管理分组</button>
+                    <div class="skill-import-group-toolbar">
+                      <div class="skill-group-picker">
+                        <button id="skill-group-open-manage-inline" type="button" class="ghost">管理分组</button>
+                      </div>
+                      <div class="modal-actions skill-modal-actions">
+                        <button id="skill-cancel" type="button" class="ghost">取消</button>
+                        <button id="skill-validate" type="button" class="ghost">校验结构</button>
+                        <button id="skill-save" type="submit">导入 Skill</button>
+                      </div>
                     </div>
                   </div>
                 </div>
                 <div class="skill-modal-footer">
                   <div id="skill-modal-result" class="result skill-modal-result hidden" data-result-format="skill-modal"></div>
-                  <div class="modal-actions skill-modal-actions">
-                    <button id="skill-cancel" type="button" class="ghost">取消</button>
-                    <button id="skill-validate" type="button" class="ghost">校验结构</button>
-                    <button id="skill-save" type="submit">导入 Skill</button>
-                  </div>
                 </div>
               </form>
             </section>
@@ -847,44 +961,146 @@
                 <h2>知识库</h2>
               </div>
             </div>
-            <div class="page-grid resource-page-grid">
-              <section class="panel">
-                <div class="panel-title">
-                  <h3>Knowledge Base</h3>
-                </div>
-                <form id="knowledge-base-form" class="form resource-editor-form">
-                  <div class="form-grid two">
-                    <label><span>Key</span><input id="knowledge-base-key" placeholder="kb.platform.delivery" /></label>
-                    <label><span>名称</span><input id="knowledge-base-name" placeholder="平台交付知识库" /></label>
-                  </div>
-                  <label><span>说明</span><textarea id="knowledge-base-description" rows="3" placeholder="说明知识库覆盖的内容范围"></textarea></label>
-
-                  <div class="member-toolbar">
-                    <span class="section-mini-title">文档</span>
-                    <div class="member-toolbar-actions">
-                      <button id="knowledge-base-document-add" type="button" class="ghost">添加文档</button>
-                    </div>
-                  </div>
-                  <div class="field-note">保存知识库时会同步保存文档，供内置 `kb.retrieve` 检索插件使用。</div>
-                  <div id="knowledge-base-document-list" class="member-list"></div>
-                  <textarea id="knowledge-base-documents" class="hidden" aria-hidden="true"></textarea>
-
-                  <div class="modal-actions">
-                    <button id="knowledge-base-reset" type="button" class="ghost">新建</button>
-                    <button id="knowledge-base-save" type="submit">保存</button>
-                  </div>
-                </form>
-                <pre id="knowledge-base-result" class="result hidden"></pre>
-              </section>
-
+            <div class="page-grid provider-page-grid">
               <section class="panel panel-wide">
-                <div class="panel-title">
-                  <h3>列表</h3>
+                <div class="provider-toolbar knowledge-base-toolbar">
+                  <div class="knowledge-base-toolbar-actions knowledge-base-list-toolbar-actions">
+                    <button id="knowledge-base-open-create" type="button">新增</button>
+                  </div>
                 </div>
-                <div id="knowledge-base-list" class="list"></div>
+                <div class="provider-list-head knowledge-base-list-head">
+                  <span>知识库</span>
+                  <span>文件数</span>
+                  <span>更新时间</span>
+                  <span>操作</span>
+                </div>
+                <div id="knowledge-base-list" class="provider-list"></div>
+                <div class="provider-pagination">
+                  <div id="knowledge-base-pagination-meta" class="provider-pagination-meta"></div>
+                  <label class="page-size-mini">
+                    <span>每页</span>
+                    <select id="knowledge-base-page-size">
+                      <option value="10" selected>10</option>
+                      <option value="20">20</option>
+                      <option value="50">50</option>
+                    </select>
+                  </label>
+                </div>
+                <pre id="knowledge-base-result" class="result hidden"></pre>
               </section>
             </div>
           </section>
+
+          <div id="knowledge-base-modal" class="modal-shell hidden">
+            <div class="modal-backdrop" data-knowledge-base-modal-close></div>
+            <section class="modal-card resource-modal-card knowledge-base-modal-card">
+              <div class="modal-head knowledge-base-modal-head">
+                <div class="knowledge-base-modal-heading">
+                  <h3 id="knowledge-base-modal-title">新增知识库</h3>
+                </div>
+              </div>
+              <form id="knowledge-base-form" class="form resource-editor-form">
+                <div class="form-grid knowledge-base-meta-grid">
+                  <label><span>名称</span><input id="knowledge-base-name" placeholder="平台交付知识库" /></label>
+                </div>
+
+                <div class="knowledge-base-transfer-layout">
+                  <section class="knowledge-base-upload-panel knowledge-base-stage-panel">
+                    <div class="knowledge-base-upload-head knowledge-base-stage-topbar">
+                      <div>
+                        <h4>文档池</h4>
+                      </div>
+                      <label class="knowledge-document-search">
+                        <input id="knowledge-base-pool-query" placeholder="搜索文档池文件" aria-label="搜索文档池文件" />
+                      </label>
+                    </div>
+                    <input id="knowledge-base-file-input" type="file" class="hidden" aria-hidden="true" tabindex="-1" multiple />
+                    <input id="knowledge-base-folder-input" type="file" class="hidden" aria-hidden="true" tabindex="-1" webkitdirectory directory multiple />
+                    <div class="knowledge-list-header knowledge-stage-list-header">
+                      <label class="knowledge-document-select-toggle">
+                        <input id="knowledge-base-stage-select-all" type="checkbox" aria-label="选择文档池全部文件" />
+                      </label>
+                      <span class="knowledge-list-header-title">文件名</span>
+                    </div>
+                    <div id="knowledge-base-upload-selection" class="knowledge-stage-list empty" aria-live="polite">
+                      <span class="skill-import-selection-placeholder">暂无可用文档</span>
+                    </div>
+                    <div id="knowledge-base-stage-selection-actions" class="knowledge-selection-bar hidden" hidden>
+                      <button id="knowledge-base-stage-move" type="button">移入知识库</button>
+                      <button id="knowledge-base-stage-remove" type="button" class="ghost warn">删除所选文档</button>
+                    </div>
+                    <div
+                      id="knowledge-base-dropzone"
+                      class="skill-import-dropzone knowledge-base-dropzone"
+                      role="button"
+                      tabindex="0"
+                      aria-label="点击选择文件，或将文件与文件夹拖到这里"
+                    >
+                      <div class="skill-import-dropzone-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none">
+                          <path d="M12 15.5V7.25" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+                          <path d="M8.75 10.5 12 7.25l3.25 3.25" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+                          <path d="M8 17.25h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+                          <path d="M7.5 19.5h9a4.5 4.5 0 0 0 1-8.89A6 6 0 0 0 6.32 9.2 4 4 0 0 0 7.5 19.5Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"></path>
+                        </svg>
+                      </div>
+                      <strong>上传文件或文件夹</strong>
+                      <span>点击空白区域上传文件，或拖拽文件 / 文件夹到这里</span>
+                      <div class="knowledge-base-dropzone-actions">
+                        <button id="knowledge-base-upload-folder" type="button" class="ghost skill-import-dropzone-trigger">选择文件夹</button>
+                      </div>
+                    </div>
+                  </section>
+
+                  <div class="knowledge-base-transfer-rail" aria-hidden="true">
+                    <div class="knowledge-base-transfer-icon">
+                      <svg viewBox="0 0 24 24" fill="none">
+                        <path d="M7 8h10" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+                        <path d="m13 4 4 4-4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+                        <path d="M17 16H7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+                        <path d="m11 12-4 4 4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+                      </svg>
+                    </div>
+                  </div>
+
+                  <div class="knowledge-base-documents-shell knowledge-base-documents-panel">
+                    <div class="knowledge-base-documents-head knowledge-base-documents-topbar">
+                      <div>
+                        <h4>知识库文档</h4>
+                      </div>
+                      <label class="knowledge-document-search">
+                        <input id="knowledge-base-document-query" placeholder="搜索文件名、路径或内容预览" aria-label="搜索知识库文档" />
+                      </label>
+                    </div>
+                    <div class="knowledge-base-documents-workspace">
+                      <section class="knowledge-document-list-panel">
+                        <div class="knowledge-list-header knowledge-document-list-header">
+                          <label class="knowledge-document-select-toggle">
+                            <input id="knowledge-document-select-all" type="checkbox" aria-label="选择知识库全部文件" />
+                          </label>
+                          <span class="knowledge-list-header-title">文件名</span>
+                        </div>
+                        <div id="knowledge-base-document-list" class="knowledge-document-list" aria-live="polite"></div>
+                        <div id="knowledge-document-selection-actions" class="knowledge-selection-bar hidden" hidden>
+                          <button id="knowledge-base-document-move-back" type="button" class="ghost">移回文档池</button>
+                          <button id="knowledge-document-embed-add" type="button" class="ghost">同步嵌入</button>
+                          <button id="knowledge-document-embed-delete" type="button" class="ghost warn">删除嵌入</button>
+                        </div>
+                      </section>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="knowledge-base-modal-footer">
+                  <div id="knowledge-base-modal-result" class="result hidden"></div>
+                  <div class="modal-actions">
+                    <button id="knowledge-base-cancel" type="button" class="ghost">取消</button>
+                    <button id="knowledge-base-save" type="submit">保存知识库</button>
+                  </div>
+                </div>
+              </form>
+            </section>
+          </div>
 
           <section class="page-view" data-page="review-policies">
             <div class="page-head">

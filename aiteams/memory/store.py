@@ -29,6 +29,15 @@ from langgraph.store.base import (
 from aiteams.ai_gateway import AIGateway, ProviderRequestError
 from aiteams.utils import json_dumps, json_loads
 
+DEFAULT_LOCAL_EMBEDDING_MODEL = "BAAI/bge-m3"
+
+try:  # pragma: no cover - optional runtime dependency
+    from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+    HUGGINGFACE_EMBED_IMPORT_ERROR: Exception | None = None
+except Exception as exc:  # pragma: no cover - optional runtime dependency
+    HuggingFaceEmbedding = None
+    HUGGINGFACE_EMBED_IMPORT_ERROR = exc
+
 
 TOKEN_RE = re.compile(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]")
 NS_SEP = "\x1f"
@@ -190,6 +199,14 @@ def normalize_vector(values: list[float], *, dimension: int | None = None) -> li
     return [value / norm for value in vector]
 
 
+def _missing_local_embedding_dependency_message() -> str:
+    detail = f" ({HUGGINGFACE_EMBED_IMPORT_ERROR})" if HUGGINGFACE_EMBED_IMPORT_ERROR is not None else ""
+    return (
+        "本地 HuggingFaceEmbedding 依赖未安装，请安装 `llama-index-embeddings-huggingface` 及其 SentenceTransformer 依赖。"
+        f"{detail}"
+    )
+
+
 class HashEmbedder:
     def __init__(self, dimension: int = 32):
         self.dimension = dimension
@@ -240,6 +257,37 @@ class GatewayEmbedder:
         source = result.vectors[0] if result.vectors else []
         if not source:
             raise ProviderRequestError(f"Provider embedding model `{self._model}` returned an empty vector.")
+        return len(source)
+
+
+class HuggingFaceLocalEmbedder:
+    def __init__(self, model_name: str, *, cache_folder: str | Path):
+        if HuggingFaceEmbedding is None:
+            raise RuntimeError(_missing_local_embedding_dependency_message())
+        resolved_cache = Path(cache_folder).expanduser().resolve()
+        resolved_cache.mkdir(parents=True, exist_ok=True)
+        self._model = HuggingFaceEmbedding(
+            model_name=model_name,
+            cache_folder=str(resolved_cache),
+            show_progress_bar=False,
+        )
+        self.dimension = self._probe_dimension()
+        self.model_name = f"local:huggingface:{model_name}:{self.dimension}"
+
+    def embed_text(self, text: str) -> list[float]:
+        source = [float(value or 0.0) for value in list(self._model.get_text_embedding(text) or [])]
+        if not source:
+            return [0.0] * self.dimension
+        if len(source) != self.dimension:
+            raise ProviderRequestError(
+                f"Local HuggingFace embedding dimension changed unexpectedly: expected {self.dimension}, got {len(source)}."
+            )
+        return normalize_vector(source, dimension=self.dimension)
+
+    def _probe_dimension(self) -> int:
+        source = [float(value or 0.0) for value in list(self._model.get_query_embedding("local embedding probe") or [])]
+        if not source:
+            raise ProviderRequestError("Local HuggingFace embedding model returned an empty vector.")
         return len(source)
 
 
@@ -437,7 +485,7 @@ class SQLiteLanceDBStore(BaseStore):
         self._catalog.commit()
         self._hot = LMDBHotCache(self.root / "lmdb")
         self._gateway = gateway or AIGateway()
-        self._embedder: GatewayEmbedder | None = None
+        self._embedder: GatewayEmbedder | HashEmbedder | HuggingFaceLocalEmbedder | None = None
         self._reranker: GatewayReranker | None = None
         self._index: LanceIndex | NullVectorIndex = NullVectorIndex(self.root / "lancedb")
         self._default_index_fields = list(default_index_fields or ["content"])
@@ -499,8 +547,16 @@ class SQLiteLanceDBStore(BaseStore):
             "vector_dim": self._vector_dim,
         }
 
-    def _build_embedder(self, config: dict[str, Any]) -> GatewayEmbedder | None:
+    def _build_embedder(self, config: dict[str, Any]) -> GatewayEmbedder | HashEmbedder | HuggingFaceLocalEmbedder | None:
         mode = str(config.get("mode") or "disabled").strip().lower()
+        if mode == "hash":
+            dimension = max(8, int(config.get("dimension") or self._hash_vector_dim or 32))
+            return HashEmbedder(dimension=dimension)
+        if mode == "local":
+            model_name = str(config.get("model") or config.get("model_name") or DEFAULT_LOCAL_EMBEDDING_MODEL).strip()
+            if not model_name:
+                return None
+            return HuggingFaceLocalEmbedder(model_name, cache_folder=self.root / "huggingface-cache")
         if mode != "provider":
             return None
         provider = dict(config.get("provider") or {})
@@ -521,6 +577,21 @@ class SQLiteLanceDBStore(BaseStore):
 
     def _retrieval_embedding_payload(self, config: dict[str, Any], *, model_name: str, vector_dim: int | None) -> dict[str, Any]:
         mode = str(config.get("mode") or "disabled").strip().lower()
+        if mode == "hash":
+            return {
+                "mode": "hash",
+                "model_name": str(config.get("model_name") or model_name or f"hash-{vector_dim or self._hash_vector_dim}"),
+                "vector_enabled": True,
+                "vector_dim": vector_dim,
+            }
+        if mode == "local":
+            return {
+                "mode": "local",
+                "backend": "huggingface",
+                "model_name": str(config.get("model_name") or config.get("model") or DEFAULT_LOCAL_EMBEDDING_MODEL),
+                "vector_enabled": True,
+                "vector_dim": vector_dim,
+            }
         if mode != "provider":
             return {"mode": "disabled", "model_name": None, "vector_enabled": False, "vector_dim": None}
         return {
@@ -990,7 +1061,7 @@ class LMDBLanceDBStore(BaseStore):
         self._expiry = self._env.open_db(PRIMARY_EXPIRY_DB)
         self._embed_cache = self._env.open_db(EMBED_CACHE_DB)
         self._gateway = gateway or AIGateway()
-        self._embedder: GatewayEmbedder | None = None
+        self._embedder: GatewayEmbedder | HashEmbedder | HuggingFaceLocalEmbedder | None = None
         self._reranker: GatewayReranker | None = None
         self._index: LanceIndex | NullVectorIndex = NullVectorIndex(self.root / "lancedb")
         self._default_index_fields = list(default_index_fields or ["content"])
@@ -1092,8 +1163,16 @@ class LMDBLanceDBStore(BaseStore):
             return 60.0
         return max(float(interval) * 60.0, 5.0)
 
-    def _build_embedder(self, config: dict[str, Any]) -> GatewayEmbedder | None:
+    def _build_embedder(self, config: dict[str, Any]) -> GatewayEmbedder | HashEmbedder | HuggingFaceLocalEmbedder | None:
         mode = str(config.get("mode") or "disabled").strip().lower()
+        if mode == "hash":
+            dimension = max(8, int(config.get("dimension") or self._hash_vector_dim or 32))
+            return HashEmbedder(dimension=dimension)
+        if mode == "local":
+            model_name = str(config.get("model") or config.get("model_name") or DEFAULT_LOCAL_EMBEDDING_MODEL).strip()
+            if not model_name:
+                return None
+            return HuggingFaceLocalEmbedder(model_name, cache_folder=self.root / "huggingface-cache")
         if mode != "provider":
             return None
         provider = dict(config.get("provider") or {})
@@ -1114,6 +1193,21 @@ class LMDBLanceDBStore(BaseStore):
 
     def _retrieval_embedding_payload(self, config: dict[str, Any], *, model_name: str, vector_dim: int | None) -> dict[str, Any]:
         mode = str(config.get("mode") or "disabled").strip().lower()
+        if mode == "hash":
+            return {
+                "mode": "hash",
+                "model_name": str(config.get("model_name") or model_name or f"hash-{vector_dim or self._hash_vector_dim}"),
+                "vector_enabled": True,
+                "vector_dim": vector_dim,
+            }
+        if mode == "local":
+            return {
+                "mode": "local",
+                "backend": "huggingface",
+                "model_name": str(config.get("model_name") or config.get("model") or DEFAULT_LOCAL_EMBEDDING_MODEL),
+                "vector_enabled": True,
+                "vector_dim": vector_dim,
+            }
         if mode != "provider":
             return {"mode": "disabled", "model_name": None, "vector_enabled": False, "vector_dim": None}
         return {

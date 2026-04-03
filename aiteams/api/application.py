@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import shutil
@@ -14,6 +15,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from aiteams.agent_center import AgentCenterService
+from aiteams.knowledge import KnowledgeBaseService
 from aiteams.plugins import PluginManager
 from aiteams.role_specs import normalize_role_spec
 from aiteams.runtime.engine import RuntimeEngine
@@ -55,12 +57,15 @@ class ServiceContainer:
     workspace: WorkspaceManager
     agent_center: AgentCenterService
     plugins: PluginManager
+    knowledge_bases: KnowledgeBaseService
     static_dir: Path
+    local_models_root: Path
 
     def close(self) -> None:
         agent_memory = getattr(self.runtime.agent_kernel.memory, "close", None)
         if callable(agent_memory):
             agent_memory()
+        self.knowledge_bases.close()
         self.plugins.close()
         self.store.close()
 
@@ -158,6 +163,21 @@ class WebApplication:
             if method == "POST" and path == "/api/agent-center/providers/test-model":
                 payload = self._parse_json(body)
                 return self._json(200, self.container.agent_center.test_provider_model(payload))
+            if method == "GET" and path == "/api/agent-center/local-models":
+                limit = self._optional_int(query.get("limit"))
+                offset = self._optional_int(query.get("offset")) or 0
+                return self._json(
+                    200,
+                    self._local_model_page_payload(
+                        limit=limit,
+                        offset=offset,
+                        query=self._optional_str(query.get("query")),
+                        model_type=self._optional_str(query.get("model_type")),
+                    ),
+                )
+            if method == "POST" and path == "/api/agent-center/local-models":
+                payload = self._parse_json(body)
+                return self._json(200, self._save_local_model(payload, local_model_id=self._optional_str(payload.get("id"))))
             if method == "GET" and path == "/api/agent-center/retrieval-settings":
                 return self._json(200, self.container.agent_center.get_retrieval_settings())
             if method == "PUT" and path == "/api/agent-center/retrieval-settings":
@@ -165,6 +185,7 @@ class WebApplication:
                 saved = self.container.agent_center.save_retrieval_settings(payload)
                 try:
                     applied = self.container.runtime.agent_kernel.memory.configure_retrieval(saved.get("runtime"))
+                    knowledge_applied = self.container.knowledge_bases.configure_retrieval(saved.get("runtime"))
                 except Exception as exc:
                     raise AppError(400, f"Retrieval settings saved but could not be applied: {exc}") from exc
                 return self._json(
@@ -173,6 +194,8 @@ class WebApplication:
                         "settings": saved.get("settings"),
                         "updated_at": saved.get("updated_at"),
                         "applied": applied,
+                        "runtime_applied": applied,
+                        "knowledge_applied": knowledge_applied,
                     },
                 )
             if path.startswith("/api/agent-center/providers/"):
@@ -191,6 +214,21 @@ class WebApplication:
                     if deleted is None:
                         raise AppError(404, "Provider profile does not exist.")
                     return self._json(200, {"deleted": True, "id": provider_id})
+            if path.startswith("/api/agent-center/local-models/"):
+                local_model_id = path.rsplit("/", 1)[-1]
+                local_model = self.container.agent_center.normalize_local_model(self.container.store.get_local_model(local_model_id))
+                if local_model is None:
+                    raise AppError(404, "Local model does not exist.")
+                if method == "GET":
+                    return self._json(200, self._local_model_resource(local_model))
+                if method == "PUT":
+                    payload = self._parse_json(body)
+                    return self._json(200, self._save_local_model(payload, local_model_id=local_model_id))
+                if method == "DELETE":
+                    deleted = self._delete_local_model(local_model_id)
+                    if deleted is None:
+                        raise AppError(404, "Local model does not exist.")
+                    return self._json(200, {"deleted": True, "id": local_model_id})
             if method == "GET" and path == "/api/agent-center/plugins":
                 limit = self._optional_int(query.get("limit"))
                 offset = self._optional_int(query.get("offset")) or 0
@@ -405,33 +443,135 @@ class WebApplication:
                         raise AppError(404, "Static memory does not exist.")
                     return self._json(200, {"deleted": True, "id": static_memory_id})
             if method == "GET" and path == "/api/agent-center/knowledge-bases":
-                return self._json(200, {"items": self.container.store.list_knowledge_bases()})
+                limit = self._optional_int(query.get("limit"))
+                offset = self._optional_int(query.get("offset")) or 0
+                return self._json(
+                    200,
+                    self._knowledge_base_page_payload(
+                        limit=limit,
+                        offset=offset,
+                        query=self._optional_str(query.get("query")),
+                    ),
+                )
             if method == "POST" and path == "/api/agent-center/knowledge-bases":
                 payload = self._parse_json(body)
                 return self._json(200, self._save_knowledge_base(payload, knowledge_base_id=self._optional_str(payload.get("id"))))
+            if method == "GET" and path == "/api/agent-center/knowledge-pool-documents":
+                limit = self._optional_int(query.get("limit"))
+                offset = self._optional_int(query.get("offset")) or 0
+                return self._json(
+                    200,
+                    self.container.knowledge_bases.list_pool_documents_page(
+                        limit=limit,
+                        offset=offset,
+                        query=self._optional_str(query.get("query")),
+                        exclude_knowledge_base_id=self._optional_str(query.get("exclude_knowledge_base_id")),
+                    ),
+                )
+            if method == "POST" and path == "/api/agent-center/knowledge-pool-documents/upload":
+                payload = self._parse_json(body)
+                try:
+                    return self._json(200, self.container.knowledge_bases.import_pool_uploaded_files(payload))
+                except ValueError as exc:
+                    raise AppError(400, str(exc)) from exc
+            if method == "POST" and path == "/api/agent-center/knowledge-pool-documents/actions":
+                payload = self._parse_json(body)
+                try:
+                    return self._json(
+                        200,
+                        self.container.knowledge_bases.manage_pool_documents(
+                            action=str(payload.get("action") or ""),
+                            document_ids=list(payload.get("document_ids") or []),
+                        ),
+                    )
+                except ValueError as exc:
+                    raise AppError(400, str(exc)) from exc
             if path.startswith("/api/agent-center/knowledge-bases/"):
-                knowledge_base_id = path.rsplit("/", 1)[-1]
+                suffix = path.removeprefix("/api/agent-center/knowledge-bases/")
+                parts = [part for part in suffix.split("/") if part]
+                knowledge_base_id = parts[0] if parts else ""
+                if len(parts) == 2 and parts[1] == "documents":
+                    if self.container.store.get_knowledge_base(knowledge_base_id) is None:
+                        raise AppError(404, "Knowledge base does not exist.")
+                    if method == "GET":
+                        limit = self._optional_int(query.get("limit"))
+                        offset = self._optional_int(query.get("offset")) or 0
+                        return self._json(
+                            200,
+                            self.container.knowledge_bases.list_documents_page(
+                                knowledge_base_id=knowledge_base_id,
+                                limit=limit,
+                                offset=offset,
+                                query=self._optional_str(query.get("query")),
+                                embedding_status=self._optional_str(query.get("embedding_status")),
+                            ),
+                        )
+                if len(parts) == 2 and parts[1] == "pool-documents":
+                    if self.container.store.get_knowledge_base(knowledge_base_id) is None:
+                        raise AppError(404, "Knowledge base does not exist.")
+                    if method == "POST":
+                        payload = self._parse_json(body)
+                        try:
+                            return self._json(
+                                200,
+                                self.container.knowledge_bases.add_pool_documents_to_knowledge_base(
+                                    knowledge_base_id,
+                                    pool_document_ids=list(payload.get("document_ids") or []),
+                                ),
+                            )
+                        except ValueError as exc:
+                            raise AppError(400, str(exc)) from exc
+                if len(parts) == 3 and parts[1] == "documents" and parts[2] == "embeddings":
+                    if self.container.store.get_knowledge_base(knowledge_base_id) is None:
+                        raise AppError(404, "Knowledge base does not exist.")
+                    if method == "POST":
+                        payload = self._parse_json(body)
+                        try:
+                            return self._json(
+                                200,
+                                self.container.knowledge_bases.manage_document_embeddings(
+                                    knowledge_base_id,
+                                    action=str(payload.get("action") or ""),
+                                    document_ids=list(payload.get("document_ids") or []),
+                                ),
+                            )
+                        except ValueError as exc:
+                            raise AppError(400, str(exc)) from exc
+                if len(parts) == 2 and parts[1] == "upload":
+                    if self.container.store.get_knowledge_base(knowledge_base_id) is None:
+                        raise AppError(404, "Knowledge base does not exist.")
+                    if method == "POST":
+                        payload = self._parse_json(body)
+                        return self._json(200, self._import_knowledge_base_uploaded_files(knowledge_base_id, payload))
                 knowledge_base = self.container.store.get_knowledge_base(knowledge_base_id)
                 if knowledge_base is None:
                     raise AppError(404, "Knowledge base does not exist.")
                 if method == "GET":
-                    return self._json(200, knowledge_base)
+                    return self._json(200, self._knowledge_base_resource(knowledge_base))
                 if method == "PUT":
                     payload = self._parse_json(body)
                     return self._json(200, self._save_knowledge_base(payload, knowledge_base_id=knowledge_base_id))
                 if method == "DELETE":
-                    deleted = self.container.store.delete_knowledge_base(knowledge_base_id)
+                    deleted = self.container.knowledge_bases.delete_knowledge_base(knowledge_base_id)
                     if deleted is None:
                         raise AppError(404, "Knowledge base does not exist.")
                     return self._json(200, {"deleted": True, "id": knowledge_base_id})
             if method == "GET" and path == "/api/agent-center/knowledge-documents":
+                knowledge_base_id = self._optional_str(query.get("knowledge_base_id"))
+                limit = self._optional_int(query.get("limit"))
+                offset = self._optional_int(query.get("offset")) or 0
+                if knowledge_base_id:
+                    return self._json(
+                        200,
+                        self.container.knowledge_bases.list_documents_page(
+                            knowledge_base_id=knowledge_base_id,
+                            limit=limit,
+                            offset=offset,
+                        ),
+                    )
                 return self._json(
                     200,
-                    {
-                        "items": self.container.store.list_knowledge_documents(
-                            knowledge_base_id=self._optional_str(query.get("knowledge_base_id"))
-                        )
-                    },
+                    {"items": [self._knowledge_document_resource(item) for item in self.container.store.list_knowledge_documents()]},
                 )
             if method == "POST" and path == "/api/agent-center/knowledge-documents":
                 payload = self._parse_json(body)
@@ -442,12 +582,14 @@ class WebApplication:
                 if knowledge_document is None:
                     raise AppError(404, "Knowledge document does not exist.")
                 if method == "GET":
-                    return self._json(200, knowledge_document)
+                    payload = self._knowledge_document_resource(knowledge_document)
+                    payload["content_text"] = str(knowledge_document.get("content_text") or "")
+                    return self._json(200, payload)
                 if method == "PUT":
                     payload = self._parse_json(body)
                     return self._json(200, self._save_knowledge_document(payload, knowledge_document_id=knowledge_document_id))
                 if method == "DELETE":
-                    deleted = self.container.store.delete_knowledge_document(knowledge_document_id)
+                    deleted = self.container.knowledge_bases.delete_document(knowledge_document_id)
                     if deleted is None:
                         raise AppError(404, "Knowledge document does not exist.")
                     return self._json(200, {"deleted": True, "id": knowledge_document_id})
@@ -959,6 +1101,245 @@ class WebApplication:
             "has_secret": bool((payload.get("secret") or {}).get("api_key") or payload.get("api_key")),
         }
 
+    def _local_models_root(self) -> Path:
+        root = Path(self.container.local_models_root).expanduser().resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
+    def _local_model_absolute_path(self, model_path: Any) -> Path:
+        value = str(model_path or "").replace("\\", "/").strip()
+        root = self._local_models_root()
+        if not value:
+            return root
+        candidate = Path(value).expanduser()
+        if candidate.is_absolute():
+            return candidate.resolve()
+        parts = [part for part in PurePosixPath(value).parts if part and part not in {".", ".."}]
+        if parts and parts[0] == root.name:
+            return (root.parent / Path(*parts)).resolve()
+        return root.joinpath(*parts).resolve() if parts else root
+
+    def _local_model_relative_path(self, target_dir: Path) -> str:
+        root = self._local_models_root()
+        resolved = target_dir.expanduser().resolve()
+        try:
+            return resolved.relative_to(root.parent).as_posix()
+        except ValueError:
+            try:
+                return resolved.relative_to(root).as_posix()
+            except ValueError:
+                return str(resolved)
+
+    def _local_model_is_managed_path(self, target_dir: Path) -> bool:
+        try:
+            resolved = target_dir.expanduser().resolve()
+            root = self._local_models_root()
+            if resolved == root:
+                return False
+            resolved.relative_to(root)
+            return True
+        except ValueError:
+            return False
+
+    def _normalize_local_model_directory_name(self, raw_name: Any, *, fallback: str) -> str:
+        name = trim_text(str(raw_name or "").replace("\\", "/").strip().strip("/"), limit=255)
+        if "/" in name:
+            name = name.split("/")[-1]
+        if not name:
+            return fallback
+        relative = PurePosixPath(name)
+        if relative.is_absolute() or not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+            return fallback
+        return name
+
+    def _normalize_local_model_upload_path(self, raw_path: Any) -> PurePosixPath:
+        value = str(raw_path or "").replace("\\", "/").strip()
+        if not value:
+            raise AppError(400, "上传文件缺少 path。")
+        relative_path = PurePosixPath(value)
+        if relative_path.is_absolute() or not relative_path.parts or any(part in {"", ".", ".."} for part in relative_path.parts):
+            raise AppError(400, f"无效的模型文件路径：{value}")
+        return relative_path
+
+    def _write_uploaded_local_model_bundle(
+        self,
+        payload: dict[str, Any],
+        root_path: Path,
+        *,
+        local_model_id: str,
+        default_name: str,
+    ) -> dict[str, Any]:
+        raw_files = payload.get("files")
+        if not isinstance(raw_files, list) or not raw_files:
+            raise AppError(400, "请先选择要上传的模型文件夹。")
+        entries: list[dict[str, Any]] = []
+        total_bytes = 0
+        for index, item in enumerate(raw_files, start=1):
+            if not isinstance(item, dict):
+                raise AppError(400, f"文件 #{index} 必须是对象。")
+            relative_path = self._normalize_local_model_upload_path(item.get("path"))
+            encoded = item.get("content_base64")
+            if not isinstance(encoded, str):
+                raise AppError(400, f"文件 #{index} 缺少 content_base64。")
+            try:
+                content = base64.b64decode(encoded, validate=True)
+            except Exception as exc:
+                raise AppError(400, f"文件 #{index} 的内容不是合法 base64。") from exc
+            total_bytes += len(content)
+            entries.append(
+                {
+                    "relative_path": relative_path,
+                    "content": content,
+                }
+            )
+        has_nested_path = any(len(entry["relative_path"].parts) > 1 for entry in entries)
+        first_parts = {entry["relative_path"].parts[0] for entry in entries if entry["relative_path"].parts}
+        common_root = next(iter(first_parts)) if has_nested_path and len(first_parts) == 1 else ""
+        fallback_name = slugify(default_name, fallback=f"local-model-{local_model_id[-8:]}")
+        directory_name = self._normalize_local_model_directory_name(
+            self._optional_str(payload.get("source_name")) or common_root,
+            fallback=fallback_name,
+        )
+        written = 0
+        for entry in entries:
+            relative_path = entry["relative_path"]
+            target_parts = relative_path.parts[1:] if common_root and relative_path.parts and relative_path.parts[0] == common_root else relative_path.parts
+            if not target_parts:
+                continue
+            target = root_path.joinpath(*target_parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(entry["content"])
+            written += 1
+        if written <= 0:
+            raise AppError(400, "模型文件夹内没有可写入的文件。")
+        return {
+            "directory_name": directory_name,
+            "file_count": written,
+            "total_bytes": total_bytes,
+        }
+
+    def _sync_uploaded_local_model(
+        self,
+        payload: dict[str, Any],
+        *,
+        existing: dict[str, Any] | None,
+        local_model_id: str,
+        model_name: str,
+    ) -> dict[str, Any]:
+        previous_model_path = self._optional_str((existing or {}).get("model_path"))
+        previous_target_dir = self._local_model_absolute_path(previous_model_path) if previous_model_path else None
+        with TemporaryDirectory(prefix="aiteams-local-model-upload-") as temp_dir:
+            upload_info = self._write_uploaded_local_model_bundle(
+                payload,
+                Path(temp_dir),
+                local_model_id=local_model_id,
+                default_name=model_name,
+            )
+            target_dir = self._local_models_root() / upload_info["directory_name"]
+            model_path = self._local_model_relative_path(target_dir)
+            conflict = self.container.store.get_local_model_by_path(model_path)
+            if conflict is not None and str(conflict.get("id") or "") != local_model_id:
+                raise AppError(409, f"模型目录 `{model_path}` 已被本地模型“{conflict.get('name') or conflict.get('id') or ''}”使用。")
+            if target_dir.exists():
+                shutil.rmtree(target_dir, ignore_errors=True)
+            target_dir.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.copytree(Path(temp_dir), target_dir)
+            except OSError as exc:
+                raise AppError(500, f"复制模型目录失败：{exc}") from exc
+            if previous_target_dir is not None and previous_target_dir != target_dir and self._local_model_is_managed_path(previous_target_dir) and previous_target_dir.exists():
+                shutil.rmtree(previous_target_dir, ignore_errors=True)
+            return {
+                "model_path": model_path,
+                "resolved_path": str(target_dir),
+                "file_count": int(upload_info["file_count"]),
+                "total_bytes": int(upload_info["total_bytes"]),
+            }
+
+    def _local_model_resource(self, record: dict[str, Any]) -> dict[str, Any]:
+        payload = self.container.agent_center.normalize_local_model(record)
+        assert payload is not None
+        model_path = str(payload.get("model_path") or "").strip()
+        resolved_path = self._local_model_absolute_path(model_path) if model_path else None
+        payload["model_path"] = model_path
+        payload["path_display"] = model_path or "-"
+        payload["resolved_path"] = str(resolved_path) if resolved_path is not None else ""
+        payload["exists"] = bool(resolved_path and resolved_path.exists())
+        return payload
+
+    def _local_model_page_payload(
+        self,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+        query: str | None = None,
+        model_type: str | None = None,
+    ) -> dict[str, Any]:
+        page = self.container.store.list_local_models_page(limit=limit, offset=offset, query=query, model_type=model_type)
+        return {
+            "items": [self._local_model_resource(item) for item in page["items"]],
+            "total": page["total"],
+            "offset": page["offset"],
+            "limit": page["limit"],
+        }
+
+    def _save_local_model(self, payload: dict[str, Any], *, local_model_id: str | None) -> dict[str, Any]:
+        existing = self.container.store.get_local_model(local_model_id) if local_model_id else None
+        record_id = local_model_id or self._optional_str(payload.get("id")) or make_uuid7()
+        current_name = trim_text(payload.get("name") or (existing or {}).get("name") or "", limit=255)
+        upload_result = None
+        model_path = self._optional_str(payload.get("model_path")) or self._optional_str((existing or {}).get("model_path"))
+        if isinstance(payload.get("files"), list) and payload.get("files"):
+            upload_result = self._sync_uploaded_local_model(
+                payload,
+                existing=existing,
+                local_model_id=record_id,
+                model_name=current_name or self._optional_str(payload.get("source_name")) or record_id,
+            )
+            model_path = str(upload_result.get("model_path") or "")
+        try:
+            normalized = self.container.agent_center.prepare_local_model(
+                {
+                    **dict(payload),
+                    "name": current_name,
+                    "model_path": model_path,
+                },
+                existing=existing,
+            )
+        except ValueError as exc:
+            raise AppError(400, str(exc)) from exc
+        conflict = self.container.store.get_local_model_by_path(str(normalized["model_path"]))
+        if conflict is not None and str(conflict.get("id") or "") != record_id:
+            raise AppError(409, f"模型路径 `{normalized['model_path']}` 已被本地模型“{conflict.get('name') or conflict.get('id') or ''}”使用。")
+        try:
+            saved = self.container.store.save_local_model(
+                local_model_id=record_id,
+                name=str(normalized["name"]),
+                model_type=str(normalized["model_type"]),
+                model_path=str(normalized["model_path"]),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise AppError(400, "本地模型保存失败。", extra={"errors": [str(exc)]}) from exc
+        resource = self._local_model_resource(saved)
+        if upload_result is not None:
+            resource["upload"] = {
+                "file_count": int(upload_result["file_count"]),
+                "total_bytes": int(upload_result["total_bytes"]),
+            }
+        return resource
+
+    def _delete_local_model(self, local_model_id: str) -> dict[str, Any] | None:
+        existing = self.container.store.get_local_model(local_model_id)
+        if existing is None:
+            return None
+        deleted = self.container.store.delete_local_model(local_model_id)
+        model_path = self._optional_str((existing or {}).get("model_path"))
+        if model_path:
+            target_dir = self._local_model_absolute_path(model_path)
+            if self._local_model_is_managed_path(target_dir) and target_dir.exists():
+                shutil.rmtree(target_dir, ignore_errors=True)
+        return deleted
+
     def _save_plugin(self, payload: dict[str, Any], *, plugin_id: str | None) -> dict[str, Any]:
         self._require_fields(payload, "key", "name")
         existing = self.container.store.get_plugin(plugin_id, include_secret=True) if plugin_id else None
@@ -1227,8 +1608,8 @@ class WebApplication:
             raise AppError(400, f"Invalid deepagents skill directory name: {name}")
         return name
 
-    def _deepagents_skill_storage_path(self, *, skill_id: str, directory_name: str) -> str:
-        return PurePosixPath(skill_id, directory_name).as_posix()
+    def _deepagents_skill_storage_path(self, *, directory_name: str) -> str:
+        return PurePosixPath(directory_name).as_posix()
 
     def _deepagents_skill_library_target(self, storage_path: str) -> Path:
         normalized = self._normalize_skill_storage_path(storage_path)
@@ -1324,7 +1705,6 @@ class WebApplication:
         self,
         skill: ValidatedSkill,
         *,
-        skill_id: str,
         existing: dict[str, Any] | None = None,
     ) -> dict[str, str]:
         metadata = skill.metadata
@@ -1332,7 +1712,7 @@ class WebApplication:
             raise AppError(400, f"Skill metadata is missing for '{skill.directory_path}'.")
         source_dir = skill.directory_path.expanduser().resolve()
         directory_name = self._deepagents_skill_directory_name(skill)
-        storage_path = self._deepagents_skill_storage_path(skill_id=skill_id, directory_name=directory_name)
+        storage_path = self._deepagents_skill_storage_path(directory_name=directory_name)
         target_dir = self._deepagents_skill_library_target(storage_path)
         previous_storage_path = self._normalize_skill_storage_path((existing or {}).get("storage_path"))
         previous_target_dir = self._deepagents_skill_library_target(previous_storage_path) if previous_storage_path else None
@@ -1491,7 +1871,7 @@ class WebApplication:
         conflict = self.container.store.get_skill_by_name(metadata.name)
         if conflict is not None and str(conflict.get("id") or "") != skill_id:
             raise AppError(409, f"Skill name '{metadata.name}' already exists.")
-        backend_sync = self._sync_validated_skill_to_deepagents_library(skill, skill_id=skill_id, existing=existing)
+        backend_sync = self._sync_validated_skill_to_deepagents_library(skill, existing=existing)
         saved = self.container.store.save_skill(
             skill_id=skill_id,
             name=metadata.name,
@@ -1665,27 +2045,113 @@ class WebApplication:
         payload["spec_json"] = normalize_role_spec(dict(record.get("spec_json") or {}))
         return payload
 
+    def _knowledge_base_resource(self, record: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(record)
+        payload.pop("description", None)
+        payload["config_json"] = dict(record.get("config_json") or {})
+        if "document_count" not in payload and str(payload.get("id") or "").strip():
+            payload["document_count"] = len(
+                self.container.store.list_knowledge_documents(knowledge_base_id=str(payload["id"]))
+            )
+        payload["file_count"] = int(payload.get("file_count") or payload.get("document_count") or 0)
+        return payload
+
+    def _knowledge_base_page_payload(
+        self,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+        query: str | None = None,
+    ) -> dict[str, Any]:
+        page = self.container.store.list_knowledge_bases_page(limit=limit, offset=offset, query=query)
+        return {
+            "items": [self._knowledge_base_resource(item) for item in page["items"]],
+            "total": page["total"],
+            "offset": page["offset"],
+            "limit": page["limit"],
+        }
+
+    def _knowledge_document_resource(self, record: dict[str, Any]) -> dict[str, Any]:
+        metadata = dict(record.get("metadata_json") or {})
+        chunk_count = int(metadata.get("chunk_count") or 0)
+        embedding_status = str(metadata.get("embedding_status") or "").strip().lower()
+        if embedding_status not in {"embedded", "not_embedded", "empty", "unknown"}:
+            embedding_status = "empty" if chunk_count <= 0 else "unknown"
+        embedded_chunk_count = int(metadata.get("embedded_chunk_count") or (chunk_count if embedding_status == "embedded" else 0))
+        return {
+            "id": record.get("id"),
+            "knowledge_base_id": record.get("knowledge_base_id"),
+            "key": record.get("key"),
+            "title": record.get("title"),
+            "source_path": record.get("source_path"),
+            "updated_at": record.get("updated_at"),
+            "created_at": record.get("created_at"),
+            "status": record.get("status"),
+            "file_size": int(metadata.get("file_size") or 0),
+            "chunk_count": chunk_count,
+            "embedded_chunk_count": embedded_chunk_count,
+            "embedding_status": embedding_status,
+            "embedding_status_label": {
+                "embedded": "已嵌入",
+                "not_embedded": "未嵌入",
+                "empty": "空文件",
+                "unknown": "未记录",
+            }.get(embedding_status, "未记录"),
+            "embedding_enabled": embedding_status == "embedded" and embedded_chunk_count > 0,
+            "embedding_updated_at": str(metadata.get("embedding_updated_at") or "").strip() or None,
+            "embedding_backend": str(metadata.get("embedding_backend") or "").strip() or None,
+            "embedding_model_name": str(metadata.get("embedding_model_name") or "").strip() or None,
+            "embedding_model_label": str(metadata.get("embedding_model_label") or "").strip() or None,
+            "pool_document_id": str(metadata.get("pool_document_id") or "").strip() or None,
+            "preview": str(metadata.get("preview") or "").strip() or trim_text(str(record.get("content_text") or ""), limit=180),
+            "metadata": metadata,
+        }
+
     def _save_knowledge_base(self, payload: dict[str, Any], *, knowledge_base_id: str | None) -> dict[str, Any]:
-        self._require_fields(payload, "key", "name")
-        return self.container.store.save_knowledge_base(
-            knowledge_base_id=knowledge_base_id,
-            key=str(payload["key"]),
-            name=str(payload["name"]),
-            description=str(payload.get("description") or ""),
-            config=dict(payload.get("config") or {}),
+        existing = self.container.store.get_knowledge_base(knowledge_base_id) if knowledge_base_id else None
+        record_id = knowledge_base_id or self._optional_str(payload.get("id")) or make_uuid7()
+        name = trim_text(payload.get("name") or (existing or {}).get("name") or "")
+        if not name:
+            raise AppError(400, "Field 'name' is required.")
+        key = self._optional_str(payload.get("key")) or self._optional_str((existing or {}).get("key")) or record_id
+        saved = self.container.store.save_knowledge_base(
+            knowledge_base_id=record_id,
+            key=key,
+            name=name,
+            config=dict(payload.get("config") or (existing or {}).get("config_json") or {}),
         )
+        return self._knowledge_base_resource(saved)
 
     def _save_knowledge_document(self, payload: dict[str, Any], *, knowledge_document_id: str | None) -> dict[str, Any]:
-        self._require_fields(payload, "knowledge_base_id", "key", "title")
-        return self.container.store.save_knowledge_document(
-            knowledge_document_id=knowledge_document_id,
-            knowledge_base_id=str(payload["knowledge_base_id"]),
-            key=str(payload["key"]),
-            title=str(payload["title"]),
-            source_path=self._optional_str(payload.get("source_path")),
+        self._require_fields(payload, "knowledge_base_id")
+        previous = self.container.store.get_knowledge_document(knowledge_document_id) if knowledge_document_id else None
+        knowledge_base_id = str(payload["knowledge_base_id"])
+        document_id = knowledge_document_id or self._optional_str(payload.get("id"))
+        source_path = self._optional_str(payload.get("source_path"))
+        title = trim_text(payload.get("title") or (previous or {}).get("title") or source_path or "文档")
+        key = (
+            self._optional_str(payload.get("key"))
+            or self._optional_str((previous or {}).get("key"))
+            or hashlib.sha1(str(source_path or title or make_uuid7()).encode("utf-8")).hexdigest()
+        )
+        saved = self.container.store.save_knowledge_document(
+            knowledge_document_id=document_id,
+            knowledge_base_id=knowledge_base_id,
+            key=key,
+            title=title,
+            source_path=source_path,
             content_text=str(payload.get("content_text") or ""),
             metadata=dict(payload.get("metadata") or {}),
         )
+        synced = self.container.knowledge_bases.sync_document(saved, previous_document=previous)
+        return self._knowledge_document_resource(synced)
+
+    def _import_knowledge_base_uploaded_files(self, knowledge_base_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            result = self.container.knowledge_bases.import_uploaded_files(knowledge_base_id, payload)
+        except ValueError as exc:
+            raise AppError(400, str(exc)) from exc
+        return result
 
     def _save_review_policy(self, payload: dict[str, Any], *, review_policy_id: str | None) -> dict[str, Any]:
         self._require_fields(payload, "key", "name")
@@ -2067,5 +2533,3 @@ class AITeamsHTTPServer(ThreadingHTTPServer):
     def __init__(self, server_address: tuple[str, int], application: WebApplication):
         super().__init__(server_address, _RequestHandler)
         self.application = application
-
-
