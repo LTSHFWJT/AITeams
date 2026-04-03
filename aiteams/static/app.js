@@ -252,9 +252,12 @@ const state = {
     limit: 8,
     offset: 0,
     query: "",
+    embeddingStatus: "all",
   },
   knowledgeBaseDocumentSelection: [],
   knowledgeBaseDocumentActionBusy: false,
+  knowledgeBaseEmbeddingJobId: null,
+  knowledgeBaseEmbeddingJobPollVersion: 0,
   knowledgeBaseUploadFiles: [],
   knowledgeBaseStagedSelection: [],
   knowledgeBaseUploadDragActive: false,
@@ -560,6 +563,7 @@ const knowledgeBaseModalTitle = document.querySelector("#knowledge-base-modal-ti
 const knowledgeBaseModalCloseButtons = Array.from(document.querySelectorAll("[data-knowledge-base-modal-close]"));
 const knowledgeBaseForm = document.querySelector("#knowledge-base-form");
 const knowledgeBaseName = document.querySelector("#knowledge-base-name");
+const knowledgeBaseTransferLayout = document.querySelector("#knowledge-base-transfer-layout");
 const knowledgeBaseFileInput = document.querySelector("#knowledge-base-file-input");
 const knowledgeBaseFolderInput = document.querySelector("#knowledge-base-folder-input");
 const knowledgeBaseDropzone = document.querySelector("#knowledge-base-dropzone");
@@ -572,11 +576,11 @@ const knowledgeBaseStageRemove = document.querySelector("#knowledge-base-stage-r
 const knowledgeBaseStageMove = document.querySelector("#knowledge-base-stage-move");
 const knowledgeBaseDocumentMoveBack = document.querySelector("#knowledge-base-document-move-back");
 const knowledgeBaseDocumentQuery = document.querySelector("#knowledge-base-document-query");
+const knowledgeBaseDocumentStatus = document.querySelector("#knowledge-base-document-status");
 const knowledgeBaseDocumentList = document.querySelector("#knowledge-base-document-list");
 const knowledgeDocumentSelectionActions = document.querySelector("#knowledge-document-selection-actions");
 const knowledgeDocumentSelectAll = document.querySelector("#knowledge-document-select-all");
 const knowledgeDocumentEmbedAdd = document.querySelector("#knowledge-document-embed-add");
-const knowledgeDocumentEmbedDelete = document.querySelector("#knowledge-document-embed-delete");
 const knowledgeBaseCancel = document.querySelector("#knowledge-base-cancel");
 const knowledgeBaseSave = document.querySelector("#knowledge-base-save");
 const knowledgeBaseModalResult = document.querySelector("#knowledge-base-modal-result");
@@ -1387,6 +1391,7 @@ function showResult(target, value) {
     return;
   }
   target.classList.remove("hidden");
+  target.classList.remove("pending");
   if (target.dataset.resultFormat === "skill-modal") {
     target.innerHTML = renderSkillModalResult(value);
     return;
@@ -1394,11 +1399,103 @@ function showResult(target, value) {
   target.textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
 }
 
+function showPendingResult(target, message = "处理中，请等待...") {
+  if (!target) {
+    return;
+  }
+  target.classList.remove("hidden");
+  target.classList.add("pending");
+  target.textContent = String(message || "处理中，请等待...");
+}
+
+function clearKnowledgeEmbeddingJobPolling() {
+  state.knowledgeBaseEmbeddingJobId = null;
+  state.knowledgeBaseEmbeddingJobPollVersion = Number(state.knowledgeBaseEmbeddingJobPollVersion || 0) + 1;
+}
+
+function renderKnowledgeEmbeddingJobProgress(job) {
+  const percent = Math.max(0, Math.min(100, Number(job?.progress_percent || 0)));
+  const message = String(job?.message || "处理中，请等待...").trim() || "处理中，请等待...";
+  const currentTitle = String(job?.current_document_title || "").trim();
+  const totalDocuments = Math.max(0, Number(job?.total_documents || 0));
+  const processedDocuments = Math.max(0, Number(job?.processed_documents || 0));
+  const completedDocuments = Math.max(0, Number(job?.completed_documents || 0));
+  const failedDocuments = Math.max(0, Number(job?.failed_documents || 0));
+  const totalChunks = Math.max(0, Number(job?.total_chunks_estimated || 0));
+  const embeddedChunks = Math.max(0, Number(job?.embedded_chunks_completed || 0));
+  const details = [
+    `进度 ${percent.toFixed(1)}%`,
+    `文档 ${processedDocuments}/${totalDocuments || 0}`,
+    totalChunks ? `Chunk ${embeddedChunks}/${totalChunks}` : "",
+    failedDocuments ? `失败 ${failedDocuments}` : "",
+    completedDocuments ? `完成 ${completedDocuments}` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return `
+    <div class="knowledge-embedding-progress">
+      <div class="knowledge-embedding-progress-head">
+        <strong>${escapeHtml(message)}</strong>
+        <span>${escapeHtml(details)}</span>
+      </div>
+      <div class="knowledge-embedding-progress-bar" aria-hidden="true">
+        <span style="width:${percent.toFixed(1)}%"></span>
+      </div>
+      ${currentTitle ? `<div class="knowledge-embedding-progress-current">${escapeHtml(currentTitle)}</div>` : ""}
+    </div>
+  `;
+}
+
+function showKnowledgeEmbeddingJobProgress(target, job) {
+  if (!target) {
+    return;
+  }
+  target.classList.remove("hidden");
+  target.classList.add("pending");
+  target.innerHTML = renderKnowledgeEmbeddingJobProgress(job || {});
+}
+
+async function waitForKnowledgeEmbeddingJob(jobRef) {
+  const jobId = String(jobRef?.job?.id || jobRef?.id || "").trim();
+  if (!jobId) {
+    throw new Error("知识库嵌入任务创建失败。");
+  }
+  const pollVersion = Number(state.knowledgeBaseEmbeddingJobPollVersion || 0) + 1;
+  state.knowledgeBaseEmbeddingJobId = jobId;
+  state.knowledgeBaseEmbeddingJobPollVersion = pollVersion;
+  let latest = jobRef?.job || jobRef || null;
+  if (latest) {
+    showKnowledgeEmbeddingJobProgress(knowledgeBaseModalResult, latest);
+  }
+  while (state.knowledgeBaseEmbeddingJobPollVersion === pollVersion) {
+    latest = await api(`/api/agent-center/knowledge-embedding-jobs/${encodeURIComponent(jobId)}`);
+    showKnowledgeEmbeddingJobProgress(knowledgeBaseModalResult, latest);
+    if (latest.status === "completed") {
+      if (state.knowledgeBaseEmbeddingJobPollVersion === pollVersion) {
+        clearKnowledgeEmbeddingJobPolling();
+      }
+      return latest;
+    }
+    if (latest.status === "error") {
+      if (state.knowledgeBaseEmbeddingJobPollVersion === pollVersion) {
+        clearKnowledgeEmbeddingJobPolling();
+      }
+      const error = new Error(latest.error || latest.message || "知识库嵌入任务失败。");
+      error.payload = { detail: latest.error || latest.message || "知识库嵌入任务失败。" };
+      error.job = latest;
+      throw error;
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 800));
+  }
+  return latest;
+}
+
 function hideResult(target) {
   if (!target) {
     return;
   }
   target.classList.add("hidden");
+  target.classList.remove("pending");
   target.innerHTML = "";
   target.textContent = "";
 }
@@ -6388,13 +6485,29 @@ function formatFileSize(value) {
 }
 
 function openKnowledgeBaseModal() {
+  syncKnowledgeBaseModalMode();
   knowledgeBaseModal?.classList.remove("hidden");
-  knowledgeBaseDropzone?.focus();
+  if (state.editingKnowledgeBaseId) {
+    knowledgeBaseDropzone?.focus();
+    return;
+  }
+  knowledgeBaseName?.focus();
 }
 
 function closeKnowledgeBaseModal() {
+  clearKnowledgeEmbeddingJobPolling();
   knowledgeBaseModal?.classList.add("hidden");
   hideResult(knowledgeBaseModalResult);
+}
+
+function syncKnowledgeBaseModalMode() {
+  const isEditing = Boolean(state.editingKnowledgeBaseId);
+  if (knowledgeBaseTransferLayout) {
+    knowledgeBaseTransferLayout.hidden = !isEditing;
+  }
+  if (knowledgeBaseSave) {
+    knowledgeBaseSave.textContent = isEditing ? "保存知识库" : "创建知识库";
+  }
 }
 
 function knowledgeBaseStageItemId(kind, path, extra = "") {
@@ -6662,14 +6775,18 @@ async function buildKnowledgePoolUploadPayload(entries) {
 }
 
 async function loadKnowledgeBasePoolDocuments() {
+  if (!state.editingKnowledgeBaseId) {
+    setKnowledgeBasePoolDocuments([]);
+    state.knowledgeBasePoolPage.total = 0;
+    state.knowledgeBasePoolPage.offset = 0;
+    return;
+  }
   const params = new URLSearchParams();
   const query = String(state.knowledgeBasePoolPage.query || "").trim();
   if (query) {
     params.set("query", query);
   }
-  if (state.editingKnowledgeBaseId) {
-    params.set("exclude_knowledge_base_id", state.editingKnowledgeBaseId);
-  }
+  params.set("exclude_knowledge_base_id", state.editingKnowledgeBaseId);
   const payload = await api(`/api/agent-center/knowledge-pool-documents${params.toString() ? `?${params.toString()}` : ""}`);
   setKnowledgeBasePoolDocuments(payload.items || []);
   state.knowledgeBasePoolPage.total = payload.total || 0;
@@ -6694,10 +6811,15 @@ async function refreshKnowledgeBasePoolDocuments({ resetOffset = false, preferre
 }
 
 async function uploadKnowledgeBasePoolEntries(entries) {
+  const knowledgeBaseId = state.editingKnowledgeBaseId;
+  if (!knowledgeBaseId) {
+    throw new Error("请先保存知识库，再上传文件。");
+  }
   const payload = await buildKnowledgePoolUploadPayload(entries);
   if (!payload) {
     return null;
   }
+  payload.knowledge_base_id = knowledgeBaseId;
   setKnowledgeBaseUploadBusy(true);
   hideResult(knowledgeBaseModalResult);
   try {
@@ -6740,6 +6862,9 @@ function syncKnowledgeBaseDocumentFilterControls() {
   if (knowledgeBaseDocumentQuery) {
     knowledgeBaseDocumentQuery.value = state.knowledgeBaseDocumentPage.query || "";
   }
+  if (knowledgeBaseDocumentStatus) {
+    knowledgeBaseDocumentStatus.value = state.knowledgeBaseDocumentPage.embeddingStatus || "all";
+  }
 }
 
 function syncKnowledgeBaseDocumentSelection() {
@@ -6766,25 +6891,26 @@ function setKnowledgeBaseDocumentActionBusy(busy) {
   state.knowledgeBaseDocumentActionBusy = Boolean(busy);
   const disabled = state.knowledgeBaseDocumentActionBusy;
   const hasSelection = selectedKnowledgeDocumentIds().length > 0;
-  if (knowledgeDocumentSelectionActions) {
-    knowledgeDocumentSelectionActions.classList.toggle("hidden", !hasSelection);
-    knowledgeDocumentSelectionActions.hidden = !hasSelection;
-  }
-  syncKnowledgeDocumentBulkActionLabel();
   if (knowledgeDocumentEmbedAdd) {
     knowledgeDocumentEmbedAdd.disabled = disabled || !hasSelection;
-  }
-  if (knowledgeDocumentEmbedDelete) {
-    knowledgeDocumentEmbedDelete.disabled = disabled || !hasSelection;
+    if (disabled) {
+      knowledgeDocumentEmbedAdd.textContent = "处理中...";
+    } else {
+      syncKnowledgeDocumentBulkActionLabel();
+    }
   }
   if (knowledgeDocumentSelectAll) {
     knowledgeDocumentSelectAll.disabled = disabled || !(state.knowledgeBaseDocuments || []).length;
   }
   if (knowledgeBaseDocumentMoveBack) {
+    knowledgeBaseDocumentMoveBack.hidden = !hasSelection;
     knowledgeBaseDocumentMoveBack.disabled = disabled || state.knowledgeBaseUploadBusy || !selectedKnowledgeDocumentIds().length;
   }
   if (knowledgeBaseDocumentQuery) {
     knowledgeBaseDocumentQuery.disabled = disabled;
+  }
+  if (knowledgeBaseDocumentStatus) {
+    knowledgeBaseDocumentStatus.disabled = disabled;
   }
 }
 
@@ -6811,16 +6937,13 @@ function syncKnowledgeDocumentBulkActionLabel(documentIds = selectedKnowledgeDoc
   const ids = Array.from(new Set((documentIds || []).map((item) => String(item || "").trim()).filter(Boolean)));
   const { addIds, reembedIds } = classifyKnowledgeDocumentEmbeddingTargets(ids);
   let mode = "sync";
-  let label = "同步嵌入";
   if (addIds.length && !reembedIds.length) {
     mode = "add";
-    label = ids.length === 1 ? "新增嵌入" : "嵌入所选";
   } else if (reembedIds.length && !addIds.length) {
     mode = "reembed";
-    label = ids.length === 1 ? "重新嵌入" : "重嵌所选";
   }
   knowledgeDocumentEmbedAdd.dataset.bulkEmbeddingMode = mode;
-  knowledgeDocumentEmbedAdd.textContent = label;
+  knowledgeDocumentEmbedAdd.textContent = "保存并嵌入";
 }
 
 function buildKnowledgeDocumentEmbeddingResult(payload) {
@@ -6841,6 +6964,20 @@ function buildKnowledgeDocumentEmbeddingResult(payload) {
   return lines.join("\n");
 }
 
+function knowledgeDocumentActionPendingText(action, count) {
+  const total = Math.max(1, Number(count || 0));
+  if (action === "delete") {
+    return `正在删除 ${total} 个文件的嵌入，请等待...`;
+  }
+  if (action === "reembed") {
+    return `正在重嵌 ${total} 个文件，请等待...`;
+  }
+  if (action === "add") {
+    return `正在嵌入 ${total} 个文件，请等待...`;
+  }
+  return `正在保存并嵌入 ${total} 个文件，请等待...`;
+}
+
 function renderKnowledgeBaseDocuments() {
   if (!knowledgeBaseDocumentList) {
     return;
@@ -6851,14 +6988,14 @@ function renderKnowledgeBaseDocuments() {
   const selectedIds = new Set(selectedKnowledgeDocumentIds());
   const selectedCount = selectedIds.size;
   const query = String(state.knowledgeBaseDocumentPage.query || "").trim();
-  const hasFilters = Boolean(query);
+  const embeddingStatus = String(state.knowledgeBaseDocumentPage.embeddingStatus || "all").trim() || "all";
+  const hasFilters = Boolean(query || embeddingStatus !== "all");
   const allSelected = documents.length > 0 && selectedCount === documents.length;
   const partiallySelected = selectedCount > 0 && selectedCount < documents.length;
-  if (knowledgeDocumentSelectionActions) {
-    knowledgeDocumentSelectionActions.classList.toggle("hidden", !selectedCount);
-    knowledgeDocumentSelectionActions.hidden = !selectedCount;
-  }
   syncKnowledgeDocumentBulkActionLabel(Array.from(selectedIds));
+  if (knowledgeBaseDocumentMoveBack) {
+    knowledgeBaseDocumentMoveBack.hidden = !selectedCount;
+  }
   if (knowledgeDocumentSelectAll) {
     knowledgeDocumentSelectAll.checked = allSelected;
     knowledgeDocumentSelectAll.indeterminate = partiallySelected;
@@ -6904,6 +7041,7 @@ function resetKnowledgeBaseDocumentBrowser() {
     limit: Math.max(1, Number(state.knowledgeBaseDocumentPage.limit || 8)),
     offset: 0,
     query: "",
+    embeddingStatus: "all",
   };
   state.knowledgeBaseDocumentSelection = [];
   state.knowledgeBaseDocumentActionBusy = false;
@@ -7008,6 +7146,16 @@ async function moveSelectedKnowledgeDocumentsToStage() {
         });
       }
     }
+    if (movedIds.length) {
+      const job = await api(`/api/agent-center/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/embeddings`, {
+        method: "POST",
+        body: JSON.stringify({
+          action: "save",
+          document_ids: movedIds,
+        }),
+      });
+      await waitForKnowledgeEmbeddingJob(job);
+    }
     invalidateData("knowledgeBaseRefs", "knowledgeBasePage", "agentDefinitionRefs", "teamDefinitions", "controlPlane");
     await ensureKnowledgeBasesPage(true);
     await refreshKnowledgeBaseDocuments();
@@ -7042,15 +7190,15 @@ async function runKnowledgeDocumentEmbeddingAction(action, documentIds) {
   }
   setKnowledgeBaseDocumentActionBusy(true);
   renderKnowledgeBaseDocuments();
-  hideResult(knowledgeBaseModalResult);
   try {
-    const payload = await api(`/api/agent-center/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/embeddings`, {
+    const job = await api(`/api/agent-center/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/embeddings`, {
       method: "POST",
       body: JSON.stringify({
         action,
         document_ids: ids,
       }),
     });
+    const payload = (await waitForKnowledgeEmbeddingJob(job)).result || {};
     invalidateData("knowledgeBaseRefs", "knowledgeBasePage", "agentDefinitionRefs", "teamDefinitions", "controlPlane");
     await ensureKnowledgeBasesPage(true);
     await loadKnowledgeBaseDocuments(knowledgeBaseId);
@@ -7072,57 +7220,28 @@ async function runKnowledgeDocumentBulkEmbeddingAction(documentIds) {
   if (mode === "add" || mode === "reembed") {
     return runKnowledgeDocumentEmbeddingAction(mode, ids);
   }
-  const knowledgeBaseId = state.editingKnowledgeBaseId;
-  if (!knowledgeBaseId) {
-    throw new Error("请先打开一个知识库。");
-  }
   const { addIds, reembedIds } = classifyKnowledgeDocumentEmbeddingTargets(ids);
   if (!addIds.length && !reembedIds.length) {
     throw new Error("请至少选择一个文件。");
   }
-  setKnowledgeBaseDocumentActionBusy(true);
-  renderKnowledgeBaseDocuments();
-  hideResult(knowledgeBaseModalResult);
-  try {
-    const payloads = [];
-    if (addIds.length) {
-      payloads.push(
-        await api(`/api/agent-center/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/embeddings`, {
-          method: "POST",
-          body: JSON.stringify({
-            action: "add",
-            document_ids: addIds,
-          }),
-        }),
-      );
-    }
-    if (reembedIds.length) {
-      payloads.push(
-        await api(`/api/agent-center/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/embeddings`, {
-          method: "POST",
-          body: JSON.stringify({
-            action: "reembed",
-            document_ids: reembedIds,
-          }),
-        }),
-      );
-    }
-    invalidateData("knowledgeBaseRefs", "knowledgeBasePage", "agentDefinitionRefs", "teamDefinitions", "controlPlane");
-    await ensureKnowledgeBasesPage(true);
-    await loadKnowledgeBaseDocuments(knowledgeBaseId);
-    renderKnowledgeBaseDocuments();
+  const payloads = [];
+  if (addIds.length) {
+    payloads.push(await runKnowledgeDocumentEmbeddingAction("add", addIds));
+  }
+  if (reembedIds.length) {
+    payloads.push(await runKnowledgeDocumentEmbeddingAction("reembed", reembedIds));
+  }
+  if (payloads.length > 1) {
     showResult(
       knowledgeBaseModalResult,
       payloads.map((payload) => buildKnowledgeDocumentEmbeddingResult(payload)).filter(Boolean).join("\n"),
     );
-    return payloads;
-  } finally {
-    setKnowledgeBaseDocumentActionBusy(false);
-    renderKnowledgeBaseDocuments();
   }
+  return payloads;
 }
 
 function resetKnowledgeBaseForm({ openModal = false } = {}) {
+  clearKnowledgeEmbeddingJobPolling();
   state.editingKnowledgeBaseId = null;
   resetKnowledgeBaseDocumentBrowser();
   if (knowledgeBaseName) {
@@ -7135,6 +7254,7 @@ function resetKnowledgeBaseForm({ openModal = false } = {}) {
   void refreshKnowledgeBasePoolDocuments();
   hideResult(knowledgeBaseResult);
   hideResult(knowledgeBaseModalResult);
+  syncKnowledgeBaseModalMode();
   renderKnowledgeBaseDocuments();
   renderKnowledgeBases();
   if (openModal) {
@@ -7143,6 +7263,7 @@ function resetKnowledgeBaseForm({ openModal = false } = {}) {
 }
 
 async function fillKnowledgeBaseForm(item, { openModal = false } = {}) {
+  clearKnowledgeEmbeddingJobPolling();
   state.editingKnowledgeBaseId = item.id || null;
   resetKnowledgeBaseDocumentBrowser();
   if (knowledgeBaseName) {
@@ -7156,6 +7277,7 @@ async function fillKnowledgeBaseForm(item, { openModal = false } = {}) {
   await refreshKnowledgeBasePoolDocuments();
   hideResult(knowledgeBaseResult);
   hideResult(knowledgeBaseModalResult);
+  syncKnowledgeBaseModalMode();
   renderKnowledgeBaseDocuments();
   renderKnowledgeBases();
   if (openModal) {
@@ -7178,6 +7300,7 @@ function renderKnowledgeBases() {
     ? state.knowledgeBasePage.items
         .map((item) => {
           const updatedAt = formatTeamChatTime(item.updated_at) || item.updated_at || "-";
+          const embeddingModelName = String(item.embedding_model_label || item.embedding_model_name || "-").trim() || "-";
           return `
             <article class="provider-row knowledge-base-row${item.id === state.editingKnowledgeBaseId ? " active" : ""}">
               <div class="provider-main">
@@ -7185,6 +7308,12 @@ function renderKnowledgeBases() {
               </div>
               <div class="provider-cell">
                 <strong>${escapeHtml(item.file_count || item.document_count || 0)}</strong>
+              </div>
+              <div class="provider-cell">
+                <strong>${escapeHtml(item.vector_count || 0)}</strong>
+              </div>
+              <div class="provider-cell">
+                <strong title="${escapeAttribute(embeddingModelName)}">${escapeHtml(embeddingModelName)}</strong>
               </div>
               <div class="provider-cell">
                 <strong title="${escapeAttribute(item.updated_at || "-")}">${escapeHtml(updatedAt)}</strong>
@@ -7904,8 +8033,12 @@ async function loadKnowledgeBaseDocuments(knowledgeBaseId) {
   }
   const params = new URLSearchParams();
   const query = String(state.knowledgeBaseDocumentPage.query || "").trim();
+  const embeddingStatus = String(state.knowledgeBaseDocumentPage.embeddingStatus || "all").trim() || "all";
   if (query) {
     params.set("query", query);
+  }
+  if (embeddingStatus && embeddingStatus !== "all") {
+    params.set("embedding_status", embeddingStatus);
   }
   const payload = await api(`/api/agent-center/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents?${params.toString()}`);
   state.knowledgeBaseDocuments = payload.items || [];
@@ -7914,6 +8047,7 @@ async function loadKnowledgeBaseDocuments(knowledgeBaseId) {
   state.knowledgeBaseDocumentPage.limit = payload.limit || state.knowledgeBaseDocumentPage.limit;
   state.knowledgeBaseDocumentPage.offset = 0;
   state.knowledgeBaseDocumentPage.query = payload.filters?.query ?? query;
+  state.knowledgeBaseDocumentPage.embeddingStatus = payload.filters?.embedding_status ?? embeddingStatus;
   syncKnowledgeBaseDocumentSelection();
 }
 
@@ -9283,6 +9417,10 @@ knowledgeBaseDocumentQuery?.addEventListener("input", () => {
     await refreshKnowledgeBaseDocuments({ resetOffset: true });
   }, 220);
 });
+knowledgeBaseDocumentStatus?.addEventListener("change", async () => {
+  state.knowledgeBaseDocumentPage.embeddingStatus = knowledgeBaseDocumentStatus.value || "all";
+  await refreshKnowledgeBaseDocuments({ resetOffset: true });
+});
 knowledgeBasePoolQuery?.addEventListener("input", () => {
   state.knowledgeBasePoolPage.query = knowledgeBasePoolQuery.value.trim();
   window.clearTimeout(knowledgeBasePoolQueryTimer);
@@ -9296,13 +9434,6 @@ knowledgeDocumentSelectAll?.addEventListener("change", () => {
 knowledgeDocumentEmbedAdd?.addEventListener("click", async () => {
   try {
     await runKnowledgeDocumentBulkEmbeddingAction(selectedKnowledgeDocumentIds());
-  } catch (error) {
-    showResult(knowledgeBaseModalResult, errorResult(error));
-  }
-});
-knowledgeDocumentEmbedDelete?.addEventListener("click", async () => {
-  try {
-    await runKnowledgeDocumentEmbeddingAction("delete", selectedKnowledgeDocumentIds());
   } catch (error) {
     showResult(knowledgeBaseModalResult, errorResult(error));
   }

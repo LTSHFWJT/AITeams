@@ -971,6 +971,8 @@
                 <div class="provider-list-head knowledge-base-list-head">
                   <span>知识库</span>
                   <span>文件数</span>
+                  <span>向量数</span>
+                  <span>嵌入模型</span>
                   <span>更新时间</span>
                   <span>操作</span>
                 </div>
@@ -1004,7 +1006,7 @@
                   <label><span>名称</span><input id="knowledge-base-name" placeholder="平台交付知识库" /></label>
                 </div>
 
-                <div class="knowledge-base-transfer-layout">
+                <div id="knowledge-base-transfer-layout" class="knowledge-base-transfer-layout">
                   <section class="knowledge-base-upload-panel knowledge-base-stage-panel">
                     <div class="knowledge-base-upload-head knowledge-base-stage-topbar">
                       <div>
@@ -1078,13 +1080,21 @@
                           <label class="knowledge-document-select-toggle">
                             <input id="knowledge-document-select-all" type="checkbox" aria-label="选择知识库全部文件" />
                           </label>
-                          <span class="knowledge-list-header-title">文件名</span>
+                          <div class="knowledge-list-header-main">
+                            <span class="knowledge-list-header-title">文件名</span>
+                            <label class="knowledge-document-header-filter">
+                              <select id="knowledge-base-document-status" aria-label="按嵌入状态筛选知识库文档">
+                                <option value="all" selected>全部</option>
+                                <option value="embedded">已嵌入</option>
+                                <option value="not_embedded">未嵌入</option>
+                              </select>
+                            </label>
+                          </div>
                         </div>
                         <div id="knowledge-base-document-list" class="knowledge-document-list" aria-live="polite"></div>
-                        <div id="knowledge-document-selection-actions" class="knowledge-selection-bar hidden" hidden>
-                          <button id="knowledge-base-document-move-back" type="button" class="ghost">移回文档池</button>
-                          <button id="knowledge-document-embed-add" type="button" class="ghost">同步嵌入</button>
-                          <button id="knowledge-document-embed-delete" type="button" class="ghost warn">删除嵌入</button>
+                        <div id="knowledge-document-selection-actions" class="knowledge-selection-bar">
+                          <button id="knowledge-base-document-move-back" type="button" class="ghost" hidden>移回文档池</button>
+                          <button id="knowledge-document-embed-add" type="button" class="ghost">保存并嵌入</button>
                         </div>
                       </section>
                     </div>

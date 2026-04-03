@@ -486,6 +486,13 @@ class WebApplication:
                     )
                 except ValueError as exc:
                     raise AppError(400, str(exc)) from exc
+            if path.startswith("/api/agent-center/knowledge-embedding-jobs/"):
+                job_id = path.rsplit("/", 1)[-1]
+                job = self.container.knowledge_bases.get_document_embedding_job(job_id)
+                if job is None:
+                    raise AppError(404, "Knowledge embedding job does not exist.")
+                if method == "GET":
+                    return self._json(200, job)
             if path.startswith("/api/agent-center/knowledge-bases/"):
                 suffix = path.removeprefix("/api/agent-center/knowledge-bases/")
                 parts = [part for part in suffix.split("/") if part]
@@ -529,7 +536,7 @@ class WebApplication:
                         try:
                             return self._json(
                                 200,
-                                self.container.knowledge_bases.manage_document_embeddings(
+                                self.container.knowledge_bases.start_document_embedding_job(
                                     knowledge_base_id,
                                     action=str(payload.get("action") or ""),
                                     document_ids=list(payload.get("document_ids") or []),
@@ -2046,15 +2053,7 @@ class WebApplication:
         return payload
 
     def _knowledge_base_resource(self, record: dict[str, Any]) -> dict[str, Any]:
-        payload = dict(record)
-        payload.pop("description", None)
-        payload["config_json"] = dict(record.get("config_json") or {})
-        if "document_count" not in payload and str(payload.get("id") or "").strip():
-            payload["document_count"] = len(
-                self.container.store.list_knowledge_documents(knowledge_base_id=str(payload["id"]))
-            )
-        payload["file_count"] = int(payload.get("file_count") or payload.get("document_count") or 0)
-        return payload
+        return self.container.knowledge_bases._knowledge_base_resource(record)
 
     def _knowledge_base_page_payload(
         self,
@@ -2072,40 +2071,7 @@ class WebApplication:
         }
 
     def _knowledge_document_resource(self, record: dict[str, Any]) -> dict[str, Any]:
-        metadata = dict(record.get("metadata_json") or {})
-        chunk_count = int(metadata.get("chunk_count") or 0)
-        embedding_status = str(metadata.get("embedding_status") or "").strip().lower()
-        if embedding_status not in {"embedded", "not_embedded", "empty", "unknown"}:
-            embedding_status = "empty" if chunk_count <= 0 else "unknown"
-        embedded_chunk_count = int(metadata.get("embedded_chunk_count") or (chunk_count if embedding_status == "embedded" else 0))
-        return {
-            "id": record.get("id"),
-            "knowledge_base_id": record.get("knowledge_base_id"),
-            "key": record.get("key"),
-            "title": record.get("title"),
-            "source_path": record.get("source_path"),
-            "updated_at": record.get("updated_at"),
-            "created_at": record.get("created_at"),
-            "status": record.get("status"),
-            "file_size": int(metadata.get("file_size") or 0),
-            "chunk_count": chunk_count,
-            "embedded_chunk_count": embedded_chunk_count,
-            "embedding_status": embedding_status,
-            "embedding_status_label": {
-                "embedded": "已嵌入",
-                "not_embedded": "未嵌入",
-                "empty": "空文件",
-                "unknown": "未记录",
-            }.get(embedding_status, "未记录"),
-            "embedding_enabled": embedding_status == "embedded" and embedded_chunk_count > 0,
-            "embedding_updated_at": str(metadata.get("embedding_updated_at") or "").strip() or None,
-            "embedding_backend": str(metadata.get("embedding_backend") or "").strip() or None,
-            "embedding_model_name": str(metadata.get("embedding_model_name") or "").strip() or None,
-            "embedding_model_label": str(metadata.get("embedding_model_label") or "").strip() or None,
-            "pool_document_id": str(metadata.get("pool_document_id") or "").strip() or None,
-            "preview": str(metadata.get("preview") or "").strip() or trim_text(str(record.get("content_text") or ""), limit=180),
-            "metadata": metadata,
-        }
+        return self.container.knowledge_bases._document_resource(record)
 
     def _save_knowledge_base(self, payload: dict[str, Any], *, knowledge_base_id: str | None) -> dict[str, Any]:
         existing = self.container.store.get_knowledge_base(knowledge_base_id) if knowledge_base_id else None

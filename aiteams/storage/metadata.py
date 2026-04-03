@@ -276,31 +276,100 @@ SCHEMA = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS knowledge_file_blobs (
+        id TEXT PRIMARY KEY,
+        xxh128 TEXT NOT NULL,
+        storage_name TEXT NOT NULL,
+        storage_relpath TEXT NOT NULL,
+        byte_size INTEGER NOT NULL DEFAULT 0,
+        mime_type TEXT,
+        ext_hint TEXT,
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS knowledge_file_aliases (
+        id TEXT PRIMARY KEY,
+        blob_id TEXT NOT NULL,
+        filename TEXT NOT NULL,
+        normalized_filename TEXT NOT NULL,
+        suffix TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(blob_id) REFERENCES knowledge_file_blobs(id) ON DELETE CASCADE
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS knowledge_documents (
         id TEXT PRIMARY KEY,
         knowledge_base_id TEXT NOT NULL,
+        pool_document_id TEXT,
+        blob_id TEXT,
+        alias_id TEXT,
         key TEXT NOT NULL,
         title TEXT NOT NULL,
         source_path TEXT,
         content_text TEXT NOT NULL DEFAULT '',
+        document_status TEXT NOT NULL DEFAULT 'not_embedded',
+        sync_status TEXT NOT NULL DEFAULT 'idle',
+        last_error TEXT,
+        embedded_at TEXT,
+        removed_at TEXT,
         metadata_json TEXT NOT NULL DEFAULT '{}',
         status TEXT NOT NULL DEFAULT 'active',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        FOREIGN KEY(knowledge_base_id) REFERENCES knowledge_bases(id) ON DELETE CASCADE
+        FOREIGN KEY(knowledge_base_id) REFERENCES knowledge_bases(id) ON DELETE CASCADE,
+        FOREIGN KEY(pool_document_id) REFERENCES knowledge_pool_documents(id) ON DELETE SET NULL,
+        FOREIGN KEY(blob_id) REFERENCES knowledge_file_blobs(id) ON DELETE SET NULL,
+        FOREIGN KEY(alias_id) REFERENCES knowledge_file_aliases(id) ON DELETE SET NULL
     )
     """,
     """
     CREATE TABLE IF NOT EXISTS knowledge_pool_documents (
         id TEXT PRIMARY KEY,
+        knowledge_base_id TEXT NOT NULL,
+        blob_id TEXT NOT NULL,
+        alias_id TEXT NOT NULL,
         key TEXT NOT NULL,
         title TEXT NOT NULL,
         source_path TEXT,
         content_text TEXT NOT NULL DEFAULT '',
+        upload_method TEXT NOT NULL DEFAULT 'http',
         metadata_json TEXT NOT NULL DEFAULT '{}',
         status TEXT NOT NULL DEFAULT 'active',
         created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(knowledge_base_id) REFERENCES knowledge_bases(id) ON DELETE CASCADE,
+        FOREIGN KEY(blob_id) REFERENCES knowledge_file_blobs(id) ON DELETE RESTRICT,
+        FOREIGN KEY(alias_id) REFERENCES knowledge_file_aliases(id) ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS knowledge_embedding_jobs (
+        id TEXT PRIMARY KEY,
+        knowledge_base_id TEXT NOT NULL,
+        action TEXT NOT NULL DEFAULT 'save',
+        status TEXT NOT NULL DEFAULT 'pending',
+        stage TEXT NOT NULL DEFAULT 'queued',
+        total_documents INTEGER NOT NULL DEFAULT 0,
+        processed_documents INTEGER NOT NULL DEFAULT 0,
+        completed_documents INTEGER NOT NULL DEFAULT 0,
+        failed_documents INTEGER NOT NULL DEFAULT 0,
+        total_chunks_estimated INTEGER NOT NULL DEFAULT 0,
+        embedded_chunks_completed INTEGER NOT NULL DEFAULT 0,
+        current_document_id TEXT,
+        current_document_title TEXT,
+        message TEXT,
+        error_text TEXT,
+        result_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(knowledge_base_id) REFERENCES knowledge_bases(id) ON DELETE CASCADE
     )
     """,
     """
@@ -408,8 +477,15 @@ SCHEMA = [
     "CREATE INDEX IF NOT EXISTS idx_skill_group_members_skill ON skill_group_members(skill_id, updated_at DESC)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_static_memories_key_version ON static_memories(key, version)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_bases_key ON knowledge_bases(key)",
-    "CREATE INDEX IF NOT EXISTS idx_knowledge_documents_kb_key ON knowledge_documents(knowledge_base_id, key)",
-    "CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_pool_documents_key ON knowledge_pool_documents(key)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_file_blobs_xxh128 ON knowledge_file_blobs(xxh128)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_file_blobs_storage_relpath ON knowledge_file_blobs(storage_relpath)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_file_aliases_blob_filename ON knowledge_file_aliases(blob_id, normalized_filename)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_pool_documents_kb_blob ON knowledge_pool_documents(knowledge_base_id, blob_id)",
+    "CREATE INDEX IF NOT EXISTS idx_knowledge_pool_documents_kb_updated ON knowledge_pool_documents(knowledge_base_id, updated_at DESC)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_documents_kb_blob ON knowledge_documents(knowledge_base_id, blob_id)",
+    "CREATE INDEX IF NOT EXISTS idx_knowledge_documents_kb_status ON knowledge_documents(knowledge_base_id, document_status, updated_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_knowledge_embedding_jobs_kb_status ON knowledge_embedding_jobs(knowledge_base_id, status, updated_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_knowledge_embedding_jobs_updated ON knowledge_embedding_jobs(updated_at DESC)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_review_policies_key_version ON review_policies(key, version)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_team_definitions_key_version ON team_definitions(key, version)",
     "CREATE INDEX IF NOT EXISTS idx_provider_profiles_type ON provider_profiles(provider_type, updated_at DESC)",
@@ -418,7 +494,6 @@ SCHEMA = [
     "CREATE INDEX IF NOT EXISTS idx_skills_updated ON skills(updated_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_static_memories_updated ON static_memories(updated_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_knowledge_documents_kb ON knowledge_documents(knowledge_base_id, updated_at DESC)",
-    "CREATE INDEX IF NOT EXISTS idx_knowledge_pool_documents_updated ON knowledge_pool_documents(updated_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_review_policies_updated ON review_policies(updated_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_agent_definitions_role ON agent_definitions(role, updated_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_team_definitions_updated ON team_definitions(updated_at DESC)",
@@ -1877,6 +1952,7 @@ class MetadataStore:
             LEFT JOIN knowledge_documents d
                 ON d.knowledge_base_id = kb.id
                 AND d.status = 'active'
+                AND COALESCE(d.document_status, 'not_embedded') != 'removed'
             WHERE {where_sql}
             GROUP BY kb.id
             ORDER BY kb.updated_at DESC, kb.created_at DESC
@@ -1909,35 +1985,341 @@ class MetadataStore:
         self.execute("DELETE FROM knowledge_bases WHERE id = ?", (knowledge_base_id,))
         return existing
 
+    def save_knowledge_embedding_job(
+        self,
+        *,
+        job_id: str | None,
+        knowledge_base_id: str,
+        action: str,
+        status: str = "pending",
+        stage: str = "queued",
+        total_documents: int = 0,
+        processed_documents: int = 0,
+        completed_documents: int = 0,
+        failed_documents: int = 0,
+        total_chunks_estimated: int = 0,
+        embedded_chunks_completed: int = 0,
+        current_document_id: str | None = None,
+        current_document_title: str | None = None,
+        message: str | None = None,
+        error_text: str | None = None,
+        result: dict[str, Any] | None = None,
+        started_at: str | None = None,
+        finished_at: str | None = None,
+    ) -> dict[str, Any]:
+        record_id = job_id or make_uuid7()
+        now = utcnow_iso()
+        self.execute(
+            """
+            INSERT INTO knowledge_embedding_jobs(
+                id,
+                knowledge_base_id,
+                action,
+                status,
+                stage,
+                total_documents,
+                processed_documents,
+                completed_documents,
+                failed_documents,
+                total_chunks_estimated,
+                embedded_chunks_completed,
+                current_document_id,
+                current_document_title,
+                message,
+                error_text,
+                result_json,
+                created_at,
+                started_at,
+                finished_at,
+                updated_at
+            )
+            VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                COALESCE((SELECT created_at FROM knowledge_embedding_jobs WHERE id = ?), ?),
+                COALESCE(?, (SELECT started_at FROM knowledge_embedding_jobs WHERE id = ?)),
+                ?,
+                ?
+            )
+            ON CONFLICT(id) DO UPDATE SET
+                knowledge_base_id = excluded.knowledge_base_id,
+                action = excluded.action,
+                status = excluded.status,
+                stage = excluded.stage,
+                total_documents = excluded.total_documents,
+                processed_documents = excluded.processed_documents,
+                completed_documents = excluded.completed_documents,
+                failed_documents = excluded.failed_documents,
+                total_chunks_estimated = excluded.total_chunks_estimated,
+                embedded_chunks_completed = excluded.embedded_chunks_completed,
+                current_document_id = excluded.current_document_id,
+                current_document_title = excluded.current_document_title,
+                message = excluded.message,
+                error_text = excluded.error_text,
+                result_json = excluded.result_json,
+                started_at = COALESCE(excluded.started_at, knowledge_embedding_jobs.started_at),
+                finished_at = excluded.finished_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                record_id,
+                knowledge_base_id,
+                action,
+                status,
+                stage,
+                int(total_documents or 0),
+                int(processed_documents or 0),
+                int(completed_documents or 0),
+                int(failed_documents or 0),
+                int(total_chunks_estimated or 0),
+                int(embedded_chunks_completed or 0),
+                current_document_id,
+                current_document_title,
+                message,
+                error_text,
+                json_dumps(result or {}),
+                record_id,
+                now,
+                started_at,
+                record_id,
+                finished_at,
+                now,
+            ),
+        )
+        saved = self.get_knowledge_embedding_job(record_id)
+        assert saved is not None
+        return saved
+
+    def get_knowledge_embedding_job(self, job_id: str) -> dict[str, Any] | None:
+        return self._deserialize(self.fetch_one("SELECT * FROM knowledge_embedding_jobs WHERE id = ?", (job_id,)))
+
+    def get_active_knowledge_embedding_job(self, knowledge_base_id: str) -> dict[str, Any] | None:
+        return self._deserialize(
+            self.fetch_one(
+                """
+                SELECT *
+                FROM knowledge_embedding_jobs
+                WHERE knowledge_base_id = ?
+                  AND status IN ('pending', 'running')
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT 1
+                """,
+                (knowledge_base_id,),
+            )
+        )
+
+    def get_latest_knowledge_embedding_job(self, knowledge_base_id: str) -> dict[str, Any] | None:
+        return self._deserialize(
+            self.fetch_one(
+                """
+                SELECT *
+                FROM knowledge_embedding_jobs
+                WHERE knowledge_base_id = ?
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT 1
+                """,
+                (knowledge_base_id,),
+            )
+        )
+
+    def fail_active_knowledge_embedding_jobs(self, message: str) -> None:
+        now = utcnow_iso()
+        self.execute(
+            """
+            UPDATE knowledge_embedding_jobs
+            SET
+                status = 'error',
+                stage = 'interrupted',
+                message = ?,
+                error_text = ?,
+                finished_at = COALESCE(finished_at, ?),
+                updated_at = ?
+            WHERE status IN ('pending', 'running')
+            """,
+            (message, message, now, now),
+        )
+
+    def save_knowledge_file_blob(
+        self,
+        *,
+        blob_id: str | None,
+        xxh128: str,
+        storage_name: str,
+        storage_relpath: str,
+        byte_size: int,
+        mime_type: str | None = None,
+        ext_hint: str | None = None,
+        status: str = "active",
+    ) -> dict[str, Any]:
+        record_id = blob_id or make_uuid7()
+        now = utcnow_iso()
+        self.execute(
+            """
+            INSERT INTO knowledge_file_blobs(
+                id, xxh128, storage_name, storage_relpath, byte_size, mime_type, ext_hint, status, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM knowledge_file_blobs WHERE id = ?), ?), ?)
+            ON CONFLICT(id) DO UPDATE SET
+                xxh128 = excluded.xxh128,
+                storage_name = excluded.storage_name,
+                storage_relpath = excluded.storage_relpath,
+                byte_size = excluded.byte_size,
+                mime_type = excluded.mime_type,
+                ext_hint = excluded.ext_hint,
+                status = excluded.status,
+                updated_at = excluded.updated_at
+            """,
+            (record_id, xxh128, storage_name, storage_relpath, int(byte_size or 0), mime_type, ext_hint, status, record_id, now, now),
+        )
+        saved = self.get_knowledge_file_blob(record_id)
+        assert saved is not None
+        return saved
+
+    def get_knowledge_file_blob(self, blob_id: str) -> dict[str, Any] | None:
+        return self._deserialize(self.fetch_one("SELECT * FROM knowledge_file_blobs WHERE id = ?", (blob_id,)))
+
+    def get_knowledge_file_blob_by_xxh128(self, xxh128: str) -> dict[str, Any] | None:
+        return self._deserialize(
+            self.fetch_one(
+                "SELECT * FROM knowledge_file_blobs WHERE xxh128 = ? ORDER BY updated_at DESC LIMIT 1",
+                (str(xxh128 or "").strip(),),
+            )
+        )
+
+    def list_knowledge_file_blobs(self) -> list[dict[str, Any]]:
+        return self._deserialize_many(self.fetch_all("SELECT * FROM knowledge_file_blobs ORDER BY updated_at DESC"))
+
+    def delete_knowledge_file_blob(self, blob_id: str) -> dict[str, Any] | None:
+        existing = self.get_knowledge_file_blob(blob_id)
+        if existing is None:
+            return None
+        self.execute("DELETE FROM knowledge_file_blobs WHERE id = ?", (blob_id,))
+        return existing
+
+    def save_knowledge_file_alias(
+        self,
+        *,
+        alias_id: str | None,
+        blob_id: str,
+        filename: str,
+        suffix: str,
+    ) -> dict[str, Any]:
+        record_id = alias_id or make_uuid7()
+        now = utcnow_iso()
+        normalized_filename = str(filename or "").strip().replace("\\", "/").lower()
+        self.execute(
+            """
+            INSERT INTO knowledge_file_aliases(id, blob_id, filename, normalized_filename, suffix, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM knowledge_file_aliases WHERE id = ?), ?), ?)
+            ON CONFLICT(id) DO UPDATE SET
+                blob_id = excluded.blob_id,
+                filename = excluded.filename,
+                normalized_filename = excluded.normalized_filename,
+                suffix = excluded.suffix,
+                updated_at = excluded.updated_at
+            """,
+            (record_id, blob_id, filename, normalized_filename, suffix, record_id, now, now),
+        )
+        saved = self.get_knowledge_file_alias(record_id)
+        assert saved is not None
+        return saved
+
+    def get_knowledge_file_alias(self, alias_id: str) -> dict[str, Any] | None:
+        return self._deserialize(self.fetch_one("SELECT * FROM knowledge_file_aliases WHERE id = ?", (alias_id,)))
+
+    def get_knowledge_file_alias_by_blob_filename(self, *, blob_id: str, filename: str) -> dict[str, Any] | None:
+        normalized_filename = str(filename or "").strip().replace("\\", "/").lower()
+        return self._deserialize(
+            self.fetch_one(
+                """
+                SELECT *
+                FROM knowledge_file_aliases
+                WHERE blob_id = ? AND normalized_filename = ?
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (blob_id, normalized_filename),
+            )
+        )
+
+    def list_knowledge_file_aliases(self, *, blob_id: str | None = None) -> list[dict[str, Any]]:
+        if blob_id:
+            return self._deserialize_many(
+                self.fetch_all(
+                    "SELECT * FROM knowledge_file_aliases WHERE blob_id = ? ORDER BY updated_at DESC, created_at DESC",
+                    (blob_id,),
+                )
+            )
+        return self._deserialize_many(self.fetch_all("SELECT * FROM knowledge_file_aliases ORDER BY updated_at DESC, created_at DESC"))
+
     def save_knowledge_document(
         self,
         *,
         knowledge_document_id: str | None,
         knowledge_base_id: str,
+        pool_document_id: str | None = None,
+        blob_id: str | None = None,
+        alias_id: str | None = None,
         key: str,
         title: str,
         source_path: str | None,
         content_text: str,
+        document_status: str | None = None,
+        sync_status: str = "idle",
+        last_error: str | None = None,
+        embedded_at: str | None = None,
+        removed_at: str | None = None,
         metadata: dict[str, Any],
         status: str = "active",
     ) -> dict[str, Any]:
         record_id = knowledge_document_id or make_uuid7()
         now = utcnow_iso()
+        normalized_document_status = str(document_status or metadata.get("embedding_status") or "not_embedded").strip().lower() or "not_embedded"
         self.execute(
             """
-            INSERT INTO knowledge_documents(id, knowledge_base_id, key, title, source_path, content_text, metadata_json, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM knowledge_documents WHERE id = ?), ?), ?)
+            INSERT INTO knowledge_documents(
+                id, knowledge_base_id, pool_document_id, blob_id, alias_id, key, title, source_path, content_text,
+                document_status, sync_status, last_error, embedded_at, removed_at, metadata_json, status, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM knowledge_documents WHERE id = ?), ?), ?)
             ON CONFLICT(id) DO UPDATE SET
                 knowledge_base_id = excluded.knowledge_base_id,
+                pool_document_id = excluded.pool_document_id,
+                blob_id = excluded.blob_id,
+                alias_id = excluded.alias_id,
                 key = excluded.key,
                 title = excluded.title,
                 source_path = excluded.source_path,
                 content_text = excluded.content_text,
+                document_status = excluded.document_status,
+                sync_status = excluded.sync_status,
+                last_error = excluded.last_error,
+                embedded_at = excluded.embedded_at,
+                removed_at = excluded.removed_at,
                 metadata_json = excluded.metadata_json,
                 status = excluded.status,
                 updated_at = excluded.updated_at
             """,
-            (record_id, knowledge_base_id, key, title, source_path, content_text, json_dumps(metadata), status, record_id, now, now),
+            (
+                record_id,
+                knowledge_base_id,
+                pool_document_id,
+                blob_id,
+                alias_id,
+                key,
+                title,
+                source_path,
+                content_text,
+                normalized_document_status,
+                sync_status,
+                last_error,
+                embedded_at,
+                removed_at,
+                json_dumps(metadata),
+                status,
+                record_id,
+                now,
+                now,
+            ),
         )
         saved = self.get_knowledge_document(record_id)
         assert saved is not None
@@ -1960,12 +2342,45 @@ class MetadataStore:
             )
         )
 
-    def list_knowledge_documents(self, *, knowledge_base_id: str | None = None) -> list[dict[str, Any]]:
-        if knowledge_base_id:
-            return self._deserialize_many(
-                self.fetch_all("SELECT * FROM knowledge_documents WHERE knowledge_base_id = ? ORDER BY updated_at DESC", (knowledge_base_id,))
+    def get_knowledge_document_by_blob(self, *, knowledge_base_id: str, blob_id: str) -> dict[str, Any] | None:
+        return self._deserialize(
+            self.fetch_one(
+                """
+                SELECT *
+                FROM knowledge_documents
+                WHERE knowledge_base_id = ? AND blob_id = ?
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (knowledge_base_id, blob_id),
             )
-        return self._deserialize_many(self.fetch_all("SELECT * FROM knowledge_documents ORDER BY updated_at DESC"))
+        )
+
+    def list_knowledge_documents(
+        self,
+        *,
+        knowledge_base_id: str | None = None,
+        include_removed: bool = False,
+        document_statuses: Sequence[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if knowledge_base_id:
+            clauses.append("knowledge_base_id = ?")
+            params.append(knowledge_base_id)
+        if document_statuses:
+            normalized = [str(item).strip().lower() for item in document_statuses if str(item).strip()]
+            if normalized:
+                placeholders = ", ".join("?" for _ in normalized)
+                clauses.append(f"COALESCE(document_status, 'not_embedded') IN ({placeholders})")
+                params.extend(normalized)
+        elif not include_removed:
+            clauses.append("COALESCE(document_status, 'not_embedded') != 'removed'")
+        sql = "SELECT * FROM knowledge_documents"
+        if clauses:
+            sql += f" WHERE {' AND '.join(clauses)}"
+        sql += " ORDER BY updated_at DESC, created_at DESC"
+        return self._deserialize_many(self.fetch_all(sql, tuple(params)))
 
     def list_knowledge_documents_page(
         self,
@@ -1973,28 +2388,45 @@ class MetadataStore:
         knowledge_base_id: str,
         limit: int | None = None,
         offset: int = 0,
+        query: str | None = None,
+        embedding_status: str | None = None,
+        include_removed: bool = False,
     ) -> dict[str, Any]:
         safe_offset = max(0, int(offset or 0))
+        keyword = str(query or "").strip().lower()
+        selected_status = str(embedding_status or "").strip().lower()
+        clauses = ["knowledge_base_id = ?"]
+        params: list[Any] = [knowledge_base_id]
+        if selected_status and selected_status != "all":
+            clauses.append("COALESCE(document_status, 'not_embedded') = ?")
+            params.append(selected_status)
+        elif not include_removed:
+            clauses.append("COALESCE(document_status, 'not_embedded') != 'removed'")
+        if keyword:
+            like = f"%{keyword}%"
+            clauses.append("(LOWER(title) LIKE ? OR LOWER(COALESCE(source_path, '')) LIKE ? OR LOWER(COALESCE(content_text, '')) LIKE ?)")
+            params.extend([like, like, like])
+        where_sql = " AND ".join(clauses)
         total = int(
             (
                 self.fetch_one(
-                    "SELECT COUNT(*) AS count FROM knowledge_documents WHERE knowledge_base_id = ?",
-                    (knowledge_base_id,),
+                    f"SELECT COUNT(*) AS count FROM knowledge_documents WHERE {where_sql}",
+                    tuple(params),
                 )
                 or {}
             ).get("count", 0)
             or 0
         )
-        sql = "SELECT * FROM knowledge_documents WHERE knowledge_base_id = ? ORDER BY updated_at DESC"
-        params: list[Any] = [knowledge_base_id]
+        sql = f"SELECT * FROM knowledge_documents WHERE {where_sql} ORDER BY updated_at DESC, created_at DESC"
+        page_params = list(params)
         if limit is not None:
             safe_limit = max(1, int(limit))
             sql += " LIMIT ? OFFSET ?"
-            params.extend([safe_limit, safe_offset])
+            page_params.extend([safe_limit, safe_offset])
         else:
             safe_limit = total or 0
         return {
-            "items": self._deserialize_many(self.fetch_all(sql, tuple(params))),
+            "items": self._deserialize_many(self.fetch_all(sql, tuple(page_params))),
             "total": total,
             "offset": safe_offset,
             "limit": safe_limit,
@@ -2011,10 +2443,14 @@ class MetadataStore:
         self,
         *,
         knowledge_pool_document_id: str | None,
+        knowledge_base_id: str,
+        blob_id: str,
+        alias_id: str,
         key: str,
         title: str,
         source_path: str | None,
         content_text: str,
+        upload_method: str = "http",
         metadata: dict[str, Any],
         status: str = "active",
     ) -> dict[str, Any]:
@@ -2022,18 +2458,39 @@ class MetadataStore:
         now = utcnow_iso()
         self.execute(
             """
-            INSERT INTO knowledge_pool_documents(id, key, title, source_path, content_text, metadata_json, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM knowledge_pool_documents WHERE id = ?), ?), ?)
+            INSERT INTO knowledge_pool_documents(
+                id, knowledge_base_id, blob_id, alias_id, key, title, source_path, content_text, upload_method, metadata_json, status, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM knowledge_pool_documents WHERE id = ?), ?), ?)
             ON CONFLICT(id) DO UPDATE SET
+                knowledge_base_id = excluded.knowledge_base_id,
+                blob_id = excluded.blob_id,
+                alias_id = excluded.alias_id,
                 key = excluded.key,
                 title = excluded.title,
                 source_path = excluded.source_path,
                 content_text = excluded.content_text,
+                upload_method = excluded.upload_method,
                 metadata_json = excluded.metadata_json,
                 status = excluded.status,
                 updated_at = excluded.updated_at
             """,
-            (record_id, key, title, source_path, content_text, json_dumps(metadata), status, record_id, now, now),
+            (
+                record_id,
+                knowledge_base_id,
+                blob_id,
+                alias_id,
+                key,
+                title,
+                source_path,
+                content_text,
+                upload_method,
+                json_dumps(metadata),
+                status,
+                record_id,
+                now,
+                now,
+            ),
         )
         saved = self.get_knowledge_pool_document(record_id)
         assert saved is not None
@@ -2042,22 +2499,48 @@ class MetadataStore:
     def get_knowledge_pool_document(self, knowledge_pool_document_id: str) -> dict[str, Any] | None:
         return self._deserialize(self.fetch_one("SELECT * FROM knowledge_pool_documents WHERE id = ?", (knowledge_pool_document_id,)))
 
-    def get_knowledge_pool_document_by_key(self, key: str) -> dict[str, Any] | None:
+    def get_knowledge_pool_document_by_key(self, key: str, *, knowledge_base_id: str | None = None) -> dict[str, Any] | None:
+        clauses = ["key = ?"]
+        params: list[Any] = [key]
+        if knowledge_base_id:
+            clauses.append("knowledge_base_id = ?")
+            params.append(knowledge_base_id)
         return self._deserialize(
             self.fetch_one(
                 """
                 SELECT *
                 FROM knowledge_pool_documents
-                WHERE key = ?
+                WHERE """ + " AND ".join(clauses) + """
                 ORDER BY updated_at DESC
                 LIMIT 1
                 """,
-                (key,),
+                tuple(params),
             )
         )
 
-    def list_knowledge_pool_documents(self) -> list[dict[str, Any]]:
-        return self._deserialize_many(self.fetch_all("SELECT * FROM knowledge_pool_documents ORDER BY updated_at DESC"))
+    def get_knowledge_pool_document_by_blob(self, *, knowledge_base_id: str, blob_id: str) -> dict[str, Any] | None:
+        return self._deserialize(
+            self.fetch_one(
+                """
+                SELECT *
+                FROM knowledge_pool_documents
+                WHERE knowledge_base_id = ? AND blob_id = ?
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (knowledge_base_id, blob_id),
+            )
+        )
+
+    def list_knowledge_pool_documents(self, *, knowledge_base_id: str | None = None) -> list[dict[str, Any]]:
+        if knowledge_base_id:
+            return self._deserialize_many(
+                self.fetch_all(
+                    "SELECT * FROM knowledge_pool_documents WHERE knowledge_base_id = ? ORDER BY updated_at DESC, created_at DESC",
+                    (knowledge_base_id,),
+                )
+            )
+        return self._deserialize_many(self.fetch_all("SELECT * FROM knowledge_pool_documents ORDER BY updated_at DESC, created_at DESC"))
 
     def delete_knowledge_pool_document(self, knowledge_pool_document_id: str) -> dict[str, Any] | None:
         existing = self.get_knowledge_pool_document(knowledge_pool_document_id)
@@ -2079,8 +2562,9 @@ class MetadataStore:
             record = self.get_knowledge_base_by_key(str(key))
             if record is not None:
                 kb_ids.add(str(record["id"]))
-        clauses = ["d.status = ?", "kb.status = ?"]
+        clauses = ["d.status = ?", "kb.status = ?", "COALESCE(d.document_status, 'not_embedded') = ?"]
         params: list[Any] = ["active", "active"]
+        params.append("embedded")
         if kb_ids:
             placeholders = ", ".join("?" for _ in kb_ids)
             clauses.append(f"d.knowledge_base_id IN ({placeholders})")

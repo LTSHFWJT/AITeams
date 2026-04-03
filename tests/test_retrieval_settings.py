@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import sqlite3
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -146,7 +147,7 @@ class RetrievalSettingsTests(unittest.TestCase):
             self.assertTrue(saved["runtime"]["embedding"]["model"].endswith("models/BAAI__bge-m3"))
             self.assertTrue(saved["runtime"]["rerank"]["model"].endswith("models/BAAI__bge-reranker-v2-m3"))
 
-    def test_knowledge_service_reports_local_model_metadata_in_applied_result(self) -> None:
+    def test_knowledge_service_keeps_local_model_metadata_without_loading_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             store = build_store(root)
@@ -159,6 +160,72 @@ class RetrievalSettingsTests(unittest.TestCase):
 
             class FakeEmbedding:
                 def __init__(self, *, model_name: str, **_: object) -> None:
+                    raise AssertionError("configure_retrieval should not instantiate embedding runtime")
+
+                def get_query_embedding(self, _query: str) -> list[float]:
+                    return [0.1, 0.2, 0.3]
+
+            class FakeReranker:
+                def __init__(self, *, model: str, top_n: int, use_fp16: bool) -> None:
+                    raise AssertionError("configure_retrieval should not instantiate rerank runtime")
+
+            runtime = {
+                "embedding": {
+                    "mode": "local",
+                    "model": str(root / "models" / "BAAI__bge-m3"),
+                    "model_name": str(root / "models" / "BAAI__bge-m3"),
+                    "model_path": "BAAI__bge-m3",
+                    "model_label": "BAAI/bge-m3",
+                    "local_model_id": "embed-local-id",
+                },
+                "rerank": {
+                    "mode": "local",
+                    "model": str(root / "models" / "BAAI__bge-reranker-v2-m3"),
+                    "model_name": str(root / "models" / "BAAI__bge-reranker-v2-m3"),
+                    "model_path": "BAAI__bge-reranker-v2-m3",
+                    "model_label": "BAAI/bge-reranker-v2-m3",
+                    "local_model_id": "rerank-local-id",
+                },
+            }
+
+            with (
+                patch("aiteams.knowledge.service.HuggingFaceEmbedding", FakeEmbedding),
+                patch("aiteams.knowledge.service.FlagEmbeddingReranker", FakeReranker),
+            ):
+                applied = service.configure_retrieval(runtime)
+
+            self.assertTrue(applied["retrieval"]["embedding"]["vector_enabled"])
+            self.assertEqual(applied["retrieval"]["embedding"]["backend"], "huggingface")
+            self.assertEqual(applied["retrieval"]["embedding"]["local_model_id"], "embed-local-id")
+            self.assertEqual(applied["retrieval"]["embedding"]["model_label"], "BAAI/bge-m3")
+            self.assertEqual(applied["retrieval"]["embedding"]["model_path"], "BAAI__bge-m3")
+            self.assertTrue(applied["retrieval"]["embedding"]["resolved_model_name"].endswith("BAAI__bge-m3"))
+            self.assertFalse(applied["retrieval"]["embedding"]["runtime_loaded"])
+            self.assertIsNone(applied["retrieval"]["embedding"]["vector_dim"])
+            self.assertEqual(applied["retrieval"]["rerank"]["backend"], "flag_embedding")
+            self.assertEqual(applied["retrieval"]["rerank"]["local_model_id"], "rerank-local-id")
+            self.assertEqual(applied["retrieval"]["rerank"]["model_label"], "BAAI/bge-reranker-v2-m3")
+            self.assertEqual(applied["retrieval"]["rerank"]["model_path"], "BAAI__bge-reranker-v2-m3")
+            self.assertTrue(applied["retrieval"]["rerank"]["resolved_model_name"].endswith("BAAI__bge-reranker-v2-m3"))
+            self.assertFalse(applied["retrieval"]["rerank"]["runtime_loaded"])
+
+    def test_knowledge_service_loads_local_runtime_only_when_embedding_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = build_store(root)
+
+            service = KnowledgeBaseService(
+                store=store,
+                root_dir=root / "knowledge",
+                retrieval_runtime=None,
+            )
+
+            embed_calls: list[str] = []
+            rerank_calls: list[str] = []
+
+            class FakeEmbedding:
+                def __init__(self, *, model_name: str, **_: object) -> None:
+                    embed_calls.append(model_name)
                     self.model_name = model_name
 
                 def get_query_embedding(self, _query: str) -> list[float]:
@@ -166,6 +233,7 @@ class RetrievalSettingsTests(unittest.TestCase):
 
             class FakeReranker:
                 def __init__(self, *, model: str, top_n: int, use_fp16: bool) -> None:
+                    rerank_calls.append(model)
                     self.model = model
                     self.top_n = top_n
                     self.use_fp16 = use_fp16
@@ -197,19 +265,16 @@ class RetrievalSettingsTests(unittest.TestCase):
                 patch.object(service, "_require_postprocessor_base_dependencies", lambda: None),
                 patch.object(service, "_require_local_rerank_dependencies", lambda: None),
             ):
-                applied = service.configure_retrieval(runtime)
+                service.configure_retrieval(runtime)
+                self.assertEqual(embed_calls, [])
+                self.assertEqual(rerank_calls, [])
+                service._ensure_retrieval_loaded_for_embedding()
 
-            self.assertTrue(applied["retrieval"]["embedding"]["vector_enabled"])
-            self.assertEqual(applied["retrieval"]["embedding"]["backend"], "huggingface")
-            self.assertEqual(applied["retrieval"]["embedding"]["local_model_id"], "embed-local-id")
-            self.assertEqual(applied["retrieval"]["embedding"]["model_label"], "BAAI/bge-m3")
-            self.assertEqual(applied["retrieval"]["embedding"]["model_path"], "BAAI__bge-m3")
-            self.assertTrue(applied["retrieval"]["embedding"]["resolved_model_name"].endswith("BAAI__bge-m3"))
-            self.assertEqual(applied["retrieval"]["rerank"]["backend"], "flag_embedding")
-            self.assertEqual(applied["retrieval"]["rerank"]["local_model_id"], "rerank-local-id")
-            self.assertEqual(applied["retrieval"]["rerank"]["model_label"], "BAAI/bge-reranker-v2-m3")
-            self.assertEqual(applied["retrieval"]["rerank"]["model_path"], "BAAI__bge-reranker-v2-m3")
-            self.assertTrue(applied["retrieval"]["rerank"]["resolved_model_name"].endswith("BAAI__bge-reranker-v2-m3"))
+            self.assertEqual(embed_calls, [str(root / "models" / "BAAI__bge-m3")])
+            self.assertEqual(rerank_calls, [str(root / "models" / "BAAI__bge-reranker-v2-m3")])
+            self.assertTrue(service.retrieval_info()["embedding"]["runtime_loaded"])
+            self.assertTrue(service.retrieval_info()["rerank"]["runtime_loaded"])
+            self.assertEqual(service.retrieval_info()["embedding"]["vector_dim"], 3)
 
     def test_manage_document_embeddings_supports_add_and_delete(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
@@ -252,25 +317,17 @@ class RetrievalSettingsTests(unittest.TestCase):
             def fake_delete_document_vectors(*, knowledge_base_id: str, document_id: str) -> None:
                 deleted_pairs.append((knowledge_base_id, document_id))
 
-            def fake_index_document_chunks(**_: object) -> int:
-                return 2
-
-            with (
-                patch.object(service, "_delete_document_vectors", fake_delete_document_vectors),
-                patch.object(service, "_index_document_chunks", fake_index_document_chunks),
-            ):
+            with patch.object(service, "_delete_document_vectors", fake_delete_document_vectors):
                 added = service.manage_document_embeddings("kb-docs", action="add", document_ids=["doc-1"])
                 deleted = service.manage_document_embeddings("kb-docs", action="delete", document_ids=["doc-1"])
 
             self.assertEqual(added["affected_count"], 1)
             self.assertEqual(added["items"][0]["embedding_status"], "embedded")
-            self.assertEqual(added["items"][0]["embedded_chunk_count"], 2)
+            self.assertGreaterEqual(added["items"][0]["embedded_chunk_count"], 1)
             self.assertEqual(deleted["affected_count"], 1)
             self.assertEqual(deleted["items"][0]["embedding_status"], "not_embedded")
             self.assertEqual(deleted["items"][0]["embedded_chunk_count"], 0)
-            self.assertGreaterEqual(len(deleted_pairs), 2)
-            self.assertEqual(deleted_pairs[0], ("kb-docs", "doc-1"))
-            self.assertEqual(deleted_pairs[-1], ("kb-docs", "doc-1"))
+            self.assertEqual(deleted_pairs, [("kb-docs", "doc-1")])
             refreshed = store.get_knowledge_document("doc-1")
             self.assertIsNotNone(refreshed)
             refreshed_metadata = dict((refreshed or {}).get("metadata_json") or {})
@@ -314,19 +371,11 @@ class RetrievalSettingsTests(unittest.TestCase):
             }
 
             delete_calls: list[tuple[str, str]] = []
-            index_calls: list[str] = []
 
             def fake_delete_document_vectors(*, knowledge_base_id: str, document_id: str) -> None:
                 delete_calls.append((knowledge_base_id, document_id))
 
-            def fake_index_document_chunks(**_: object) -> int:
-                index_calls.append("indexed")
-                return 4
-
-            with (
-                patch.object(service, "_delete_document_vectors", fake_delete_document_vectors),
-                patch.object(service, "_index_document_chunks", fake_index_document_chunks),
-            ):
+            with patch.object(service, "_delete_document_vectors", fake_delete_document_vectors):
                 skipped = service.manage_document_embeddings("kb-docs", action="add", document_ids=["doc-1"])
                 reembedded = service.manage_document_embeddings("kb-docs", action="reembed", document_ids=["doc-1"])
 
@@ -335,14 +384,70 @@ class RetrievalSettingsTests(unittest.TestCase):
             self.assertEqual(skipped["skipped"][0]["reason"], "skipped")
             self.assertEqual(reembedded["affected_count"], 1)
             self.assertEqual(reembedded["items"][0]["embedding_status"], "embedded")
-            self.assertEqual(reembedded["items"][0]["embedded_chunk_count"], 4)
+            self.assertGreaterEqual(reembedded["items"][0]["embedded_chunk_count"], 1)
             self.assertEqual(delete_calls, [("kb-docs", "doc-1")])
-            self.assertEqual(index_calls, ["indexed"])
             refreshed = store.get_knowledge_document("doc-1")
             self.assertIsNotNone(refreshed)
             refreshed_metadata = dict((refreshed or {}).get("metadata_json") or {})
             self.assertEqual(refreshed_metadata.get("embedding_status"), "embedded")
-            self.assertEqual(int(refreshed_metadata.get("embedded_chunk_count") or 0), 4)
+            self.assertGreaterEqual(int(refreshed_metadata.get("embedded_chunk_count") or 0), 1)
+
+    def test_start_document_embedding_job_persists_progress_and_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = build_store(root)
+            store.save_knowledge_base(
+                knowledge_base_id="kb-docs",
+                key="kb-docs",
+                name="知识库",
+                config={},
+            )
+            store.save_knowledge_document(
+                knowledge_document_id="doc-1",
+                knowledge_base_id="kb-docs",
+                key="doc-1",
+                title="doc.txt",
+                source_path="doc.txt",
+                content_text="alpha beta gamma\n" * 20,
+                metadata={"file_size": 128, "chunk_count": 2, "embedding_status": "not_embedded", "embedded_chunk_count": 0},
+            )
+
+            service = KnowledgeBaseService(
+                store=store,
+                root_dir=root / "knowledge",
+                retrieval_runtime=None,
+            )
+            service._embedding_model = object()
+            service._embedding_dimension = 3
+            service._embedding_runtime = {
+                "mode": "local",
+                "backend": "huggingface",
+                "model_name": "BAAI/bge-m3",
+                "model_label": "BAAI/bge-m3",
+                "vector_enabled": True,
+                "vector_dim": 3,
+            }
+
+            with patch.object(service, "_ensure_retrieval_loaded_for_embedding", lambda: None):
+                started = service.start_document_embedding_job("kb-docs", action="add", document_ids=["doc-1"])
+
+                self.assertFalse(started["reused"])
+                job_id = str(started["job"]["id"] or "")
+                self.assertTrue(job_id)
+
+                latest = None
+                for _ in range(100):
+                    latest = service.get_document_embedding_job(job_id)
+                    if latest and latest["status"] in {"completed", "error"}:
+                        break
+                    time.sleep(0.05)
+
+            self.assertIsNotNone(latest)
+            self.assertEqual((latest or {}).get("status"), "completed")
+            self.assertGreaterEqual(float((latest or {}).get("progress_percent") or 0.0), 100.0)
+            result = dict((latest or {}).get("result") or {})
+            self.assertEqual(result.get("affected_count"), 1)
+            self.assertEqual(result.get("action"), "add")
 
     def test_list_documents_page_supports_query_status_and_pagination(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
@@ -412,6 +517,79 @@ class RetrievalSettingsTests(unittest.TestCase):
             returned_ids = {filtered["items"][0]["id"], next_page["items"][0]["id"]}
             self.assertEqual(returned_ids, {"doc-1", "doc-3"})
 
+    def test_knowledge_base_resource_reports_vector_count_and_embedding_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = build_store(root)
+            knowledge_base = store.save_knowledge_base(
+                knowledge_base_id="kb-docs",
+                key="kb-docs",
+                name="知识库",
+                config={},
+            )
+            store.save_knowledge_document(
+                knowledge_document_id="doc-1",
+                knowledge_base_id="kb-docs",
+                key="doc-1",
+                title="Alpha Notes",
+                source_path="notes/alpha.md",
+                content_text="alpha content",
+                document_status="embedded",
+                embedded_at="2026-04-01T00:00:00Z",
+                metadata={
+                    "embedding_status": "embedded",
+                    "embedded_chunk_count": 3,
+                    "embedding_model_name": "BAAI/bge-m3",
+                    "embedding_model_label": "BAAI/bge-m3",
+                },
+            )
+            store.save_knowledge_document(
+                knowledge_document_id="doc-2",
+                knowledge_base_id="kb-docs",
+                key="doc-2",
+                title="Beta Draft",
+                source_path="drafts/beta.md",
+                content_text="beta content",
+                document_status="embedded",
+                embedded_at="2026-04-02T00:00:00Z",
+                metadata={
+                    "embedding_status": "embedded",
+                    "embedded_chunk_count": 4,
+                    "embedding_model_name": "BAAI/bge-m3",
+                    "embedding_model_label": "BAAI/bge-m3",
+                },
+            )
+            store.save_knowledge_document(
+                knowledge_document_id="doc-3",
+                knowledge_base_id="kb-docs",
+                key="doc-3",
+                title="Gamma Removed",
+                source_path="drafts/gamma.md",
+                content_text="gamma content",
+                document_status="removed",
+                embedded_at="2026-04-03T00:00:00Z",
+                metadata={
+                    "embedding_status": "removed",
+                    "embedded_chunk_count": 9,
+                    "embedding_model_name": "ignored/model",
+                    "embedding_model_label": "ignored/model",
+                },
+            )
+
+            service = KnowledgeBaseService(
+                store=store,
+                root_dir=root / "knowledge",
+                retrieval_runtime=None,
+            )
+
+            payload = service._knowledge_base_resource(knowledge_base)
+
+            self.assertEqual(payload["document_count"], 2)
+            self.assertEqual(payload["file_count"], 2)
+            self.assertEqual(payload["vector_count"], 7)
+            self.assertEqual(payload["embedding_model_name"], "BAAI/bge-m3")
+            self.assertEqual(payload["embedding_model_label"], "BAAI/bge-m3")
+
     def test_knowledge_pool_documents_can_be_added_to_kb_and_block_pool_delete_while_in_use(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
@@ -466,3 +644,45 @@ class RetrievalSettingsTests(unittest.TestCase):
             self.assertEqual(blocked_delete["skipped"][0]["reason"], "in-use")
             self.assertEqual(deleted["affected_count"], 1)
             self.assertIsNone(store.get_knowledge_pool_document(pool_id))
+
+    def test_pool_upload_deduplicates_blob_storage_for_same_kb(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = build_store(root)
+            store.save_knowledge_base(
+                knowledge_base_id="kb-docs",
+                key="kb-docs",
+                name="知识库",
+                config={},
+            )
+            service = KnowledgeBaseService(
+                store=store,
+                root_dir=root / "knowledge",
+                retrieval_runtime=None,
+            )
+
+            service.import_pool_uploaded_files(
+                {
+                    "knowledge_base_id": "kb-docs",
+                    "files": [
+                        {
+                            "path": "alpha/guide-a.txt",
+                            "content_base64": base64.b64encode(b"same body\n" * 16).decode("ascii"),
+                        }
+                    ],
+                }
+            )
+            service.import_pool_uploaded_files(
+                {
+                    "knowledge_base_id": "kb-docs",
+                    "files": [
+                        {
+                            "path": "beta/guide-b.txt",
+                            "content_base64": base64.b64encode(b"same body\n" * 16).decode("ascii"),
+                        }
+                    ],
+                }
+            )
+
+            self.assertEqual(len(store.list_knowledge_file_blobs()), 1)
+            self.assertEqual(len(store.list_knowledge_pool_documents(knowledge_base_id="kb-docs")), 1)

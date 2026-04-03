@@ -10,13 +10,20 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
+import threading
 from pathlib import Path, PurePosixPath
 from typing import Any
+
+try:  # pragma: no cover - optional runtime dependency
+    import xxhash
+except Exception:  # pragma: no cover - optional runtime dependency
+    xxhash = None
 
 from aiteams.ai_gateway import AIGateway, ProviderRequestError
 from aiteams.catalog import preset_for
 from aiteams.storage.metadata import MetadataStore
-from aiteams.utils import trim_text, utcnow_iso
+from aiteams.utils import make_uuid7, trim_text, utcnow_iso
 
 
 MAX_UPLOAD_TOTAL_BYTES = 100 * 1024 * 1024
@@ -83,8 +90,10 @@ LOCAL_RERANK_IMPORT_ERROR: Exception | None = None
 
 try:  # pragma: no cover - optional runtime dependency
     import lancedb
+    from llama_index.core import SimpleDirectoryReader, StorageContext, VectorStoreIndex
     from llama_index.core.bridge.pydantic import Field, PrivateAttr
     from llama_index.core.embeddings import MockEmbedding
+    from llama_index.core.node_parser import SentenceSplitter
     try:
         from llama_index.core.postprocessor import LLMRerank
     except Exception:  # pragma: no cover - optional runtime dependency
@@ -96,9 +105,13 @@ try:  # pragma: no cover - optional runtime dependency
 except Exception as exc:  # pragma: no cover - optional runtime dependency
     VECTOR_IMPORT_ERROR = exc
     lancedb = None
+    SimpleDirectoryReader = None
+    StorageContext = None
+    VectorStoreIndex = None
     Field = None
     PrivateAttr = None
     MockEmbedding = None
+    SentenceSplitter = None
     LLMRerank = None
     BaseNodePostprocessor = None
     NodeRelationship = None
@@ -402,43 +415,47 @@ class KnowledgeBaseService:
         self._gateway = gateway or AIGateway()
         self._vector_root = self.root_dir / "vector-store"
         self._vector_root.mkdir(parents=True, exist_ok=True)
+        self._blob_root = self.root_dir / "blobs"
+        self._blob_root.mkdir(parents=True, exist_ok=True)
+        self._ingest_tmp_root = self.root_dir / "ingest-tmp"
+        self._ingest_tmp_root.mkdir(parents=True, exist_ok=True)
+        self._embedding_runtime_settings: dict[str, Any] = {"mode": "disabled"}
+        self._rerank_runtime_settings: dict[str, Any] = {"mode": "disabled"}
         self._embedding_model: Any = None
         self._embedding_signature = ""
         self._embedding_dimension: int | None = None
-        self._embedding_runtime: dict[str, Any] = {"mode": "disabled", "vector_enabled": False, "vector_dim": None}
-        self._rerank_runtime: dict[str, Any] = {"mode": "disabled"}
+        self._embedding_runtime: dict[str, Any] = {
+            "mode": "disabled",
+            "vector_enabled": False,
+            "vector_dim": None,
+            "runtime_loaded": False,
+        }
+        self._rerank_runtime: dict[str, Any] = {"mode": "disabled", "runtime_loaded": False}
         self._rerank_postprocessor: Any = None
+        self._embedding_job_lock = threading.RLock()
+        self._embedding_execution_lock = threading.Lock()
+        self._embedding_job_threads: dict[str, threading.Thread] = {}
+        self.store.fail_active_knowledge_embedding_jobs("服务重启后，之前的知识库嵌入任务已中断。")
         self.configure_retrieval(retrieval_runtime)
 
     def close(self) -> None:
+        with self._embedding_job_lock:
+            self._embedding_job_threads.clear()
         return None
 
     def configure_retrieval(self, runtime_settings: dict[str, Any] | None = None) -> dict[str, Any]:
         runtime = dict(runtime_settings or {})
-        embedding_state = self._build_embedding_state(dict(runtime.get("embedding") or {}))
-        rerank_state = self._build_rerank_state(dict(runtime.get("rerank") or {}))
-        reindex_required = bool(embedding_state["enabled"]) and (
-            self._embedding_model is None or self._embedding_signature != str(embedding_state["signature"])
-        )
-
-        self._embedding_model = embedding_state["model"]
-        self._embedding_signature = str(embedding_state["signature"])
-        self._embedding_dimension = embedding_state["vector_dim"]
-        self._embedding_runtime = dict(embedding_state["public"])
-        self._rerank_runtime = dict(rerank_state["public"])
-        self._rerank_postprocessor = rerank_state["postprocessor"]
-
-        reindexed_knowledge_bases = 0
-        reindexed_documents = 0
-        reindexed_chunks = 0
-        if reindex_required:
-            reindexed_knowledge_bases, reindexed_documents, reindexed_chunks = self._reindex_all_knowledge_bases()
+        self._embedding_runtime_settings = dict(runtime.get("embedding") or {})
+        self._rerank_runtime_settings = dict(runtime.get("rerank") or {})
+        self._unload_retrieval_runtime()
+        self._embedding_runtime = self._preview_embedding_runtime(self._embedding_runtime_settings)
+        self._rerank_runtime = self._preview_rerank_runtime(self._rerank_runtime_settings)
 
         return {
-            "embedding_reindexed": reindex_required,
-            "reindexed_knowledge_bases": reindexed_knowledge_bases,
-            "reindexed_documents": reindexed_documents,
-            "reindexed_chunks": reindexed_chunks,
+            "embedding_reindexed": False,
+            "reindexed_knowledge_bases": 0,
+            "reindexed_documents": 0,
+            "reindexed_chunks": 0,
             "retrieval": self.retrieval_info(),
         }
 
@@ -449,6 +466,294 @@ class KnowledgeBaseService:
             "vector_dim": self._embedding_dimension,
         }
 
+    def start_document_embedding_job(
+        self,
+        knowledge_base_id: str,
+        *,
+        action: str,
+        document_ids: list[str],
+    ) -> dict[str, Any]:
+        knowledge_base = self._require_knowledge_base(knowledge_base_id)
+        normalized_action = self._normalize_embedding_action(action)
+        selected_ids = self._normalize_embedding_document_ids(document_ids)
+        if normalized_action in {"add", "reembed", "delete"} and not selected_ids:
+            raise ValueError("请至少选择一个文件。")
+        with self._embedding_job_lock:
+            existing = self.store.get_active_knowledge_embedding_job(knowledge_base_id)
+            if existing is not None:
+                return {
+                    "message": "当前知识库已有嵌入任务在执行，已切换到现有任务进度。",
+                    "reused": True,
+                    "job": self._embedding_job_resource(existing),
+                }
+            created = self.store.save_knowledge_embedding_job(
+                job_id=None,
+                knowledge_base_id=knowledge_base_id,
+                action=normalized_action or "save",
+                status="pending",
+                stage="queued",
+                message=self._embedding_job_status_text(
+                    status="pending",
+                    stage="queued",
+                    total_documents=len(selected_ids),
+                    processed_documents=0,
+                ),
+                result={
+                    "action": normalized_action or "save",
+                    "document_ids": list(selected_ids),
+                    "knowledge_base": self._knowledge_base_resource(knowledge_base),
+                },
+            )
+            thread = threading.Thread(
+                target=self._run_document_embedding_job,
+                args=(str(created.get("id") or ""), knowledge_base_id, normalized_action or "save", list(selected_ids)),
+                daemon=True,
+                name=f"kb-embed-{str(created.get('id') or '')[:8]}",
+            )
+            self._embedding_job_threads[str(created.get("id") or "")] = thread
+            thread.start()
+        return {
+            "message": "已开始知识库嵌入任务。",
+            "reused": False,
+            "job": self._embedding_job_resource(created),
+        }
+
+    def get_document_embedding_job(self, job_id: str) -> dict[str, Any] | None:
+        job = self.store.get_knowledge_embedding_job(job_id)
+        if job is None:
+            return None
+        return self._embedding_job_resource(job)
+
+    def _normalize_embedding_action(self, action: str) -> str:
+        normalized_action = str(action or "").strip().lower()
+        if normalized_action not in {"", "save", "sync", "add", "reembed", "delete"}:
+            raise ValueError("知识库文档嵌入操作仅支持 save / add / reembed / delete。")
+        return normalized_action
+
+    def _normalize_embedding_document_ids(self, document_ids: list[str]) -> list[str]:
+        return list(dict.fromkeys(str(item or "").strip() for item in list(document_ids or []) if str(item or "").strip()))
+
+    def _save_embedding_job_record(self, job: dict[str, Any], **overrides: Any) -> dict[str, Any]:
+        return self.store.save_knowledge_embedding_job(
+            job_id=str(overrides.pop("job_id", job.get("id")) or "").strip() or None,
+            knowledge_base_id=str(overrides.pop("knowledge_base_id", job.get("knowledge_base_id")) or "").strip(),
+            action=str(overrides.pop("action", job.get("action")) or "save"),
+            status=str(overrides.pop("status", job.get("status")) or "pending"),
+            stage=str(overrides.pop("stage", job.get("stage")) or "queued"),
+            total_documents=int(overrides.pop("total_documents", job.get("total_documents")) or 0),
+            processed_documents=int(overrides.pop("processed_documents", job.get("processed_documents")) or 0),
+            completed_documents=int(overrides.pop("completed_documents", job.get("completed_documents")) or 0),
+            failed_documents=int(overrides.pop("failed_documents", job.get("failed_documents")) or 0),
+            total_chunks_estimated=int(overrides.pop("total_chunks_estimated", job.get("total_chunks_estimated")) or 0),
+            embedded_chunks_completed=int(overrides.pop("embedded_chunks_completed", job.get("embedded_chunks_completed")) or 0),
+            current_document_id=str(overrides.pop("current_document_id", job.get("current_document_id")) or "").strip() or None,
+            current_document_title=str(overrides.pop("current_document_title", job.get("current_document_title")) or "").strip() or None,
+            message=str(overrides.pop("message", job.get("message")) or "").strip() or None,
+            error_text=str(overrides.pop("error_text", job.get("error_text")) or "").strip() or None,
+            result=dict(overrides.pop("result", job.get("result_json") or {})),
+            started_at=str(overrides.pop("started_at", job.get("started_at")) or "").strip() or None,
+            finished_at=str(overrides.pop("finished_at", job.get("finished_at")) or "").strip() or None,
+        )
+
+    def _update_embedding_job(
+        self,
+        job_id: str,
+        *,
+        status: str | None = None,
+        stage: str | None = None,
+        total_documents: int | None = None,
+        processed_documents: int | None = None,
+        completed_documents: int | None = None,
+        failed_documents: int | None = None,
+        total_chunks_estimated: int | None = None,
+        embedded_chunks_completed: int | None = None,
+        current_document_id: str | None = None,
+        current_document_title: str | None = None,
+        message: str | None = None,
+        error_text: str | None = None,
+        result: dict[str, Any] | None = None,
+        started_at: str | None = None,
+        finished_at: str | None = None,
+        clear_current_document: bool = False,
+    ) -> dict[str, Any] | None:
+        current = self.store.get_knowledge_embedding_job(job_id)
+        if current is None:
+            return None
+        return self._save_embedding_job_record(
+            current,
+            status=status if status is not None else current.get("status"),
+            stage=stage if stage is not None else current.get("stage"),
+            total_documents=total_documents if total_documents is not None else current.get("total_documents"),
+            processed_documents=processed_documents if processed_documents is not None else current.get("processed_documents"),
+            completed_documents=completed_documents if completed_documents is not None else current.get("completed_documents"),
+            failed_documents=failed_documents if failed_documents is not None else current.get("failed_documents"),
+            total_chunks_estimated=total_chunks_estimated if total_chunks_estimated is not None else current.get("total_chunks_estimated"),
+            embedded_chunks_completed=embedded_chunks_completed
+            if embedded_chunks_completed is not None
+            else current.get("embedded_chunks_completed"),
+            current_document_id=None if clear_current_document else (current_document_id if current_document_id is not None else current.get("current_document_id")),
+            current_document_title=None
+            if clear_current_document
+            else (current_document_title if current_document_title is not None else current.get("current_document_title")),
+            message=message if message is not None else current.get("message"),
+            error_text=error_text if error_text is not None else current.get("error_text"),
+            result=result if result is not None else dict(current.get("result_json") or {}),
+            started_at=started_at if started_at is not None else current.get("started_at"),
+            finished_at=finished_at if finished_at is not None else current.get("finished_at"),
+        )
+
+    def _increment_embedding_job(
+        self,
+        job_id: str,
+        *,
+        processed_documents: int = 0,
+        completed_documents: int = 0,
+        failed_documents: int = 0,
+        total_chunks_estimated: int = 0,
+        embedded_chunks_completed: int = 0,
+        stage: str | None = None,
+        current_document_id: str | None = None,
+        current_document_title: str | None = None,
+        status: str | None = None,
+        message: str | None = None,
+    ) -> dict[str, Any] | None:
+        current = self.store.get_knowledge_embedding_job(job_id)
+        if current is None:
+            return None
+        next_processed = int(current.get("processed_documents") or 0) + int(processed_documents or 0)
+        next_completed = int(current.get("completed_documents") or 0) + int(completed_documents or 0)
+        next_failed = int(current.get("failed_documents") or 0) + int(failed_documents or 0)
+        next_chunks_total = int(current.get("total_chunks_estimated") or 0) + int(total_chunks_estimated or 0)
+        next_chunks_completed = int(current.get("embedded_chunks_completed") or 0) + int(embedded_chunks_completed or 0)
+        resolved_status = status if status is not None else str(current.get("status") or "pending")
+        resolved_stage = stage if stage is not None else str(current.get("stage") or "queued")
+        resolved_message = message if message is not None else self._embedding_job_status_text(
+            status=resolved_status,
+            stage=resolved_stage,
+            total_documents=int(current.get("total_documents") or 0),
+            processed_documents=next_processed,
+            total_chunks_estimated=next_chunks_total,
+            embedded_chunks_completed=next_chunks_completed,
+            current_document_title=current_document_title
+            if current_document_title is not None
+            else str(current.get("current_document_title") or "").strip()
+            or None,
+        )
+        return self._save_embedding_job_record(
+            current,
+            status=resolved_status,
+            stage=resolved_stage,
+            processed_documents=next_processed,
+            completed_documents=next_completed,
+            failed_documents=next_failed,
+            total_chunks_estimated=next_chunks_total,
+            embedded_chunks_completed=next_chunks_completed,
+            current_document_id=current_document_id if current_document_id is not None else current.get("current_document_id"),
+            current_document_title=current_document_title if current_document_title is not None else current.get("current_document_title"),
+            message=resolved_message,
+        )
+
+    def _run_document_embedding_job(
+        self,
+        job_id: str,
+        knowledge_base_id: str,
+        action: str,
+        document_ids: list[str],
+    ) -> None:
+        try:
+            with self._embedding_execution_lock:
+                started_at = utcnow_iso()
+                running = self._update_embedding_job(
+                    job_id,
+                    status="running",
+                    stage="preparing",
+                    started_at=started_at,
+                    message=self._embedding_job_status_text(
+                        status="running",
+                        stage="preparing",
+                        total_documents=0,
+                        processed_documents=0,
+                    ),
+                )
+                result = self._run_document_embedding_action(
+                    knowledge_base_id,
+                    action=action,
+                    document_ids=document_ids,
+                    job_id=job_id,
+                )
+                completed = self.store.get_knowledge_embedding_job(job_id) or running
+                self._update_embedding_job(
+                    job_id,
+                    status="completed",
+                    stage="completed",
+                    finished_at=utcnow_iso(),
+                    clear_current_document=True,
+                    message=str((result or {}).get("message") or "知识库嵌入任务已完成。").strip() or "知识库嵌入任务已完成。",
+                    result=result or dict((completed or {}).get("result_json") or {}),
+                    error_text=None,
+                )
+        except Exception as exc:
+            LOGGER.exception("Knowledge embedding job failed for %s", knowledge_base_id)
+            self._update_embedding_job(
+                job_id,
+                status="error",
+                stage="failed",
+                finished_at=utcnow_iso(),
+                clear_current_document=True,
+                message=trim_text(str(exc), limit=300) or "知识库嵌入任务失败。",
+                error_text=trim_text(str(exc), limit=1000) or "知识库嵌入任务失败。",
+            )
+        finally:
+            with self._embedding_job_lock:
+                self._embedding_job_threads.pop(job_id, None)
+
+    def _embedding_job_status_text(
+        self,
+        *,
+        status: str,
+        stage: str,
+        total_documents: int,
+        processed_documents: int,
+        total_chunks_estimated: int = 0,
+        embedded_chunks_completed: int = 0,
+        current_document_title: str | None = None,
+    ) -> str:
+        total = max(0, int(total_documents or 0))
+        processed = max(0, int(processed_documents or 0))
+        chunk_total = max(0, int(total_chunks_estimated or 0))
+        chunk_done = max(0, int(embedded_chunks_completed or 0))
+        if status == "pending":
+            return "任务已进入队列，等待开始。"
+        if status == "completed":
+            return "知识库嵌入任务已完成。"
+        if status == "error":
+            return "知识库嵌入任务失败。"
+        stage_map = {
+            "preparing": "正在准备文档",
+            "deleting": "正在清理旧嵌入",
+            "embedding": "正在嵌入文档",
+            "finalizing": "正在整理结果",
+            "queued": "任务排队中",
+        }
+        prefix = stage_map.get(stage, "正在处理")
+        doc_text = f"{processed}/{total}" if total else str(processed)
+        chunk_text = f"，chunk {chunk_done}/{chunk_total}" if chunk_total else ""
+        current_text = f"：{current_document_title}" if current_document_title else ""
+        return f"{prefix}{current_text}（文档 {doc_text}{chunk_text}）"
+
+    def _embedding_job_progress_percent(self, record: dict[str, Any]) -> float:
+        total_documents = max(0, int(record.get("total_documents") or 0))
+        processed_documents = max(0, int(record.get("processed_documents") or 0))
+        total_chunks_estimated = max(0, int(record.get("total_chunks_estimated") or 0))
+        embedded_chunks_completed = max(0, int(record.get("embedded_chunks_completed") or 0))
+        if total_documents <= 0 and total_chunks_estimated <= 0:
+            return 100.0 if str(record.get("status") or "").strip() == "completed" else 0.0
+        total_units = total_documents + total_chunks_estimated
+        completed_units = processed_documents + embedded_chunks_completed
+        if total_units <= 0:
+            return 0.0
+        return max(0.0, min(100.0, round((completed_units / total_units) * 100, 1)))
+
     def list_documents_page(
         self,
         *,
@@ -458,42 +763,22 @@ class KnowledgeBaseService:
         query: str | None = None,
         embedding_status: str | None = None,
     ) -> dict[str, Any]:
-        normalized_query = str(query or "").strip().lower()
-        normalized_status = str(embedding_status or "").strip().lower()
-        if normalized_status in {"", "all"}:
+        normalized_status = str(embedding_status or "").strip().lower() or "all"
+        if normalized_status == "all":
             normalized_status = ""
-        documents = [
-            self._document_resource(item)
-            for item in self.store.list_knowledge_documents(knowledge_base_id=knowledge_base_id)
-        ]
-        if normalized_query:
-            documents = [
-                item
-                for item in documents
-                if normalized_query
-                in "\n".join(
-                    [
-                        str(item.get("title") or ""),
-                        str(item.get("source_path") or ""),
-                        str(item.get("preview") or ""),
-                    ]
-                ).lower()
-            ]
-        if normalized_status:
-            documents = [item for item in documents if str(item.get("embedding_status") or "").strip().lower() == normalized_status]
-        total = len(documents)
-        safe_offset = max(0, int(offset or 0))
-        if limit is None:
-            safe_limit = total or 0
-            items = documents[safe_offset:]
-        else:
-            safe_limit = max(1, int(limit))
-            items = documents[safe_offset : safe_offset + safe_limit]
+        page = self.store.list_knowledge_documents_page(
+            knowledge_base_id=knowledge_base_id,
+            limit=limit,
+            offset=offset,
+            query=query,
+            embedding_status=normalized_status or None,
+            include_removed=False,
+        )
         return {
-            "items": items,
-            "total": total,
-            "offset": safe_offset,
-            "limit": safe_limit,
+            "items": [self._document_resource(item) for item in page["items"]],
+            "total": page["total"],
+            "offset": page["offset"],
+            "limit": page["limit"],
             "filters": {
                 "query": str(query or "").strip(),
                 "embedding_status": normalized_status or "all",
@@ -508,19 +793,21 @@ class KnowledgeBaseService:
         query: str | None = None,
         exclude_knowledge_base_id: str | None = None,
     ) -> dict[str, Any]:
+        knowledge_base_id = str(exclude_knowledge_base_id or "").strip()
         normalized_query = str(query or "").strip().lower()
-        excluded_pool_ids: set[str] = set()
-        if exclude_knowledge_base_id:
-            for document in self.store.list_knowledge_documents(knowledge_base_id=exclude_knowledge_base_id):
-                metadata = dict(document.get("metadata_json") or {})
-                pool_document_id = str(metadata.get("pool_document_id") or "").strip()
-                if pool_document_id:
-                    excluded_pool_ids.add(pool_document_id)
-        documents = [
-            self._pool_document_resource(item)
-            for item in self.store.list_knowledge_pool_documents()
-            if str(item.get("id") or "").strip() not in excluded_pool_ids
-        ]
+        active_blob_ids: set[str] = set()
+        if knowledge_base_id:
+            for document in self.store.list_knowledge_documents(knowledge_base_id=knowledge_base_id, include_removed=False):
+                blob_id = str(document.get("blob_id") or "").strip()
+                if blob_id:
+                    active_blob_ids.add(blob_id)
+            documents = [
+                self._pool_document_resource(item)
+                for item in self.store.list_knowledge_pool_documents(knowledge_base_id=knowledge_base_id)
+                if str(item.get("blob_id") or "").strip() not in active_blob_ids
+            ]
+        else:
+            documents = [self._pool_document_resource(item) for item in self.store.list_knowledge_pool_documents()]
         if normalized_query:
             documents = [
                 item
@@ -549,13 +836,19 @@ class KnowledgeBaseService:
             "limit": safe_limit,
             "filters": {
                 "query": str(query or "").strip(),
-                "exclude_knowledge_base_id": str(exclude_knowledge_base_id or "").strip() or None,
+                "exclude_knowledge_base_id": knowledge_base_id or None,
             },
         }
 
     def import_pool_uploaded_files(self, payload: dict[str, Any]) -> dict[str, Any]:
-        source_root = self._knowledge_pool_source_root()
-        source_root.mkdir(parents=True, exist_ok=True)
+        knowledge_base_id = str(payload.get("knowledge_base_id") or "").strip()
+        if not knowledge_base_id:
+            knowledge_bases = self.store.list_knowledge_bases()
+            if len(knowledge_bases) == 1:
+                knowledge_base_id = str(knowledge_bases[0].get("id") or "").strip()
+            if not knowledge_base_id:
+                raise ValueError("请先保存知识库，再上传文件。")
+        self._require_knowledge_base(knowledge_base_id)
         files = self._normalize_uploaded_files(payload.get("files"))
         imported: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
@@ -564,11 +857,12 @@ class KnowledgeBaseService:
             total_bytes += len(entry["content"])
             if total_bytes > MAX_UPLOAD_TOTAL_BYTES:
                 raise ValueError("上传文件总大小不能超过 100 MB。")
-            target = source_root.joinpath(*PurePosixPath(entry["path"]).parts)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(entry["content"])
             try:
-                record = self._upsert_pool_document_from_file(file_path=target, source_path=entry["path"], file_size=len(entry["content"]))
+                record = self._store_uploaded_file_to_pool(
+                    knowledge_base_id=knowledge_base_id,
+                    upload_path=entry["path"],
+                    content=entry["content"],
+                )
             except ValueError as exc:
                 skipped.append(
                     {
@@ -577,14 +871,11 @@ class KnowledgeBaseService:
                         "message": str(exc),
                     }
                 )
-                try:
-                    target.unlink(missing_ok=True)
-                finally:
-                    self._prune_empty_dirs(target.parent, stop_at=source_root)
                 continue
             imported.append(self._pool_document_resource(record))
+        self.store.touch_knowledge_base(knowledge_base_id)
         return {
-            "message": f"全局文档池已处理 {len(files)} 个文件。",
+            "message": f"知识库文档池已处理 {len(files)} 个文件。",
             "imported_count": len(imported),
             "skipped_count": len(skipped),
             "uploaded_total_bytes": total_bytes,
@@ -601,17 +892,49 @@ class KnowledgeBaseService:
         knowledge_base = self._require_knowledge_base(knowledge_base_id)
         selected_ids = list(dict.fromkeys(str(item or "").strip() for item in list(pool_document_ids or []) if str(item or "").strip()))
         if not selected_ids:
-            raise ValueError("请至少选择一个全局文档。")
+            raise ValueError("请至少选择一个文档池文件。")
         items: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
         for pool_document_id in selected_ids:
             pool_document = self.store.get_knowledge_pool_document(pool_document_id)
             if pool_document is None:
-                skipped.append({"id": pool_document_id, "reason": "missing", "message": "全局文档不存在。"})
+                skipped.append({"id": pool_document_id, "reason": "missing", "message": "文档池文件不存在。"})
                 continue
-            document_key = f"pool:{pool_document_id}"
-            existing = self.store.get_knowledge_document_by_key(knowledge_base_id=knowledge_base_id, key=document_key)
+            if str(pool_document.get("knowledge_base_id") or "").strip() != knowledge_base_id:
+                skipped.append({"id": pool_document_id, "reason": "knowledge-base-mismatch", "message": "文件不属于当前知识库文档池。"})
+                continue
+            blob_id = str(pool_document.get("blob_id") or "").strip()
+            existing = self.store.get_knowledge_document_by_blob(knowledge_base_id=knowledge_base_id, blob_id=blob_id) if blob_id else None
+            pool_metadata = dict(pool_document.get("metadata_json") or {})
+            merged_metadata = {
+                **pool_metadata,
+                "pool_document_id": pool_document_id,
+                "pool_document_key": str(pool_document.get("key") or "").strip() or None,
+                "source_path": str(pool_document.get("source_path") or "").strip() or None,
+            }
             if existing is not None:
+                current_status = str(existing.get("document_status") or "").strip().lower()
+                if current_status == "removed":
+                    saved = self.store.save_knowledge_document(
+                        knowledge_document_id=str(existing.get("id") or "").strip() or None,
+                        knowledge_base_id=knowledge_base_id,
+                        pool_document_id=pool_document_id,
+                        blob_id=blob_id or None,
+                        alias_id=str(pool_document.get("alias_id") or "").strip() or None,
+                        key=str(existing.get("key") or pool_document.get("key") or f"blob:{blob_id}"),
+                        title=str(pool_document.get("title") or existing.get("title") or pool_document_id),
+                        source_path=str(pool_document.get("source_path") or existing.get("source_path") or "").strip() or None,
+                        content_text=str(pool_document.get("content_text") or existing.get("content_text") or ""),
+                        document_status="not_embedded",
+                        sync_status="idle",
+                        last_error=None,
+                        embedded_at=str(existing.get("embedded_at") or "").strip() or None,
+                        removed_at=None,
+                        metadata=merged_metadata,
+                        status=str(existing.get("status") or "active"),
+                    )
+                    items.append(self._document_resource(saved))
+                    continue
                 skipped.append(
                     {
                         "id": pool_document_id,
@@ -621,28 +944,29 @@ class KnowledgeBaseService:
                     }
                 )
                 continue
-            pool_metadata = dict(pool_document.get("metadata_json") or {})
-            saved = self.sync_document(
-                {
-                    "knowledge_base_id": knowledge_base_id,
-                    "key": document_key,
-                    "title": str(pool_document.get("title") or pool_document.get("source_path") or pool_document_id),
-                    "source_path": str(pool_document.get("source_path") or "").strip() or None,
-                    "content_text": str(pool_document.get("content_text") or ""),
-                    "metadata": {
-                        **pool_metadata,
-                        "pool_document_id": pool_document_id,
-                        "pool_document_key": str(pool_document.get("key") or "").strip() or None,
-                        "source_path": str(pool_document.get("source_path") or "").strip() or None,
-                    },
-                },
-                previous_document=existing,
+            saved = self.store.save_knowledge_document(
+                knowledge_document_id=None,
+                knowledge_base_id=knowledge_base_id,
+                pool_document_id=pool_document_id,
+                blob_id=blob_id or None,
+                alias_id=str(pool_document.get("alias_id") or "").strip() or None,
+                key=str(pool_document.get("key") or "").strip() or f"blob:{blob_id}",
+                title=str(pool_document.get("title") or pool_document.get("source_path") or pool_document_id),
+                source_path=str(pool_document.get("source_path") or "").strip() or None,
+                content_text=str(pool_document.get("content_text") or ""),
+                document_status="not_embedded",
+                sync_status="idle",
+                last_error=None,
+                embedded_at=None,
+                removed_at=None,
+                metadata=merged_metadata,
+                status="active",
             )
             items.append(self._document_resource(saved))
         self.store.touch_knowledge_base(knowledge_base_id)
         summary = self.store.get_knowledge_base(knowledge_base_id) or knowledge_base
         return {
-            "message": f"已从全局文档池加入 {len(items)} 个文档。",
+            "message": f"已从文档池加入 {len(items)} 个文档。",
             "knowledge_base": self._knowledge_base_resource(summary),
             "affected_count": len(items),
             "skipped_count": len(skipped),
@@ -658,23 +982,21 @@ class KnowledgeBaseService:
     ) -> dict[str, Any]:
         normalized_action = str(action or "").strip().lower()
         if normalized_action != "delete":
-            raise ValueError("全局文档池当前仅支持 delete 操作。")
+            raise ValueError("知识库文档池当前仅支持 delete 操作。")
         selected_ids = list(dict.fromkeys(str(item or "").strip() for item in list(document_ids or []) if str(item or "").strip()))
         if not selected_ids:
-            raise ValueError("请至少选择一个全局文档。")
+            raise ValueError("请至少选择一个文档池文件。")
         linked_pool_ids: dict[str, int] = {}
-        for document in self.store.list_knowledge_documents():
-            metadata = dict(document.get("metadata_json") or {})
-            pool_document_id = str(metadata.get("pool_document_id") or "").strip()
+        for document in self.store.list_knowledge_documents(include_removed=False):
+            pool_document_id = str(document.get("pool_document_id") or "").strip()
             if pool_document_id:
                 linked_pool_ids[pool_document_id] = linked_pool_ids.get(pool_document_id, 0) + 1
         deleted: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
-        source_root = self._knowledge_pool_source_root()
         for document_id in selected_ids:
             document = self.store.get_knowledge_pool_document(document_id)
             if document is None:
-                skipped.append({"id": document_id, "reason": "missing", "message": "全局文档不存在。"})
+                skipped.append({"id": document_id, "reason": "missing", "message": "文档池文件不存在。"})
                 continue
             if linked_pool_ids.get(document_id, 0) > 0:
                 skipped.append(
@@ -682,22 +1004,18 @@ class KnowledgeBaseService:
                         "id": document_id,
                         "title": str(document.get("title") or document.get("source_path") or document_id),
                         "reason": "in-use",
-                        "message": "该文档仍被其他知识库引用，不能从全局文档池删除。",
+                        "message": "该文档仍在当前知识库中使用，不能从文档池删除。",
                     }
                 )
                 continue
-            source_path = str(document.get("source_path") or "").strip()
-            if source_path:
-                target = source_root.joinpath(*PurePosixPath(source_path).parts)
-                try:
-                    target.unlink(missing_ok=True)
-                finally:
-                    self._prune_empty_dirs(target.parent, stop_at=source_root)
+            blob_id = str(document.get("blob_id") or "").strip()
             removed = self.store.delete_knowledge_pool_document(document_id)
             if removed is not None:
                 deleted.append(self._pool_document_resource(removed))
+                if blob_id:
+                    self._cleanup_blob_if_orphan(blob_id)
         return {
-            "message": f"全局文档池已删除 {len(deleted)} 个文档。",
+            "message": f"文档池已删除 {len(deleted)} 个文档。",
             "affected_count": len(deleted),
             "skipped_count": len(skipped),
             "items": deleted,
@@ -705,51 +1023,11 @@ class KnowledgeBaseService:
         }
 
     def import_uploaded_files(self, knowledge_base_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        knowledge_base = self._require_knowledge_base(knowledge_base_id)
-        source_root = self._knowledge_base_source_root(knowledge_base_id)
-        source_root.mkdir(parents=True, exist_ok=True)
-        files = self._normalize_uploaded_files(payload.get("files"))
-        imported: list[dict[str, Any]] = []
-        skipped: list[dict[str, Any]] = []
-        total_bytes = 0
-        for entry in files:
-            total_bytes += len(entry["content"])
-            if total_bytes > MAX_UPLOAD_TOTAL_BYTES:
-                raise ValueError("上传文件总大小不能超过 100 MB。")
-            target = source_root.joinpath(*PurePosixPath(entry["path"]).parts)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(entry["content"])
-            try:
-                record = self._upsert_document_from_file(
-                    knowledge_base=knowledge_base,
-                    file_path=target,
-                    source_path=entry["path"],
-                    file_size=len(entry["content"]),
-                )
-                imported.append(self._document_resource(record))
-            except ValueError as exc:
-                skipped.append(
-                    {
-                        "path": entry["path"],
-                        "reason": "unsupported-file",
-                        "message": str(exc),
-                    }
-                )
-                try:
-                    target.unlink(missing_ok=True)
-                finally:
-                    self._prune_empty_dirs(target.parent, stop_at=source_root)
-        self.store.touch_knowledge_base(knowledge_base_id)
-        summary = self.store.get_knowledge_base(knowledge_base_id) or knowledge_base
-        return {
-            "message": f"已处理 {len(files)} 个文件。",
-            "knowledge_base": self._knowledge_base_resource(summary),
-            "imported_count": len(imported),
-            "skipped_count": len(skipped),
-            "uploaded_total_bytes": total_bytes,
-            "items": imported,
-            "skipped": skipped,
-        }
+        delegated_payload = dict(payload or {})
+        delegated_payload["knowledge_base_id"] = knowledge_base_id
+        result = self.import_pool_uploaded_files(delegated_payload)
+        result["knowledge_base"] = self._knowledge_base_resource(self._require_knowledge_base(knowledge_base_id))
+        return result
 
     def manage_document_embeddings(
         self,
@@ -758,67 +1036,117 @@ class KnowledgeBaseService:
         action: str,
         document_ids: list[str],
     ) -> dict[str, Any]:
-        knowledge_base = self._require_knowledge_base(knowledge_base_id)
-        normalized_action = str(action or "").strip().lower()
-        if normalized_action not in {"add", "reembed", "delete"}:
-            raise ValueError("知识库文档嵌入操作仅支持 add / reembed / delete。")
-        selected_ids = list(dict.fromkeys(str(item or "").strip() for item in list(document_ids or []) if str(item or "").strip()))
-        if not selected_ids:
-            raise ValueError("请至少选择一个文件。")
-        if normalized_action in {"add", "reembed"} and (self._embedding_model is None or self._embedding_dimension is None):
-            raise ValueError("当前未启用 Embedding，无法执行嵌入操作。")
+        return self._run_document_embedding_action(
+            knowledge_base_id,
+            action=action,
+            document_ids=document_ids,
+            job_id=None,
+        )
 
+    def _run_document_embedding_action(
+        self,
+        knowledge_base_id: str,
+        *,
+        action: str,
+        document_ids: list[str],
+        job_id: str | None,
+    ) -> dict[str, Any]:
+        knowledge_base = self._require_knowledge_base(knowledge_base_id)
+        normalized_action = self._normalize_embedding_action(action)
+        selected_ids = self._normalize_embedding_document_ids(document_ids)
+        if normalized_action in {"add", "reembed", "delete"} and not selected_ids:
+            raise ValueError("请至少选择一个文件。")
+        if normalized_action == "delete":
+            if job_id:
+                self._update_embedding_job(
+                    job_id,
+                    status="running",
+                    stage="deleting",
+                    total_documents=len(selected_ids),
+                    processed_documents=0,
+                    completed_documents=0,
+                    failed_documents=0,
+                    total_chunks_estimated=0,
+                    embedded_chunks_completed=0,
+                    message=self._embedding_job_status_text(
+                        status="running",
+                        stage="deleting",
+                        total_documents=len(selected_ids),
+                        processed_documents=0,
+                    ),
+                )
+            deleted = self._delete_document_embeddings(
+                knowledge_base_id=knowledge_base_id,
+                document_ids=selected_ids,
+                job_id=job_id,
+            )
+            self.store.touch_knowledge_base(knowledge_base_id)
+            summary = self.store.get_knowledge_base(knowledge_base_id) or knowledge_base
+            result = {
+                "message": f"删除嵌入已处理 {len(deleted['items'])} 个文件。",
+                "action": "delete",
+                "knowledge_base": self._knowledge_base_resource(summary),
+                "affected_count": len(deleted["items"]),
+                "skipped_count": len(deleted["skipped"]),
+                "items": deleted["items"],
+                "skipped": deleted["skipped"],
+                "retrieval": self.retrieval_info(),
+            }
+            if job_id:
+                self._update_embedding_job(job_id, stage="finalizing", result=result)
+            return result
+        action_mode = normalized_action or "save"
+        reembed_rows: list[dict[str, Any]] = []
         items: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
-        for document_id in selected_ids:
-            document = self.store.get_knowledge_document(document_id)
-            if document is None:
-                skipped.append({"id": document_id, "reason": "missing", "message": "文件不存在。"})
-                continue
-            if str(document.get("knowledge_base_id") or "").strip() != knowledge_base_id:
-                skipped.append({"id": document_id, "reason": "knowledge-base-mismatch", "message": "文件不属于当前知识库。"})
-                continue
-            try:
-                updated = self._apply_document_embedding_action(
-                    knowledge_base=knowledge_base,
-                    document=document,
-                    action=normalized_action,
-                )
-            except ValueError as exc:
-                skipped.append(
-                    {
-                        "id": document_id,
-                        "title": str(document.get("title") or document.get("source_path") or document_id),
-                        "reason": "invalid-document",
-                        "message": str(exc),
-                    }
-                )
-                continue
-            if updated is None:
-                skipped.append(
-                    {
-                        "id": document_id,
-                        "title": str(document.get("title") or document.get("source_path") or document_id),
-                        "reason": "skipped",
-                        "message": "当前文件无需执行该操作。",
-                    }
-                )
-                continue
-            items.append(self._document_resource(updated))
-
+        affected_count = 0
+        if action_mode in {"add", "reembed"}:
+            for document_id in selected_ids:
+                document = self.store.get_knowledge_document(document_id)
+                if document is None:
+                    skipped.append({"id": document_id, "reason": "missing", "message": "文件不存在。"})
+                    continue
+                if str(document.get("knowledge_base_id") or "").strip() != knowledge_base_id:
+                    skipped.append({"id": document_id, "reason": "knowledge-base-mismatch", "message": "文件不属于当前知识库。"})
+                    continue
+                current_status = self._document_embedding_status(document)
+                if action_mode == "add" and current_status == "embedded":
+                    skipped.append(
+                        {
+                            "id": document_id,
+                            "title": str(document.get("title") or document.get("source_path") or document_id),
+                            "reason": "skipped",
+                            "message": "当前文件已经是已嵌入状态。",
+                        }
+                    )
+                    continue
+                if action_mode == "reembed" and current_status == "embedded":
+                    reembed_rows.append(document)
+        result = self._save_and_embed_documents(
+            knowledge_base=knowledge_base,
+            selected_document_ids=selected_ids if action_mode in {"add", "reembed"} else None,
+            reembed_rows=reembed_rows,
+            job_id=job_id,
+        )
+        items.extend(result["items"])
+        skipped.extend(result["skipped"])
+        affected_count = int(result.get("affected_count") or len(items))
         self.store.touch_knowledge_base(knowledge_base_id)
         summary = self.store.get_knowledge_base(knowledge_base_id) or knowledge_base
-        action_label = {"add": "新增嵌入", "reembed": "重新嵌入", "delete": "删除嵌入"}[normalized_action]
-        return {
-            "message": f"{action_label}已处理 {len(items)} 个文件。",
-            "action": normalized_action,
+        action_label = {"save": "保存并嵌入", "sync": "保存并嵌入", "add": "保存并嵌入", "reembed": "保存并嵌入"}[action_mode]
+        payload = {
+            "message": f"{action_label}已处理 {affected_count} 个文件。",
+            "action": action_mode,
             "knowledge_base": self._knowledge_base_resource(summary),
-            "affected_count": len(items),
+            "affected_count": affected_count,
             "skipped_count": len(skipped),
             "items": items,
             "skipped": skipped,
             "retrieval": self.retrieval_info(),
         }
+        if job_id:
+            self._update_embedding_job(job_id, stage="finalizing", result=payload)
+        return payload
 
     def sync_document(
         self,
@@ -826,47 +1154,32 @@ class KnowledgeBaseService:
         *,
         previous_document: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        del previous_document
         knowledge_base_id = str(document.get("knowledge_base_id") or "").strip()
-        knowledge_base = self._require_knowledge_base(knowledge_base_id)
+        self._require_knowledge_base(knowledge_base_id)
         metadata = dict(document.get("metadata_json") or document.get("metadata") or {})
         source_path = str(document.get("source_path") or "").strip() or None
         document_id = str(document.get("id") or "").strip()
-        key = str(document.get("key") or "").strip() or self._document_key(
-            source_path or str(document.get("title") or document_id or "document")
-        )
-        title = str(document.get("title") or source_path or key or document_id or "文档").strip()
-        text = str(document.get("content_text") or "").strip()
-        self._delete_document_vectors(knowledge_base_id=knowledge_base_id, document_id=document_id)
-        if not text:
-            saved = self.store.save_knowledge_document(
-                knowledge_document_id=document_id or None,
-                knowledge_base_id=knowledge_base_id,
-                key=key,
-                title=title,
-                source_path=source_path,
-                content_text="",
-                metadata={
-                    **metadata,
-                    "chunk_count": 0,
-                    "file_size": int(metadata.get("file_size") or 0),
-                    "source_path": source_path,
-                    **self._embedding_metadata_fields(status="empty", embedded_chunk_count=0),
-                },
-                status=str(document.get("status") or "active"),
-            )
-            self.store.touch_knowledge_base(knowledge_base_id)
-            return saved
-        chunks = self._chunk_text(text)
+        title = str(document.get("title") or source_path or document_id or "文档").strip()
+        text = str(document.get("content_text") or "")
+        key = str(document.get("key") or "").strip() or self._document_key(source_path or title)
         saved = self.store.save_knowledge_document(
             knowledge_document_id=document_id or None,
             knowledge_base_id=knowledge_base_id,
+            pool_document_id=str(document.get("pool_document_id") or "").strip() or None,
+            blob_id=str(document.get("blob_id") or "").strip() or None,
+            alias_id=str(document.get("alias_id") or "").strip() or None,
             key=key,
             title=title,
             source_path=source_path,
             content_text=text,
+            document_status="not_embedded",
+            sync_status="idle",
+            last_error=None,
+            embedded_at=None,
+            removed_at=None,
             metadata={
                 **metadata,
-                "chunk_count": len(chunks),
                 "file_size": int(metadata.get("file_size") or len(text.encode("utf-8"))),
                 "source_path": source_path,
                 "preview": trim_text(text, limit=200),
@@ -874,20 +1187,6 @@ class KnowledgeBaseService:
             },
             status=str(document.get("status") or "active"),
         )
-        if chunks and self._embedding_model is not None and self._embedding_dimension is not None:
-            embedded_chunk_count = self._index_document_chunks(
-                knowledge_base=knowledge_base,
-                document=saved,
-                chunks=chunks,
-                title=title,
-                source_path=source_path,
-                file_size=int((saved.get("metadata_json") or {}).get("file_size") or 0),
-            )
-            saved = self._update_document_embedding_state(
-                saved,
-                status="embedded",
-                embedded_chunk_count=embedded_chunk_count,
-            )
         self.store.touch_knowledge_base(knowledge_base_id)
         return saved
 
@@ -896,16 +1195,34 @@ class KnowledgeBaseService:
         if existing is None:
             return None
         knowledge_base_id = str(existing.get("knowledge_base_id") or "").strip()
-        if knowledge_base_id:
-            self._delete_document_vectors(knowledge_base_id=knowledge_base_id, document_id=knowledge_document_id)
-        source_path = str(existing.get("source_path") or "").strip()
-        if knowledge_base_id and source_path:
-            target = self._knowledge_base_source_root(knowledge_base_id).joinpath(*PurePosixPath(source_path).parts)
-            try:
-                target.unlink(missing_ok=True)
-            finally:
-                self._prune_empty_dirs(target.parent, stop_at=self._knowledge_base_source_root(knowledge_base_id))
+        if not knowledge_base_id:
+            return None
+        current_status = self._document_embedding_status(existing)
+        if current_status == "embedded":
+            saved = self.store.save_knowledge_document(
+                knowledge_document_id=str(existing.get("id") or "").strip() or None,
+                knowledge_base_id=knowledge_base_id,
+                pool_document_id=str(existing.get("pool_document_id") or "").strip() or None,
+                blob_id=str(existing.get("blob_id") or "").strip() or None,
+                alias_id=str(existing.get("alias_id") or "").strip() or None,
+                key=str(existing.get("key") or "").strip() or self._document_key(str(existing.get("source_path") or existing.get("title") or existing.get("id") or "document")),
+                title=str(existing.get("title") or existing.get("source_path") or existing.get("id") or "文档"),
+                source_path=str(existing.get("source_path") or "").strip() or None,
+                content_text=str(existing.get("content_text") or ""),
+                document_status="removed",
+                sync_status="idle",
+                last_error=None,
+                embedded_at=str(existing.get("embedded_at") or "").strip() or None,
+                removed_at=utcnow_iso(),
+                metadata=dict(existing.get("metadata_json") or {}),
+                status=str(existing.get("status") or "active"),
+            )
+            self.store.touch_knowledge_base(knowledge_base_id)
+            return saved
         deleted = self.store.delete_knowledge_document(knowledge_document_id)
+        blob_id = str((deleted or {}).get("blob_id") or "").strip()
+        if blob_id:
+            self._cleanup_blob_if_orphan(blob_id)
         if knowledge_base_id:
             self.store.touch_knowledge_base(knowledge_base_id)
         return deleted
@@ -914,13 +1231,16 @@ class KnowledgeBaseService:
         existing = self.store.get_knowledge_base(knowledge_base_id)
         if existing is None:
             return None
-        for document in self.store.list_knowledge_documents(knowledge_base_id=knowledge_base_id):
-            self.delete_document(str(document.get("id") or ""))
+        related_blob_ids = {
+            str(item.get("blob_id") or "").strip()
+            for item in self.store.list_knowledge_documents(knowledge_base_id=knowledge_base_id, include_removed=True)
+            + self.store.list_knowledge_pool_documents(knowledge_base_id=knowledge_base_id)
+            if str(item.get("blob_id") or "").strip()
+        }
         self._drop_vector_table(knowledge_base_id)
         deleted = self.store.delete_knowledge_base(knowledge_base_id)
-        target_dir = self.root_dir / "files" / knowledge_base_id
-        if target_dir.exists():
-            shutil.rmtree(target_dir, ignore_errors=True)
+        for blob_id in related_blob_ids:
+            self._cleanup_blob_if_orphan(blob_id)
         return deleted
 
     def search(
@@ -957,6 +1277,146 @@ class KnowledgeBaseService:
             )
         return self._maybe_rerank_results(query=str(query or "").strip(), items=items, limit=safe_limit)
 
+    def _unload_retrieval_runtime(self) -> None:
+        self._embedding_model = None
+        self._embedding_signature = ""
+        self._embedding_dimension = None
+        self._rerank_postprocessor = None
+
+    def _ensure_retrieval_loaded_for_embedding(self) -> None:
+        self._ensure_embedding_loaded_for_embedding()
+        try:
+            self._ensure_rerank_loaded_for_embedding()
+        except Exception as exc:
+            LOGGER.warning("Knowledge base rerank runtime load skipped during embedding: %s", exc)
+
+    def _ensure_embedding_loaded_for_embedding(self) -> None:
+        if self._embedding_model is not None and self._embedding_dimension is not None:
+            return
+        embedding_state = self._build_embedding_state(dict(self._embedding_runtime_settings or {}))
+        self._embedding_model = embedding_state["model"]
+        self._embedding_signature = str(embedding_state["signature"])
+        self._embedding_dimension = embedding_state["vector_dim"]
+        self._embedding_runtime = dict(embedding_state["public"])
+
+    def _ensure_rerank_loaded_for_embedding(self) -> None:
+        if self._rerank_postprocessor is not None:
+            return
+        rerank_state = self._build_rerank_state(dict(self._rerank_runtime_settings or {}))
+        self._rerank_runtime = dict(rerank_state["public"])
+        self._rerank_postprocessor = rerank_state["postprocessor"]
+
+    def _preview_embedding_runtime(self, runtime: dict[str, Any]) -> dict[str, Any]:
+        mode = str(runtime.get("mode") or "").strip().lower()
+        if mode in {"", "disabled"}:
+            return {
+                "mode": "disabled",
+                "vector_enabled": False,
+                "vector_dim": None,
+                "runtime_loaded": False,
+            }
+        if mode == "local":
+            runtime_model_name = str(runtime.get("model") or runtime.get("model_name") or DEFAULT_LOCAL_EMBEDDING_MODEL).strip()
+            public_model_name = str(runtime.get("model_path") or runtime.get("model_name") or runtime_model_name).strip() or runtime_model_name
+            local_model_id = str(runtime.get("local_model_id") or "").strip()
+            model_label = str(runtime.get("model_label") or public_model_name or local_model_id).strip() or public_model_name
+            model_path = str(runtime.get("model_path") or public_model_name or runtime_model_name).strip() or public_model_name
+            return {
+                "mode": "local",
+                "backend": "huggingface",
+                "local_model_id": local_model_id,
+                "model_name": public_model_name,
+                "resolved_model_name": runtime_model_name,
+                "model_path": model_path,
+                "model_label": model_label,
+                "vector_enabled": True,
+                "vector_dim": None,
+                "runtime_loaded": False,
+            }
+        if mode != "provider":
+            return {
+                "mode": "disabled",
+                "vector_enabled": False,
+                "vector_dim": None,
+                "runtime_loaded": False,
+            }
+        provider = dict(runtime.get("provider") or {})
+        provider_id = str(runtime.get("provider_id") or provider.get("id") or "").strip()
+        provider_name = str(runtime.get("provider_name") or provider.get("name") or provider_id).strip()
+        provider_type = str(runtime.get("provider_type") or provider.get("provider_type") or "").strip()
+        model_name = str(runtime.get("model") or runtime.get("model_name") or "").strip()
+        resolved_model_name = self._resolve_litellm_model(provider, model_name) if provider and model_name else model_name
+        return {
+            "mode": "provider",
+            "backend": "litellm",
+            "provider_id": provider_id,
+            "provider_name": provider_name,
+            "provider_type": provider_type,
+            "model_name": model_name,
+            "resolved_model_name": resolved_model_name,
+            "vector_enabled": True,
+            "vector_dim": None,
+            "runtime_loaded": False,
+        }
+
+    def _preview_rerank_runtime(self, runtime: dict[str, Any]) -> dict[str, Any]:
+        mode = str(runtime.get("mode") or "").strip().lower()
+        if mode in {"", "disabled"}:
+            return {"mode": "disabled", "strategy": "disabled", "runtime_loaded": False}
+        if mode == "local":
+            runtime_model_name = str(runtime.get("model") or runtime.get("model_name") or DEFAULT_LOCAL_RERANK_MODEL).strip()
+            public_model_name = str(runtime.get("model_path") or runtime.get("model_name") or runtime_model_name).strip() or runtime_model_name
+            local_model_id = str(runtime.get("local_model_id") or "").strip()
+            model_label = str(runtime.get("model_label") or public_model_name or local_model_id).strip() or public_model_name
+            model_path = str(runtime.get("model_path") or public_model_name or runtime_model_name).strip() or public_model_name
+            return {
+                "mode": "local",
+                "backend": "flag_embedding",
+                "local_model_id": local_model_id,
+                "model_name": public_model_name,
+                "resolved_model_name": runtime_model_name,
+                "model_path": model_path,
+                "model_label": model_label,
+                "strategy": "flag_embedding_reranker",
+                "runtime_loaded": False,
+            }
+        if mode != "provider":
+            return {"mode": "disabled", "strategy": "disabled", "runtime_loaded": False}
+        provider = dict(runtime.get("provider") or {})
+        provider_id = str(runtime.get("provider_id") or provider.get("id") or "").strip()
+        provider_name = str(runtime.get("provider_name") or provider.get("name") or provider_id).strip()
+        provider_type = str(runtime.get("provider_type") or provider.get("provider_type") or "").strip()
+        model_name = str(runtime.get("model") or runtime.get("model_name") or "").strip()
+        llm_rerank_available = bool(LLMRerank is not None)
+        selected_model_type = str(runtime.get("model_type") or "rerank").strip().lower() or "rerank"
+        llm_rerank_compatible = llm_rerank_available and selected_model_type == "chat"
+        llm_rerank_supports_selected_model = selected_model_type == "chat"
+        resolved_model_name = self._resolve_litellm_model(provider, model_name) if provider and model_name else model_name
+        strategy_reason = (
+            "当前知识库 Rerank 使用 LiteLLM BaseNodePostprocessor 包装真实 rerank 模型；LLMRerank 仅保留兼容性探测。"
+            if selected_model_type == "rerank"
+            else (
+                "检测到聊天 LLM rerank 场景，但知识库资源中心当前仍优先使用 LiteLLM rerank 路径，以支持真实 rerank 模型。"
+                if llm_rerank_available
+                else "当前环境未提供 LLMRerank；若后续接入聊天 LLM rerank，仍需单独实现。"
+            )
+        )
+        return {
+            "mode": "provider",
+            "provider_id": provider_id,
+            "provider_name": provider_name,
+            "provider_type": provider_type,
+            "model_name": model_name,
+            "resolved_model_name": resolved_model_name,
+            "selected_model_type": selected_model_type,
+            "llm_rerank_available": llm_rerank_available,
+            "llm_rerank_compatible": llm_rerank_compatible,
+            "llm_rerank_supports_selected_model": llm_rerank_supports_selected_model,
+            "strategy": "litellm_base_node_postprocessor",
+            "strategy_reason": strategy_reason,
+            "runtime_loaded": False,
+        }
+
     def _build_embedding_state(self, runtime: dict[str, Any]) -> dict[str, Any]:
         mode = str(runtime.get("mode") or "").strip().lower()
         if mode in {"", "disabled"}:
@@ -965,7 +1425,7 @@ class KnowledgeBaseService:
                 "model": None,
                 "signature": "",
                 "vector_dim": None,
-                "public": {"mode": "disabled", "vector_enabled": False, "vector_dim": None},
+                "public": {"mode": "disabled", "vector_enabled": False, "vector_dim": None, "runtime_loaded": False},
             }
 
         if mode == "local":
@@ -1014,6 +1474,7 @@ class KnowledgeBaseService:
                     "model_label": model_label,
                     "vector_enabled": True,
                     "vector_dim": vector_dim,
+                    "runtime_loaded": True,
                 },
             }
 
@@ -1023,7 +1484,7 @@ class KnowledgeBaseService:
                 "model": None,
                 "signature": "",
                 "vector_dim": None,
-                "public": {"mode": "disabled", "vector_enabled": False, "vector_dim": None},
+                "public": {"mode": "disabled", "vector_enabled": False, "vector_dim": None, "runtime_loaded": False},
             }
 
         self._require_vector_dependencies()
@@ -1092,6 +1553,7 @@ class KnowledgeBaseService:
                 "resolved_model_name": resolved_model,
                 "vector_enabled": True,
                 "vector_dim": vector_dim,
+                "runtime_loaded": True,
             },
         }
 
@@ -1101,7 +1563,7 @@ class KnowledgeBaseService:
             return {
                 "enabled": False,
                 "postprocessor": None,
-                "public": {"mode": "disabled", "strategy": "disabled"},
+                "public": {"mode": "disabled", "strategy": "disabled", "runtime_loaded": False},
             }
         if mode == "local":
             self._require_postprocessor_base_dependencies()
@@ -1135,13 +1597,14 @@ class KnowledgeBaseService:
                     "model_path": model_path,
                     "model_label": model_label,
                     "strategy": "flag_embedding_reranker",
+                    "runtime_loaded": True,
                 },
             }
         if mode != "provider":
             return {
                 "enabled": False,
                 "postprocessor": None,
-                "public": {"mode": "disabled", "strategy": "disabled"},
+                "public": {"mode": "disabled", "strategy": "disabled", "runtime_loaded": False},
             }
 
         provider = dict(runtime.get("provider") or {})
@@ -1194,6 +1657,7 @@ class KnowledgeBaseService:
                 "llm_rerank_supports_selected_model": llm_rerank_supports_selected_model,
                 "strategy": strategy,
                 "strategy_reason": strategy_reason,
+                "runtime_loaded": True,
             },
         }
 
@@ -1210,30 +1674,40 @@ class KnowledgeBaseService:
             if not knowledge_base_id:
                 continue
             self._drop_vector_table(knowledge_base_id)
-            for document in self.store.list_knowledge_documents(knowledge_base_id=knowledge_base_id):
+            active_documents = self.store.list_knowledge_documents(knowledge_base_id=knowledge_base_id, include_removed=False)
+            selected_ids: list[str] = []
+            for document in active_documents:
                 if str(document.get("status") or "active").strip().lower() != "active":
                     continue
-                content_text = str(document.get("content_text") or "").strip()
-                if not content_text:
-                    continue
-                chunks = self._chunk_text(content_text)
-                if not chunks:
-                    continue
-                documents_indexed += 1
-                indexed_chunk_count = self._index_document_chunks(
-                    knowledge_base=knowledge_base,
-                    document=document,
-                    chunks=chunks,
+                selected_ids.append(str(document.get("id") or ""))
+                refreshed = self.store.save_knowledge_document(
+                    knowledge_document_id=str(document.get("id") or "").strip() or None,
+                    knowledge_base_id=knowledge_base_id,
+                    pool_document_id=str(document.get("pool_document_id") or "").strip() or None,
+                    blob_id=str(document.get("blob_id") or "").strip() or None,
+                    alias_id=str(document.get("alias_id") or "").strip() or None,
+                    key=str(document.get("key") or "").strip() or self._document_key(str(document.get("source_path") or document.get("title") or document.get("id") or "document")),
                     title=str(document.get("title") or document.get("source_path") or document.get("id") or "文档"),
                     source_path=str(document.get("source_path") or "").strip() or None,
-                    file_size=int((document.get("metadata_json") or {}).get("file_size") or 0),
+                    content_text=str(document.get("content_text") or ""),
+                    document_status="not_embedded",
+                    sync_status="idle",
+                    last_error=None,
+                    embedded_at=None,
+                    removed_at=None,
+                    metadata=dict(document.get("metadata_json") or {}),
+                    status=str(document.get("status") or "active"),
                 )
-                chunks_indexed += indexed_chunk_count
-                self._update_document_embedding_state(
-                    document,
-                    status="embedded",
-                    embedded_chunk_count=indexed_chunk_count,
-                )
+                document.update(refreshed)
+            if not selected_ids:
+                continue
+            result = self._save_and_embed_documents(
+                knowledge_base=knowledge_base,
+                selected_document_ids=selected_ids,
+                reembed_rows=[],
+            )
+            documents_indexed += len(result["items"])
+            chunks_indexed += sum(int((item.get("metadata") or {}).get("embedded_chunk_count") or item.get("embedded_chunk_count") or 0) for item in result["items"])
         return len(knowledge_bases), documents_indexed, chunks_indexed
 
     def _search_vector(self, *, query: str, knowledge_base_ids: list[str], limit: int) -> list[dict[str, Any]]:
@@ -1241,53 +1715,44 @@ class KnowledgeBaseService:
             return []
         if not query:
             return []
-        assert VectorStoreQuery is not None
         kb_records = self._candidate_knowledge_bases(knowledge_base_ids)
         if not kb_records:
             return []
-        query_vector = [float(value or 0.0) for value in list(self._embedding_model.get_query_embedding(query) or [])]
-        if len(query_vector) != self._embedding_dimension:
-            raise ValueError(
-                f"Embedding 维度不匹配：预期 {self._embedding_dimension}，实际 {len(query_vector)}。"
-            )
         head_size = max(limit * VECTOR_HEAD_MULTIPLIER, limit)
         items: list[dict[str, Any]] = []
-        seen: set[tuple[str, int]] = set()
+        seen: set[tuple[str, str]] = set()
         for knowledge_base in kb_records:
             knowledge_base_id = str(knowledge_base.get("id") or "").strip()
             if not knowledge_base_id or not self._vector_table_exists(knowledge_base_id):
                 continue
-            vector_store = self._vector_store_for_kb(knowledge_base_id)
             try:
-                result = vector_store.query(
-                    VectorStoreQuery(
-                        query_embedding=query_vector,
-                        query_str=query,
-                        similarity_top_k=head_size,
-                    )
-                )
+                retriever = self._index_for_kb(knowledge_base_id).as_retriever(similarity_top_k=head_size)
+                nodes = retriever.retrieve(query)
             except Warning:
                 continue
-            similarities = list(result.similarities or [])
-            for index, node in enumerate(list(result.nodes or [])):
+            except Exception as exc:
+                LOGGER.warning("Knowledge base vector query failed for %s: %s", knowledge_base_id, exc)
+                continue
+            for node_with_score in list(nodes or []):
+                node = getattr(node_with_score, "node", None)
                 metadata = dict(getattr(node, "metadata", {}) or {})
-                document_id = str(metadata.get("document_id") or getattr(node, "ref_doc_id", None) or "").strip()
+                document_id = str(getattr(node, "ref_doc_id", None) or metadata.get("knowledge_document_id") or "").strip()
                 if not document_id:
                     continue
-                chunk_index = self._coerce_int(metadata.get("chunk_index"), minimum=0) or 0
-                identity = (document_id, chunk_index)
+                node_id = str(getattr(node, "node_id", None) or getattr(node, "id_", None) or document_id).strip() or document_id
+                identity = (document_id, node_id)
                 if identity in seen:
                     continue
                 seen.add(identity)
                 text = str(node.get_content() if hasattr(node, "get_content") else getattr(node, "text", "") or "").strip()
-                score = float(similarities[index] if index < len(similarities) else 0.0)
+                score = float(getattr(node_with_score, "score", 0.0) or 0.0)
                 items.append(
                     {
                         "id": document_id,
                         "knowledge_base_id": knowledge_base_id,
                         "knowledge_base_key": metadata.get("knowledge_base_key") or knowledge_base.get("key"),
                         "knowledge_base_name": metadata.get("knowledge_base_name") or knowledge_base.get("name"),
-                        "key": metadata.get("document_key"),
+                        "key": metadata.get("document_key") or metadata.get("key"),
                         "title": metadata.get("title"),
                         "source_path": metadata.get("source_path"),
                         "metadata_json": {
@@ -1295,7 +1760,7 @@ class KnowledgeBaseService:
                             "file_size": self._coerce_int(metadata.get("file_size"), minimum=0) or 0,
                         },
                         "score": score,
-                        "chunk_index": chunk_index,
+                        "chunk_index": self._coerce_int(metadata.get("chunk_index"), minimum=0) or 0,
                         "chunk_count": self._coerce_int(metadata.get("chunk_count"), minimum=0) or 0,
                         "snippet": trim_text(text, limit=320),
                         "content_text": text,
@@ -1471,7 +1936,7 @@ class KnowledgeBaseService:
         if not self._vector_table_exists(knowledge_base_id):
             return
         try:
-            self._vector_store_for_kb(knowledge_base_id).delete(document_id)
+            self._index_for_kb(knowledge_base_id).delete_ref_doc(document_id, delete_from_docstore=True)
         except Exception as exc:
             LOGGER.warning("Failed to delete knowledge document vectors for %s/%s: %s", knowledge_base_id, document_id, exc)
 
@@ -1515,6 +1980,48 @@ class KnowledgeBaseService:
         return LanceDBVectorStore(
             uri=str(self._vector_root),
             table_name=self._knowledge_base_table_name(knowledge_base_id),
+        )
+
+    def _index_for_kb(self, knowledge_base_id: str) -> Any:
+        self._require_vector_dependencies()
+        assert VectorStoreIndex is not None
+        embed_model = self._embedding_model
+        if not (
+            embed_model is not None
+            and hasattr(embed_model, "get_query_embedding")
+            and hasattr(embed_model, "get_text_embedding_batch")
+        ):
+            embed_model = MockEmbedding(embed_dim=int(self._embedding_dimension or DEFAULT_MOCK_EMBED_DIM))
+        return VectorStoreIndex.from_vector_store(
+            self._vector_store_for_kb(knowledge_base_id),
+            embed_model=embed_model,
+            transformations=self._vector_transformations(),
+        )
+
+    def _build_index_for_kb_insert(self, knowledge_base_id: str, document: Any | None = None) -> Any:
+        self._require_vector_dependencies()
+        assert VectorStoreIndex is not None
+        assert StorageContext is not None
+        embed_model = self._embedding_model
+        if not (
+            embed_model is not None
+            and hasattr(embed_model, "get_query_embedding")
+            and hasattr(embed_model, "get_text_embedding_batch")
+        ):
+            embed_model = MockEmbedding(embed_dim=int(self._embedding_dimension or DEFAULT_MOCK_EMBED_DIM))
+        vector_store = self._vector_store_for_kb(knowledge_base_id)
+        if self._vector_table_exists(knowledge_base_id) or document is None:
+            return VectorStoreIndex.from_vector_store(
+                vector_store,
+                embed_model=embed_model,
+                transformations=self._vector_transformations(),
+            )
+        return VectorStoreIndex.from_documents(
+            [document],
+            storage_context=StorageContext.from_defaults(vector_store=vector_store),
+            embed_model=embed_model,
+            transformations=self._vector_transformations(),
+            show_progress=False,
         )
 
     def _candidate_knowledge_bases(self, knowledge_base_ids: list[str]) -> list[dict[str, Any]]:
@@ -1577,11 +2084,13 @@ class KnowledgeBaseService:
             item is not None
             for item in (
                 lancedb,
+                SimpleDirectoryReader,
+                VectorStoreIndex,
+                SentenceSplitter,
                 MockEmbedding,
                 NodeRelationship,
                 RelatedNodeInfo,
                 TextNode,
-                VectorStoreQuery,
                 LanceDBVectorStore,
             )
         )
@@ -1598,6 +2107,639 @@ class KnowledgeBaseService:
                 PrivateAttr,
             )
         )
+
+    def _vector_transformations(self) -> list[Any]:
+        if SentenceSplitter is None:
+            return []
+        return [SentenceSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)]
+
+    def _store_uploaded_file_to_pool(
+        self,
+        *,
+        knowledge_base_id: str,
+        upload_path: str,
+        content: bytes,
+    ) -> dict[str, Any]:
+        if xxhash is None:
+            raise RuntimeError("知识库文件去重依赖 `xxhash` 未安装。")
+        normalized_path = self._normalize_upload_path(upload_path)
+        if not normalized_path:
+            raise ValueError("上传文件路径无效。")
+        filename = PurePosixPath(normalized_path).name
+        if not filename:
+            raise ValueError("上传文件名无效。")
+        text, extra_metadata = self._extract_text_from_upload(filename=filename, content=content)
+        if not text.strip():
+            raise ValueError("文件内容为空，无法加入文档池。")
+        file_hash = xxhash.xxh128_hexdigest(content)
+        blob = self.store.get_knowledge_file_blob_by_xxh128(file_hash)
+        blob_path = self._blob_path_for_hash(file_hash)
+        blob_path.parent.mkdir(parents=True, exist_ok=True)
+        if blob is None:
+            if not blob_path.exists():
+                blob_path.write_bytes(content)
+            blob = self.store.save_knowledge_file_blob(
+                blob_id=None,
+                xxh128=file_hash,
+                storage_name=file_hash,
+                storage_relpath=blob_path.relative_to(self.root_dir).as_posix(),
+                byte_size=len(content),
+                mime_type=str(extra_metadata.get("content_type") or "").strip() or None,
+                ext_hint=str(extra_metadata.get("extension") or "").strip() or None,
+            )
+        elif not blob_path.exists():
+            blob_path.write_bytes(content)
+        alias = self.store.get_knowledge_file_alias_by_blob_filename(blob_id=str(blob.get("id") or ""), filename=filename)
+        if alias is None:
+            alias = self.store.save_knowledge_file_alias(
+                alias_id=None,
+                blob_id=str(blob.get("id") or ""),
+                filename=filename,
+                suffix=str(Path(filename).suffix.lower() or extra_metadata.get("extension") or ""),
+            )
+        existing = self.store.get_knowledge_pool_document_by_blob(
+            knowledge_base_id=knowledge_base_id,
+            blob_id=str(blob.get("id") or ""),
+        )
+        metadata = {
+            **dict((existing or {}).get("metadata_json") or {}),
+            **extra_metadata,
+            "blob_id": str(blob.get("id") or ""),
+            "blob_xxh128": str(blob.get("xxh128") or file_hash),
+            "file_size": len(content),
+            "source_path": normalized_path,
+            "filename": filename,
+            "suffix": str(Path(filename).suffix.lower() or extra_metadata.get("extension") or ""),
+            "preview": trim_text(text, limit=200),
+        }
+        return self.store.save_knowledge_pool_document(
+            knowledge_pool_document_id=str((existing or {}).get("id") or "").strip() or None,
+            knowledge_base_id=knowledge_base_id,
+            blob_id=str(blob.get("id") or ""),
+            alias_id=str(alias.get("id") or ""),
+            key=f"blob:{blob.get('id')}",
+            title=filename,
+            source_path=normalized_path,
+            content_text=text,
+            upload_method="http",
+            metadata=metadata,
+            status=str((existing or {}).get("status") or "active"),
+        )
+
+    def _save_and_embed_documents(
+        self,
+        *,
+        knowledge_base: dict[str, Any],
+        selected_document_ids: list[str] | None,
+        reembed_rows: list[dict[str, Any]],
+        job_id: str | None = None,
+    ) -> dict[str, Any]:
+        knowledge_base_id = str(knowledge_base.get("id") or "").strip()
+        selected_ids = {str(item or "").strip() for item in list(selected_document_ids or []) if str(item or "").strip()}
+        removed_rows = self.store.list_knowledge_documents(
+            knowledge_base_id=knowledge_base_id,
+            include_removed=True,
+            document_statuses=["removed"],
+        )
+        pending_rows: list[dict[str, Any]] = []
+        if selected_ids:
+            for document_id in selected_ids:
+                document = self.store.get_knowledge_document(document_id)
+                if document is None or str(document.get("knowledge_base_id") or "").strip() != knowledge_base_id:
+                    continue
+                if self._document_embedding_status(document) != "embedded":
+                    pending_rows.append(document)
+        else:
+            pending_rows = self.store.list_knowledge_documents(
+                knowledge_base_id=knowledge_base_id,
+                include_removed=False,
+                document_statuses=["not_embedded"],
+            )
+        pending_map = {str(item.get("id") or ""): item for item in pending_rows if str(item.get("id") or "").strip()}
+        affected_rows_map: dict[str, dict[str, Any]] = {}
+        for row in [*removed_rows, *pending_map.values(), *reembed_rows]:
+            document_id = str(row.get("id") or "").strip()
+            if document_id:
+                affected_rows_map[document_id] = row
+        affected_rows = list(affected_rows_map.values())
+        if job_id:
+            self._update_embedding_job(
+                job_id,
+                status="running",
+                stage="preparing",
+                total_documents=len(affected_rows),
+                processed_documents=0,
+                completed_documents=0,
+                failed_documents=0,
+                total_chunks_estimated=0,
+                embedded_chunks_completed=0,
+                message=self._embedding_job_status_text(
+                    status="running",
+                    stage="preparing",
+                    total_documents=len(affected_rows),
+                    processed_documents=0,
+                ),
+            )
+        if pending_map or reembed_rows:
+            self._ensure_retrieval_loaded_for_embedding()
+        if (pending_map or reembed_rows) and (self._embedding_model is None or self._embedding_dimension is None):
+            raise ValueError("当前未启用 Embedding，无法执行保存并嵌入。")
+        items: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        deleted_count = 0
+        for row in affected_rows:
+            self._save_document_record(row, sync_status="processing", last_error=None)
+        for row in reembed_rows:
+            document_id = str(row.get("id") or "").strip()
+            if not document_id:
+                continue
+            document_title = str(row.get("title") or row.get("source_path") or document_id)
+            try:
+                if job_id:
+                    self._update_embedding_job(
+                        job_id,
+                        status="running",
+                        stage="deleting",
+                        current_document_id=document_id,
+                        current_document_title=document_title,
+                        message=self._embedding_job_status_text(
+                            status="running",
+                            stage="deleting",
+                            total_documents=len(affected_rows),
+                            processed_documents=int((self.store.get_knowledge_embedding_job(job_id) or {}).get("processed_documents") or 0),
+                            current_document_title=document_title,
+                        ),
+                    )
+                self._delete_document_vectors(knowledge_base_id=knowledge_base_id, document_id=document_id)
+                refreshed = self._save_document_record(
+                    row,
+                    document_status="not_embedded",
+                    sync_status="processing",
+                    last_error=None,
+                    embedded_at=None,
+                    removed_at=None,
+                    metadata={
+                        **dict(row.get("metadata_json") or {}),
+                        **self._embedding_metadata_fields(status="not_embedded", embedded_chunk_count=0),
+                    },
+                )
+                pending_map[document_id] = refreshed
+            except Exception as exc:
+                skipped.append(
+                    {
+                        "id": document_id,
+                        "title": str(row.get("title") or row.get("source_path") or document_id),
+                        "reason": "reembed-delete-failed",
+                        "message": trim_text(str(exc), limit=300) or "删除旧向量失败。",
+                    }
+                )
+                self._save_document_record(row, sync_status="error", last_error=trim_text(str(exc), limit=500))
+                if job_id:
+                    self._increment_embedding_job(
+                        job_id,
+                        processed_documents=1,
+                        failed_documents=1,
+                        stage="deleting",
+                        current_document_id=document_id,
+                        current_document_title=document_title,
+                    )
+        for row in removed_rows:
+            document_id = str(row.get("id") or "").strip()
+            if not document_id:
+                continue
+            document_title = str(row.get("title") or row.get("source_path") or document_id)
+            try:
+                if job_id:
+                    self._update_embedding_job(
+                        job_id,
+                        status="running",
+                        stage="deleting",
+                        current_document_id=document_id,
+                        current_document_title=document_title,
+                        message=self._embedding_job_status_text(
+                            status="running",
+                            stage="deleting",
+                            total_documents=len(affected_rows),
+                            processed_documents=int((self.store.get_knowledge_embedding_job(job_id) or {}).get("processed_documents") or 0),
+                            current_document_title=document_title,
+                        ),
+                    )
+                self._delete_document_vectors(knowledge_base_id=knowledge_base_id, document_id=document_id)
+                deleted = self.store.delete_knowledge_document(document_id)
+                deleted_count += 1
+                blob_id = str((deleted or {}).get("blob_id") or "").strip()
+                if blob_id:
+                    self._cleanup_blob_if_orphan(blob_id)
+                if job_id:
+                    self._increment_embedding_job(
+                        job_id,
+                        processed_documents=1,
+                        completed_documents=1,
+                        stage="deleting",
+                        current_document_id=document_id,
+                        current_document_title=document_title,
+                    )
+            except Exception as exc:
+                skipped.append(
+                    {
+                        "id": document_id,
+                        "title": str(row.get("title") or row.get("source_path") or document_id),
+                        "reason": "delete-failed",
+                        "message": trim_text(str(exc), limit=300) or "删除旧向量失败。",
+                    }
+                )
+                self._save_document_record(row, sync_status="error", last_error=trim_text(str(exc), limit=500))
+                if job_id:
+                    self._increment_embedding_job(
+                        job_id,
+                        processed_documents=1,
+                        failed_documents=1,
+                        stage="deleting",
+                        current_document_id=document_id,
+                        current_document_title=document_title,
+                    )
+        pending_rows = [row for row in pending_map.values() if self.store.get_knowledge_document(str(row.get("id") or "")) is not None]
+        if not pending_rows:
+            return {"items": items, "skipped": skipped, "affected_count": len(items) + deleted_count}
+        tmp_dir = Path(tempfile.mkdtemp(prefix=f"kb-sync-{knowledge_base_id[:8]}-", dir=str(self._ingest_tmp_root)))
+        try:
+            materialized: dict[str, tuple[Path, dict[str, Any], dict[str, Any] | None, dict[str, Any] | None]] = {}
+            for row in pending_rows:
+                document_id = str(row.get("id") or "").strip()
+                if not document_id:
+                    continue
+                document_title = str(row.get("title") or row.get("source_path") or document_id)
+                try:
+                    if job_id:
+                        self._update_embedding_job(
+                            job_id,
+                            status="running",
+                            stage="preparing",
+                            current_document_id=document_id,
+                            current_document_title=document_title,
+                            message=self._embedding_job_status_text(
+                                status="running",
+                                stage="preparing",
+                                total_documents=len(affected_rows),
+                                processed_documents=int((self.store.get_knowledge_embedding_job(job_id) or {}).get("processed_documents") or 0),
+                                total_chunks_estimated=int((self.store.get_knowledge_embedding_job(job_id) or {}).get("total_chunks_estimated") or 0),
+                                embedded_chunks_completed=int((self.store.get_knowledge_embedding_job(job_id) or {}).get("embedded_chunks_completed") or 0),
+                                current_document_title=document_title,
+                            ),
+                        )
+                    temp_path, blob, alias = self._materialize_document_for_ingest(tmp_dir=tmp_dir, document=row)
+                    materialized[str(temp_path.resolve())] = (temp_path, row, blob, alias)
+                except Exception as exc:
+                    skipped.append(
+                        {
+                            "id": document_id,
+                            "title": str(row.get("title") or row.get("source_path") or document_id),
+                            "reason": "materialize-failed",
+                            "message": trim_text(str(exc), limit=300) or "准备嵌入文件失败。",
+                        }
+                    )
+                    self._save_document_record(row, sync_status="error", last_error=trim_text(str(exc), limit=500))
+                    if job_id:
+                        self._increment_embedding_job(
+                            job_id,
+                            processed_documents=1,
+                            failed_documents=1,
+                            stage="preparing",
+                            current_document_id=document_id,
+                            current_document_title=document_title,
+                        )
+            if not materialized:
+                return {"items": items, "skipped": skipped, "affected_count": len(items) + deleted_count}
+            assert SimpleDirectoryReader is not None
+            documents = SimpleDirectoryReader(input_dir=str(tmp_dir), recursive=True).load_data()
+            parsed_by_path = {
+                str(Path(str((doc.metadata or {}).get("file_path") or "")).resolve()): doc
+                for doc in list(documents or [])
+                if str((doc.metadata or {}).get("file_path") or "").strip()
+            }
+            index: Any | None = None
+            for resolved_path, (_temp_path, row, blob, alias) in materialized.items():
+                document_id = str(row.get("id") or "").strip()
+                document_title = str(row.get("title") or row.get("source_path") or document_id)
+                parsed = parsed_by_path.get(resolved_path)
+                if parsed is None:
+                    message = "文件已准备完成，但解析结果缺失。"
+                    skipped.append(
+                        {
+                            "id": document_id,
+                            "title": str(row.get("title") or row.get("source_path") or document_id),
+                            "reason": "reader-missing",
+                            "message": message,
+                        }
+                    )
+                    self._save_document_record(row, sync_status="error", last_error=message)
+                    if job_id:
+                        self._increment_embedding_job(
+                            job_id,
+                            processed_documents=1,
+                            failed_documents=1,
+                            stage="embedding",
+                            current_document_id=document_id,
+                            current_document_title=document_title,
+                        )
+                    continue
+                body = str(getattr(parsed, "text", "") or (parsed.get_content() if hasattr(parsed, "get_content") else "") or "").strip()
+                if not body:
+                    message = "文件解析结果为空，无法嵌入。"
+                    skipped.append(
+                        {
+                            "id": document_id,
+                            "title": str(row.get("title") or row.get("source_path") or document_id),
+                            "reason": "empty-document",
+                            "message": message,
+                        }
+                    )
+                    self._save_document_record(row, sync_status="error", last_error=message)
+                    if job_id:
+                        self._increment_embedding_job(
+                            job_id,
+                            processed_documents=1,
+                            failed_documents=1,
+                            stage="embedding",
+                            current_document_id=document_id,
+                            current_document_title=document_title,
+                        )
+                    continue
+                parsed.id_ = document_id
+                chunk_count = len(self._chunk_text(body))
+                metadata = self._llama_document_metadata(
+                    knowledge_base=knowledge_base,
+                    document=row,
+                    blob=blob,
+                    alias=alias,
+                    chunk_count=chunk_count,
+                        file_size=int(((blob or {}).get("byte_size") or len(body.encode("utf-8"))) or 0),
+                )
+                parsed.metadata = metadata
+                if job_id:
+                    self._increment_embedding_job(
+                        job_id,
+                        total_chunks_estimated=chunk_count,
+                        stage="embedding",
+                        current_document_id=document_id,
+                        current_document_title=document_title,
+                    )
+                try:
+                    if index is None:
+                        if self._vector_table_exists(knowledge_base_id):
+                            index = self._build_index_for_kb_insert(knowledge_base_id)
+                            index.insert(parsed)
+                        else:
+                            index = self._build_index_for_kb_insert(knowledge_base_id, document=parsed)
+                    else:
+                        index.insert(parsed)
+                except Exception as exc:
+                    skipped.append(
+                        {
+                            "id": document_id,
+                            "title": str(row.get("title") or row.get("source_path") or document_id),
+                            "reason": "insert-failed",
+                            "message": trim_text(str(exc), limit=300) or "向量写入失败。",
+                        }
+                    )
+                    self._save_document_record(row, sync_status="error", last_error=trim_text(str(exc), limit=500))
+                    if job_id:
+                        self._increment_embedding_job(
+                            job_id,
+                            processed_documents=1,
+                            failed_documents=1,
+                            stage="embedding",
+                            current_document_id=document_id,
+                            current_document_title=document_title,
+                        )
+                    continue
+                saved = self._save_document_record(
+                    row,
+                    content_text=body,
+                    document_status="embedded",
+                    sync_status="idle",
+                    last_error=None,
+                    embedded_at=utcnow_iso(),
+                    removed_at=None,
+                    metadata={
+                        **dict(row.get("metadata_json") or {}),
+                        **metadata,
+                        "preview": trim_text(body, limit=200),
+                        **self._embedding_metadata_fields(status="embedded", embedded_chunk_count=chunk_count),
+                    },
+                )
+                items.append(self._document_resource(saved))
+                if job_id:
+                    self._increment_embedding_job(
+                        job_id,
+                        processed_documents=1,
+                        completed_documents=1,
+                        embedded_chunks_completed=chunk_count,
+                        stage="embedding",
+                        current_document_id=document_id,
+                        current_document_title=document_title,
+                    )
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        return {"items": items, "skipped": skipped, "affected_count": len(items) + deleted_count}
+
+    def _delete_document_embeddings(
+        self,
+        *,
+        knowledge_base_id: str,
+        document_ids: list[str],
+        job_id: str | None = None,
+    ) -> dict[str, Any]:
+        items: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        for document_id in list(dict.fromkeys(document_ids)):
+            document = self.store.get_knowledge_document(str(document_id))
+            if document is None:
+                skipped.append({"id": document_id, "reason": "missing", "message": "文件不存在。"})
+                if job_id:
+                    self._increment_embedding_job(job_id, processed_documents=1, failed_documents=1, stage="deleting")
+                continue
+            if str(document.get("knowledge_base_id") or "").strip() != knowledge_base_id:
+                skipped.append({"id": document_id, "reason": "knowledge-base-mismatch", "message": "文件不属于当前知识库。"})
+                if job_id:
+                    self._increment_embedding_job(job_id, processed_documents=1, failed_documents=1, stage="deleting")
+                continue
+            document_title = str(document.get("title") or document.get("source_path") or document_id)
+            try:
+                if job_id:
+                    self._update_embedding_job(
+                        job_id,
+                        status="running",
+                        stage="deleting",
+                        current_document_id=document_id,
+                        current_document_title=document_title,
+                        message=self._embedding_job_status_text(
+                            status="running",
+                            stage="deleting",
+                            total_documents=int((self.store.get_knowledge_embedding_job(job_id) or {}).get("total_documents") or 0),
+                            processed_documents=int((self.store.get_knowledge_embedding_job(job_id) or {}).get("processed_documents") or 0),
+                            current_document_title=document_title,
+                        ),
+                    )
+                self._delete_document_vectors(knowledge_base_id=knowledge_base_id, document_id=str(document.get("id") or ""))
+                saved = self._save_document_record(
+                    document,
+                    document_status="not_embedded",
+                    sync_status="idle",
+                    last_error=None,
+                    embedded_at=None,
+                    metadata={
+                        **dict(document.get("metadata_json") or {}),
+                        **self._embedding_metadata_fields(status="not_embedded", embedded_chunk_count=0),
+                    },
+                )
+                items.append(self._document_resource(saved))
+                if job_id:
+                    self._increment_embedding_job(
+                        job_id,
+                        processed_documents=1,
+                        completed_documents=1,
+                        stage="deleting",
+                        current_document_id=document_id,
+                        current_document_title=document_title,
+                    )
+            except Exception as exc:
+                skipped.append(
+                    {
+                        "id": document_id,
+                        "title": str(document.get("title") or document.get("source_path") or document_id),
+                        "reason": "delete-failed",
+                        "message": trim_text(str(exc), limit=300) or "删除嵌入失败。",
+                    }
+                )
+                if job_id:
+                    self._increment_embedding_job(
+                        job_id,
+                        processed_documents=1,
+                        failed_documents=1,
+                        stage="deleting",
+                        current_document_id=document_id,
+                        current_document_title=document_title,
+                    )
+        return {"items": items, "skipped": skipped}
+
+    def _save_document_record(self, document: dict[str, Any], **overrides: Any) -> dict[str, Any]:
+        metadata = dict(overrides.pop("metadata", document.get("metadata_json") or document.get("metadata") or {}))
+        return self.store.save_knowledge_document(
+            knowledge_document_id=str(overrides.pop("knowledge_document_id", document.get("id")) or "").strip() or None,
+            knowledge_base_id=str(overrides.pop("knowledge_base_id", document.get("knowledge_base_id")) or "").strip(),
+            pool_document_id=str(overrides.pop("pool_document_id", document.get("pool_document_id")) or "").strip() or None,
+            blob_id=str(overrides.pop("blob_id", document.get("blob_id")) or "").strip() or None,
+            alias_id=str(overrides.pop("alias_id", document.get("alias_id")) or "").strip() or None,
+            key=str(overrides.pop("key", document.get("key")) or "").strip() or self._document_key(str(document.get("source_path") or document.get("title") or document.get("id") or "document")),
+            title=str(overrides.pop("title", document.get("title")) or document.get("source_path") or document.get("id") or "文档"),
+            source_path=str(overrides.pop("source_path", document.get("source_path")) or "").strip() or None,
+            content_text=str(overrides.pop("content_text", document.get("content_text")) or ""),
+            document_status=str(overrides.pop("document_status", document.get("document_status")) or "not_embedded"),
+            sync_status=str(overrides.pop("sync_status", document.get("sync_status")) or "idle"),
+            last_error=str(overrides.pop("last_error", document.get("last_error")) or "").strip() or None,
+            embedded_at=str(overrides.pop("embedded_at", document.get("embedded_at")) or "").strip() or None,
+            removed_at=str(overrides.pop("removed_at", document.get("removed_at")) or "").strip() or None,
+            metadata=metadata,
+            status=str(overrides.pop("status", document.get("status")) or "active"),
+        )
+
+    def _llama_document_metadata(
+        self,
+        *,
+        knowledge_base: dict[str, Any],
+        document: dict[str, Any],
+        blob: dict[str, Any] | None,
+        alias: dict[str, Any] | None,
+        chunk_count: int,
+        file_size: int,
+    ) -> dict[str, Any]:
+        metadata = dict(document.get("metadata_json") or {})
+        metadata.update(
+            {
+                "knowledge_base_id": str(knowledge_base.get("id") or ""),
+                "knowledge_base_key": str(knowledge_base.get("key") or knowledge_base.get("id") or ""),
+                "knowledge_base_name": str(knowledge_base.get("name") or knowledge_base.get("id") or ""),
+                "knowledge_document_id": str(document.get("id") or ""),
+                "document_key": str(document.get("key") or ""),
+                "key": str(document.get("key") or ""),
+                "title": str(document.get("title") or document.get("source_path") or document.get("id") or "文档"),
+                "source_path": str(document.get("source_path") or "").strip() or None,
+                "file_size": int(file_size or 0),
+                "chunk_count": int(chunk_count or 0),
+                "blob_id": str((blob or {}).get("id") or document.get("blob_id") or ""),
+                "xxh128": str((blob or {}).get("xxh128") or metadata.get("blob_xxh128") or ""),
+                "filename": str((alias or {}).get("filename") or metadata.get("filename") or ""),
+                "suffix": str((alias or {}).get("suffix") or metadata.get("suffix") or ""),
+            }
+        )
+        return metadata
+
+    def _materialize_document_for_ingest(
+        self,
+        *,
+        tmp_dir: Path,
+        document: dict[str, Any],
+    ) -> tuple[Path, dict[str, Any] | None, dict[str, Any] | None]:
+        blob_id = str(document.get("blob_id") or "").strip()
+        alias_id = str(document.get("alias_id") or "").strip()
+        blob = self.store.get_knowledge_file_blob(blob_id) if blob_id else None
+        alias = self.store.get_knowledge_file_alias(alias_id) if alias_id else None
+        filename = str((alias or {}).get("filename") or document.get("title") or document.get("source_path") or document.get("id") or "document.txt").strip()
+        filename = self._safe_materialized_filename(filename=filename, document_id=str(document.get("id") or ""))
+        target_path = tmp_dir / filename
+        if blob is not None:
+            source_path = self.root_dir / str(blob.get("storage_relpath") or "").strip()
+            if not source_path.exists():
+                raise ValueError("物理文件不存在。")
+            try:
+                os.link(str(source_path), str(target_path))
+            except Exception:
+                shutil.copy2(source_path, target_path)
+            return target_path, blob, alias
+        body = str(document.get("content_text") or "").strip()
+        if not body:
+            raise ValueError("文件缺少可用正文内容。")
+        target_path.write_text(body, encoding="utf-8")
+        return target_path, blob, alias
+
+    def _cleanup_blob_if_orphan(self, blob_id: str) -> None:
+        normalized_blob_id = str(blob_id or "").strip()
+        if not normalized_blob_id:
+            return
+        for record in self.store.list_knowledge_pool_documents():
+            if str(record.get("blob_id") or "").strip() == normalized_blob_id:
+                return
+        for record in self.store.list_knowledge_documents(include_removed=True):
+            if str(record.get("blob_id") or "").strip() == normalized_blob_id:
+                return
+        blob = self.store.get_knowledge_file_blob(normalized_blob_id)
+        if blob is None:
+            return
+        storage_relpath = str(blob.get("storage_relpath") or "").strip()
+        if storage_relpath:
+            target = self.root_dir / storage_relpath
+            try:
+                target.unlink(missing_ok=True)
+            finally:
+                self._prune_empty_dirs(target.parent, stop_at=self._blob_root)
+        self.store.delete_knowledge_file_blob(normalized_blob_id)
+
+    def _extract_text_from_upload(self, *, filename: str, content: bytes) -> tuple[str, dict[str, Any]]:
+        with tempfile.TemporaryDirectory(prefix="kb-upload-", dir=str(self._ingest_tmp_root)) as tempdir:
+            temp_path = Path(tempdir) / filename
+            temp_path.parent.mkdir(parents=True, exist_ok=True)
+            temp_path.write_bytes(content)
+            return self._extract_text(temp_path)
+
+    def _blob_path_for_hash(self, xxh128_value: str) -> Path:
+        digest = str(xxh128_value or "").strip().lower()
+        return self._blob_root / digest[:2] / digest[2:4] / digest
+
+    def _safe_materialized_filename(self, *, filename: str, document_id: str) -> str:
+        base_name = Path(str(filename or "").strip() or "document.txt").name
+        prefix = str(document_id or make_uuid7()).strip() or make_uuid7()
+        return f"{prefix}__{base_name}"
 
     def _normalize_uploaded_files(self, raw_files: Any) -> list[dict[str, Any]]:
         if not isinstance(raw_files, list) or not raw_files:
@@ -1808,14 +2950,75 @@ class KnowledgeBaseService:
         digest = hashlib.sha1(knowledge_base_id.encode("utf-8")).hexdigest()[:16]
         return f"kb_{digest}"
 
+    def _embedding_job_resource(self, record: dict[str, Any]) -> dict[str, Any]:
+        progress_percent = self._embedding_job_progress_percent(record)
+        result = dict(record.get("result_json") or {})
+        return {
+            "id": str(record.get("id") or ""),
+            "knowledge_base_id": str(record.get("knowledge_base_id") or ""),
+            "action": str(record.get("action") or "save"),
+            "status": str(record.get("status") or "pending"),
+            "stage": str(record.get("stage") or "queued"),
+            "total_documents": int(record.get("total_documents") or 0),
+            "processed_documents": int(record.get("processed_documents") or 0),
+            "completed_documents": int(record.get("completed_documents") or 0),
+            "failed_documents": int(record.get("failed_documents") or 0),
+            "total_chunks_estimated": int(record.get("total_chunks_estimated") or 0),
+            "embedded_chunks_completed": int(record.get("embedded_chunks_completed") or 0),
+            "progress_percent": progress_percent,
+            "current_document_id": str(record.get("current_document_id") or "").strip() or None,
+            "current_document_title": str(record.get("current_document_title") or "").strip() or None,
+            "message": str(record.get("message") or "").strip() or None,
+            "error": str(record.get("error_text") or "").strip() or None,
+            "result": result,
+            "created_at": str(record.get("created_at") or "").strip() or None,
+            "started_at": str(record.get("started_at") or "").strip() or None,
+            "finished_at": str(record.get("finished_at") or "").strip() or None,
+            "updated_at": str(record.get("updated_at") or "").strip() or None,
+        }
+
     def _knowledge_base_resource(self, record: dict[str, Any]) -> dict[str, Any]:
         payload = dict(record)
         payload.pop("description", None)
-        if "document_count" not in payload and str(payload.get("id") or "").strip():
-            payload["document_count"] = len(
-                self.store.list_knowledge_documents(knowledge_base_id=str(payload["id"]))
-            )
+        payload["config_json"] = dict(record.get("config_json") or {})
+        knowledge_base_id = str(payload.get("id") or "").strip()
+        document_count = int(payload.get("document_count") or 0) if "document_count" in payload else None
+        vector_count = int(payload.get("vector_count") or 0) if "vector_count" in payload else 0
+        embedding_model_name = str(payload.get("embedding_model_name") or "").strip() or None
+        embedding_model_label = str(payload.get("embedding_model_label") or "").strip() or None
+        if knowledge_base_id:
+            documents = [
+                item
+                for item in self.store.list_knowledge_documents(knowledge_base_id=knowledge_base_id)
+                if str(item.get("status") or "active").strip().lower() == "active"
+            ]
+            if document_count is None:
+                document_count = len(documents)
+            latest_embedding_marker = ""
+            for document in documents:
+                metadata = dict(document.get("metadata_json") or {})
+                embedding_status = self._document_embedding_status(document)
+                if embedding_status != "embedded":
+                    continue
+                embedded_chunk_count = int(metadata.get("embedded_chunk_count") or metadata.get("chunk_count") or 0)
+                if embedded_chunk_count > 0:
+                    vector_count += embedded_chunk_count
+                marker = (
+                    str(document.get("embedded_at") or "").strip()
+                    or str(metadata.get("embedding_updated_at") or "").strip()
+                    or str(document.get("updated_at") or "").strip()
+                )
+                model_name = str(metadata.get("embedding_model_name") or "").strip() or None
+                model_label = str(metadata.get("embedding_model_label") or model_name or "").strip() or None
+                if model_label and marker >= latest_embedding_marker:
+                    latest_embedding_marker = marker
+                    embedding_model_name = model_name
+                    embedding_model_label = model_label
+        payload["document_count"] = int(document_count or 0)
         payload["file_count"] = int(payload.get("document_count") or 0)
+        payload["vector_count"] = int(vector_count or 0)
+        payload["embedding_model_name"] = embedding_model_name
+        payload["embedding_model_label"] = embedding_model_label or embedding_model_name
         return payload
 
     def _document_resource(self, record: dict[str, Any]) -> dict[str, Any]:
@@ -1842,7 +3045,7 @@ class KnowledgeBaseService:
             "embedding_backend": str(metadata.get("embedding_backend") or "").strip() or None,
             "embedding_model_name": str(metadata.get("embedding_model_name") or "").strip() or None,
             "embedding_model_label": str(metadata.get("embedding_model_label") or "").strip() or None,
-            "pool_document_id": str(metadata.get("pool_document_id") or "").strip() or None,
+            "pool_document_id": str(record.get("pool_document_id") or metadata.get("pool_document_id") or "").strip() or None,
             "preview": str(metadata.get("preview") or "").strip() or trim_text(str(record.get("content_text") or ""), limit=180),
             "metadata": metadata,
         }
@@ -1861,7 +3064,7 @@ class KnowledgeBaseService:
             "file_size": int(metadata.get("file_size") or 0),
             "chunk_count": int(metadata.get("chunk_count") or 0),
             "preview": str(metadata.get("preview") or "").strip() or trim_text(str(record.get("content_text") or ""), limit=180),
-            "source_label": "全局文档池",
+            "source_label": "文档池",
             "metadata": metadata,
         }
 
@@ -1948,9 +3151,12 @@ class KnowledgeBaseService:
 
     def _document_embedding_status(self, record: dict[str, Any]) -> str:
         metadata = dict(record.get("metadata_json") or record.get("metadata") or {})
+        document_status = str(record.get("document_status") or "").strip().lower()
+        if document_status in {"embedded", "not_embedded", "removed"}:
+            return document_status
         chunk_count = int(metadata.get("chunk_count") or 0)
         status = str(metadata.get("embedding_status") or "").strip().lower()
-        if status in {"embedded", "not_embedded", "empty"}:
+        if status in {"embedded", "not_embedded", "removed", "empty"}:
             return status
         if chunk_count <= 0:
             return "empty"
@@ -1962,6 +3168,7 @@ class KnowledgeBaseService:
         return {
             "embedded": "已嵌入",
             "not_embedded": "未嵌入",
+            "removed": "已移除",
             "empty": "空文件",
             "unknown": "未记录",
         }.get(normalized, "未记录")
