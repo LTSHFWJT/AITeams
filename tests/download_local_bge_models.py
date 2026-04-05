@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 
 DEFAULT_EMBED_MODEL = "BAAI/bge-m3"
 DEFAULT_RERANK_MODEL = "BAAI/bge-reranker-v2-m3"
+DEFAULT_MULTILINGUAL_EMBED_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+DEFAULT_PROXY_URL = "http://127.0.0.1:10808"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Download local BGE embedding/rerank models into the repo models directory.",
+        description="Download local embedding/rerank models into the repo models directory.",
     )
     parser.add_argument(
         "--models-dir",
@@ -30,6 +33,11 @@ def parse_args() -> argparse.Namespace:
         help="Rerank model repo id to download.",
     )
     parser.add_argument(
+        "--multilingual-embed-model",
+        default=DEFAULT_MULTILINGUAL_EMBED_MODEL,
+        help="Additional multilingual embedding model repo id to download.",
+    )
+    parser.add_argument(
         "--skip-embed",
         action="store_true",
         help="Skip embedding model download.",
@@ -40,15 +48,37 @@ def parse_args() -> argparse.Namespace:
         help="Skip rerank model download.",
     )
     parser.add_argument(
+        "--skip-multilingual-embed",
+        action="store_true",
+        help="Skip multilingual embedding model download.",
+    )
+    parser.add_argument(
         "--token",
         default=None,
         help="Optional Hugging Face token. If omitted, huggingface_hub will use local login/env.",
+    )
+    parser.add_argument(
+        "--proxy",
+        default=os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or DEFAULT_PROXY_URL,
+        help=(
+            "Proxy URL for Hugging Face downloads. Defaults to HTTPS_PROXY/HTTP_PROXY if set, "
+            f"otherwise {DEFAULT_PROXY_URL}."
+        ),
     )
     return parser.parse_args()
 
 
 def safe_dir_name(repo_id: str) -> str:
     return repo_id.strip().replace("\\", "_").replace("/", "__")
+
+
+def apply_proxy(proxy: str | None) -> str:
+    resolved = str(proxy or "").strip()
+    if not resolved:
+        return ""
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        os.environ[key] = resolved
+    return resolved
 
 
 def download_model(repo_id: str, models_dir: Path, *, token: str | None) -> dict[str, str]:
@@ -78,17 +108,27 @@ def main() -> None:
     args = parse_args()
     models_dir = args.models_dir.expanduser().resolve()
     models_dir.mkdir(parents=True, exist_ok=True)
+    proxy = apply_proxy(args.proxy)
 
     plan: list[str] = []
     if not args.skip_embed:
         plan.append(args.embed_model)
+    if not args.skip_multilingual_embed:
+        plan.append(args.multilingual_embed_model)
     if not args.skip_rerank:
         plan.append(args.rerank_model)
     if not plan:
-        raise SystemExit("Nothing to download. Remove `--skip-embed` or `--skip-rerank`.")
+        raise SystemExit(
+            "Nothing to download. Remove one of `--skip-embed`, `--skip-multilingual-embed`, or `--skip-rerank`."
+        )
+
+    ordered_plan = list(dict.fromkeys(plan))
+
+    if proxy:
+        print(f"Using proxy -> {proxy}")
 
     downloaded: list[dict[str, str]] = []
-    for repo_id in plan:
+    for repo_id in ordered_plan:
         result = download_model(repo_id, models_dir, token=args.token)
         downloaded.append(result)
         print(f"Downloaded {repo_id} -> {result['local_dir']}")

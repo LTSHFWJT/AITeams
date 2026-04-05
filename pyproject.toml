@@ -22,7 +22,7 @@ dependencies = [
   "llama-index-postprocessor-flag-embedding-reranker>=0.5,<0.6",
   "llama-index-vector-stores-lancedb>=0.5,<0.6",
   "pandas>=2.2,<3",
-  "pyarrow>=18,<22",
+  "pyarrow>=22",
   "PyYAML>=6",
   "transformers>=4.44.2,<5",
 ]

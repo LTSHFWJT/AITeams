@@ -10,7 +10,9 @@ from typing import Any, Callable
 from deepagents import create_deep_agent
 from langchain_core.messages import AIMessageChunk
 from langchain_core.runnables import RunnableLambda
+from langchain_core.tools import BaseTool
 
+from aiteams.deepagents.middleware import CheckpointMessageSanitizerMiddleware
 from aiteams.utils import make_uuid7, slugify, trim_text
 
 
@@ -39,7 +41,7 @@ class AgentLeafCompiler:
         self,
         *,
         model_factory: Callable[[dict[str, Any]], Any],
-        tools_factory: Callable[..., list[Any]],
+        tools_factory: Callable[..., list[BaseTool]],
         interrupt_factory: Callable[[dict[str, Any]], dict[str, Any] | None],
     ) -> None:
         self._model_factory = model_factory
@@ -69,6 +71,7 @@ class AgentLeafCompiler:
             "model": self._resolve_model(node),
             "tools": list(tools or []) or None,
             "skills": list(skill_sources or []) or None,
+            "middleware": [CheckpointMessageSanitizerMiddleware()],
             "interrupt_on": self._interrupt_factory(dict(node)),
         }
 
@@ -104,7 +107,7 @@ class TeamCompositeCompiler:
         *,
         leaf_compiler: AgentLeafCompiler,
         model_factory: Callable[[dict[str, Any]], Any],
-        tools_factory: Callable[..., list[Any]],
+        tools_factory: Callable[..., list[BaseTool]],
         backend_factory: Callable[..., Any],
         skill_backend_root_factory: Callable[..., Path],
         skill_library_root: Path,
@@ -169,6 +172,7 @@ class TeamCompositeCompiler:
             model=self._resolve_model(lead),
             tools=list(tools or []) or None,
             system_prompt=self._optional_text(lead.get("system_prompt")),
+            middleware=[CheckpointMessageSanitizerMiddleware()],
             subagents=subagents,
             skills=await self._materialize_skill_sources(
                 executor=lead,

@@ -14,9 +14,12 @@ from tempfile import TemporaryDirectory
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+import yaml
+
 from aiteams.agent_center import AgentCenterService
 from aiteams.knowledge import KnowledgeBaseService
-from aiteams.plugins import PluginManager
+from aiteams.plugins import PluginManager, describe_plugin_base_tools
+from aiteams.plugins.manifest import PLUGIN_MANIFEST
 from aiteams.role_specs import normalize_role_spec
 from aiteams.runtime.engine import RuntimeEngine
 from aiteams.skills import SkillLibraryScan, SkillValidationIssue, ValidatedSkill, scan_skill_library
@@ -182,12 +185,21 @@ class WebApplication:
                 return self._json(200, self.container.agent_center.get_retrieval_settings())
             if method == "PUT" and path == "/api/agent-center/retrieval-settings":
                 payload = self._parse_json(body)
+                previous_settings = dict(self.container.agent_center.get_retrieval_settings().get("settings") or {})
                 saved = self.container.agent_center.save_retrieval_settings(payload)
                 try:
                     applied = self.container.runtime.agent_kernel.memory.configure_retrieval(saved.get("runtime"))
                     knowledge_applied = self.container.knowledge_bases.configure_retrieval(saved.get("runtime"))
                 except Exception as exc:
-                    raise AppError(400, f"Retrieval settings saved but could not be applied: {exc}") from exc
+                    rollback_error = ""
+                    try:
+                        restored = self.container.agent_center.save_retrieval_settings(previous_settings)
+                        self.container.runtime.agent_kernel.memory.configure_retrieval(restored.get("runtime"))
+                        self.container.knowledge_bases.configure_retrieval(restored.get("runtime"))
+                    except Exception as rollback_exc:
+                        LOGGER.exception("Retrieval settings rollback failed")
+                        rollback_error = f" 回滚也失败了：{rollback_exc}"
+                    raise AppError(400, f"Retrieval settings could not be applied and were rolled back: {exc}{rollback_error}") from exc
                 return self._json(
                     200,
                     {
@@ -253,6 +265,12 @@ class WebApplication:
                 payload = self._parse_json(body)
                 self._require_fields(payload, "path")
                 return self._json(200, self.container.plugins.validate_package(str(payload["path"])))
+            if method == "POST" and path == "/api/agent-center/plugins/scan-upload":
+                payload = self._parse_json(body)
+                return self._json(200, self._scan_uploaded_plugin_library(payload))
+            if method == "POST" and path == "/api/agent-center/plugins/import-upload":
+                payload = self._parse_json(body)
+                return self._json(200, self._import_uploaded_plugin_library(payload))
             if method == "POST" and path == "/api/agent-center/plugins":
                 payload = self._parse_json(body)
                 plugin = self._save_plugin(payload, plugin_id=self._optional_str(payload.get("id")))
@@ -279,6 +297,12 @@ class WebApplication:
                     context=dict(payload.get("context") or {}),
                 )
                 return self._json(200, {"plugin_id": plugin_id, "result": response})
+            if path.startswith("/api/agent-center/plugins/") and path.endswith("/base-tools") and method == "GET":
+                plugin_id = path.split("/")[4]
+                plugin = self.container.store.get_plugin(plugin_id)
+                if plugin is None:
+                    raise AppError(404, "Plugin does not exist.")
+                return self._json(200, self._plugin_base_tools_resource(plugin))
             if path.startswith("/api/agent-center/plugins/"):
                 plugin_id = path.rsplit("/", 1)[-1]
                 plugin = self.container.store.get_plugin(plugin_id)
@@ -292,6 +316,9 @@ class WebApplication:
                     payload = self._parse_json(body)
                     updated = self._save_plugin(payload, plugin_id=plugin_id)
                     return self._json(200, updated)
+                if method == "DELETE":
+                    deleted = self.container.plugins.delete_plugin(plugin_id)
+                    return self._json(200, deleted)
             if method == "GET" and path == "/api/agent-center/skill-groups":
                 limit = self._optional_int(query.get("limit"))
                 offset = self._optional_int(query.get("offset")) or 0
@@ -1347,52 +1374,55 @@ class WebApplication:
                 shutil.rmtree(target_dir, ignore_errors=True)
         return deleted
 
-    def _save_plugin(self, payload: dict[str, Any], *, plugin_id: str | None) -> dict[str, Any]:
-        self._require_fields(payload, "key", "name")
-        existing = self.container.store.get_plugin(plugin_id, include_secret=True) if plugin_id else None
-        install_path = self._optional_str(payload.get("install_path"))
-        incoming_manifest = dict(payload.get("manifest") or {})
-        manifest = dict((existing or {}).get("manifest_json") or {})
-        manifest.update(incoming_manifest)
-        if install_path:
-            try:
-                package = self.container.plugins.validate_package(install_path)
-                package_manifest = dict(package.get("manifest") or {})
-                manifest = dict(package_manifest)
-                for field in ("workbench_key", "tools", "permissions", "description"):
-                    if field in incoming_manifest:
-                        manifest[field] = incoming_manifest[field]
-            except Exception:
-                pass
-        config = payload.get("config")
-        if config is None:
-            config = dict((existing or {}).get("config_json") or {})
-        else:
-            config = dict(config or {})
+    def _update_plugin_package_metadata(self, install_path: str | None, *, name: str, description: str) -> None:
+        raw_path = str(install_path or "").strip()
+        if not raw_path or "://" in raw_path:
+            return
+        root = Path(raw_path).expanduser().resolve()
+        manifest_path = root / PLUGIN_MANIFEST
+        if not manifest_path.exists():
+            return
+        try:
+            payload = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+        except Exception as exc:
+            raise AppError(400, f"Failed to read plugin manifest: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise AppError(400, "Plugin manifest must be an object.")
+        payload["name"] = name
+        payload["description"] = description
+        try:
+            manifest_path.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        except OSError as exc:
+            raise AppError(500, f"Failed to update plugin manifest: {exc}") from exc
 
-        secret_payload = payload.get("secret")
-        secret: dict[str, Any] | None = None
-        if secret_payload is not None:
-            secret = dict((existing or {}).get("secret_json") or {})
-            for field, value in dict(secret_payload or {}).items():
-                field_name = str(field).strip()
-                if not field_name:
-                    continue
-                if value in (None, ""):
-                    continue
-                secret[field_name] = value
+    def _save_plugin(self, payload: dict[str, Any], *, plugin_id: str | None) -> dict[str, Any]:
+        existing = self.container.store.get_plugin(plugin_id, include_secret=True) if plugin_id else None
+        install_path = self._optional_str(payload.get("install_path")) or self._optional_str((existing or {}).get("install_path"))
+        package_manifest = dict((existing or {}).get("manifest_json") or {})
+        if install_path:
+            package = self.container.plugins.validate_package(install_path)
+            package_manifest = dict(package.get("manifest") or {})
+        name_source = payload["name"] if "name" in payload else package_manifest.get("name") or (existing or {}).get("name") or ""
+        name = trim_text(name_source, limit=255)
+        if not name:
+            raise AppError(400, "Field 'name' is required.")
+        description = str(payload["description"]) if "description" in payload else str(package_manifest.get("description") or (existing or {}).get("description") or "")
+        if install_path:
+            self._update_plugin_package_metadata(install_path, name=name, description=description)
+            package = self.container.plugins.validate_package(install_path)
+            package_manifest = dict(package.get("manifest") or {})
 
         saved = self.container.store.save_plugin(
             plugin_id=plugin_id,
-            key=str(payload["key"]),
-            name=str(payload["name"]),
-            version=str(payload.get("version") or "v1"),
-            plugin_type=str(payload.get("plugin_type") or "toolset"),
-            description=str(payload.get("description") or ""),
-            manifest=manifest,
-            config=config,
+            key=str(payload.get("key") or package_manifest.get("key") or (existing or {}).get("key") or ""),
+            name=name,
+            version=str(payload.get("version") or package_manifest.get("version") or (existing or {}).get("version") or "v1"),
+            plugin_type=str(payload.get("plugin_type") or package_manifest.get("plugin_type") or (existing or {}).get("plugin_type") or "toolset"),
+            description=description,
+            manifest=package_manifest,
+            config={},
             install_path=install_path,
-            secret=secret,
+            secret=None,
         )
         if saved.get("id") and self.container.plugins.snapshot(str(saved["id"])).get("running"):
             self.container.plugins.reload_plugin(str(saved["id"]))
@@ -1400,6 +1430,318 @@ class WebApplication:
             if refreshed is not None:
                 saved = refreshed
         return saved
+
+    def _plugin_scan_issue_resource(self, *, message: str, path: str = "", code: str = "plugin-scan", severity: str = "error") -> dict[str, Any]:
+        return {
+            "severity": severity,
+            "code": code,
+            "message": message,
+            "path": path,
+        }
+
+    def _plugin_install_root(self) -> Path:
+        root = Path(self.container.plugins.install_root).expanduser().resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
+    def _plugin_install_target(self, manifest: dict[str, Any]) -> Path:
+        key = trim_text(manifest.get("key") or "", limit=255)
+        version = trim_text(manifest.get("version") or "v1", limit=255)
+        if not key:
+            raise AppError(400, "Validated plugin is missing `key`.")
+        if not version:
+            raise AppError(400, "Validated plugin is missing `version`.")
+        if PurePosixPath(key).name != key or any(part in {"", ".", ".."} for part in PurePosixPath(key).parts):
+            raise AppError(400, f"Invalid plugin key for managed install path: {key}")
+        if PurePosixPath(version).name != version or any(part in {"", ".", ".."} for part in PurePosixPath(version).parts):
+            raise AppError(400, f"Invalid plugin version for managed install path: {version}")
+        return self._plugin_install_root() / key / version
+
+    def _path_is_relative_to(self, path: Path, parent: Path) -> bool:
+        try:
+            path.relative_to(parent)
+            return True
+        except ValueError:
+            return False
+
+    def _find_plugin_package_roots(self, source_path: str | Path) -> list[Path]:
+        root = Path(source_path).expanduser().resolve()
+        manifest_paths = sorted(
+            (item for item in root.rglob(PLUGIN_MANIFEST) if item.is_file()),
+            key=lambda item: (len(item.relative_to(root).parts), item.relative_to(root).as_posix().lower()),
+        )
+        package_roots: list[Path] = []
+        for manifest_path in manifest_paths:
+            candidate = manifest_path.parent.resolve()
+            if any(self._path_is_relative_to(candidate, existing) for existing in package_roots):
+                continue
+            package_roots = [existing for existing in package_roots if not self._path_is_relative_to(existing, candidate)]
+            package_roots.append(candidate)
+        return package_roots
+
+    def _plugin_source_kind(self, source_root: Path, plugin_roots: list[Path]) -> str:
+        if not plugin_roots:
+            return "empty"
+        if len(plugin_roots) != 1:
+            return "collection"
+        candidate = plugin_roots[0]
+        try:
+            relative_parts = candidate.relative_to(source_root).parts
+        except ValueError:
+            return "collection"
+        return "single" if len(relative_parts) <= 1 else "collection"
+
+    def _find_plugin_import_target(self, manifest: dict[str, Any]) -> dict[str, Any] | None:
+        key = str(manifest.get("key") or "").strip()
+        version = str(manifest.get("version") or "v1").strip()
+        if not key:
+            return None
+        for item in self.container.store.list_plugins(include_secret=True):
+            if str(item.get("key") or "").strip() == key and str(item.get("version") or "v1").strip() == version:
+                return item
+        return None
+
+    def _plugin_record_resource(self, record: dict[str, Any]) -> dict[str, Any]:
+        plugin = dict(record)
+        plugin_id = str(plugin.get("id") or "").strip()
+        if plugin_id:
+            plugin["runtime"] = self.container.plugins.snapshot(plugin_id)
+        return plugin
+
+    def _plugin_base_tools_resource(self, record: dict[str, Any]) -> dict[str, Any]:
+        plugin = dict(record or {})
+        plugin_id = str(plugin.get("id") or "").strip()
+        install_path = self._optional_str(plugin.get("install_path"))
+        manifest = dict(plugin.get("manifest_json") or plugin.get("manifest") or {})
+        if install_path:
+            try:
+                manifest = dict(self.container.plugins.validate_package(install_path).get("manifest") or {})
+            except Exception:
+                manifest = dict(plugin.get("manifest_json") or plugin.get("manifest") or {})
+        plugin_key = str(plugin.get("key") or manifest.get("key") or "").strip()
+        if not plugin_key:
+            raise AppError(400, "Plugin manifest is missing key.")
+        base_tools = describe_plugin_base_tools(plugin_key=plugin_key, manifest=manifest)
+        return {
+            "plugin_id": plugin_id,
+            "plugin_name": str(plugin.get("name") or manifest.get("name") or plugin_key),
+            "plugin_key": plugin_key,
+            "tool_count": len(base_tools),
+            "base_tools": base_tools,
+            "message": f"Plugin exposes {len(base_tools)} BaseTool(s).",
+        }
+
+    def _validated_plugin_scan_resource(self, root_path: Path, *, manifest: dict[str, Any] | None = None, issues: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        existing = self._find_plugin_import_target(manifest or {}) if manifest else None
+        return {
+            "directory_path": str(root_path),
+            "manifest_path": str(root_path / PLUGIN_MANIFEST),
+            "is_valid": manifest is not None and not issues,
+            "manifest": dict(manifest or {}) if manifest is not None else None,
+            "existing_plugin_id": str((existing or {}).get("id") or ""),
+            "existing_plugin_name": str((existing or {}).get("name") or ""),
+            "issues": list(issues or []),
+        }
+
+    def _plugin_scan_payload(self, source_path: str | Path) -> dict[str, Any]:
+        root = Path(source_path).expanduser().resolve()
+        plugin_roots = self._find_plugin_package_roots(root)
+        plugins: list[dict[str, Any]] = []
+        global_issues: list[dict[str, Any]] = []
+        for candidate in plugin_roots:
+            try:
+                package = self.container.plugins.validate_package(str(candidate))
+                manifest = dict(package.get("manifest") or {})
+                plugins.append(self._validated_plugin_scan_resource(candidate, manifest=manifest))
+            except Exception as exc:
+                plugins.append(
+                    self._validated_plugin_scan_resource(
+                        candidate,
+                        issues=[self._plugin_scan_issue_resource(message=str(exc), path=str(candidate), code="plugin-invalid")],
+                    )
+                )
+        if not plugin_roots:
+            global_issues.append(
+                self._plugin_scan_issue_resource(
+                    message=f"No plugin package with `{PLUGIN_MANIFEST}` was detected.",
+                    path=str(root),
+                    code="plugin-not-found",
+                )
+            )
+        valid_plugin_count = sum(1 for item in plugins if item.get("is_valid"))
+        payload = {
+            "source_path": str(root),
+            "source_kind": self._plugin_source_kind(root, plugin_roots),
+            "valid": bool(plugin_roots) and not global_issues and valid_plugin_count == len(plugins),
+            "plugin_count": len(plugins),
+            "valid_plugin_count": valid_plugin_count,
+            "issues": global_issues,
+            "plugins": plugins,
+        }
+        payload["message"] = f"Scanned {payload['plugin_count']} plugin(s)."
+        return payload
+
+    def _write_uploaded_plugin_library(self, payload: dict[str, Any], root_path: Path) -> dict[str, Any]:
+        raw_files = payload.get("files")
+        if not isinstance(raw_files, list) or not raw_files:
+            raise AppError(400, "Field 'files' must be a non-empty array.")
+        total_bytes = 0
+        written = 0
+        for index, item in enumerate(raw_files, start=1):
+            if not isinstance(item, dict):
+                raise AppError(400, f"File #{index} must be an object.")
+            raw_path = str(item.get("path") or "").replace("\\", "/").strip()
+            if not raw_path:
+                raise AppError(400, f"File #{index} is missing 'path'.")
+            relative_path = PurePosixPath(raw_path)
+            if relative_path.is_absolute() or not relative_path.parts or any(part in {"", ".", ".."} for part in relative_path.parts):
+                raise AppError(400, f"File #{index} has an invalid relative path.")
+            encoded = item.get("content_base64")
+            if not isinstance(encoded, str):
+                raise AppError(400, f"File #{index} is missing 'content_base64'.")
+            try:
+                content = base64.b64decode(encoded, validate=True)
+            except Exception as exc:
+                raise AppError(400, f"File #{index} has invalid base64 content.") from exc
+            total_bytes += len(content)
+            if total_bytes > 50 * 1024 * 1024:
+                raise AppError(400, "Uploaded plugin library exceeds 50 MB.")
+            target = root_path.joinpath(*relative_path.parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+            written += 1
+        return {
+            "file_count": written,
+            "total_bytes": total_bytes,
+            "source_name": self._optional_str(payload.get("source_name")) or root_path.name,
+        }
+
+    def _scan_uploaded_plugin_library(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with TemporaryDirectory(prefix="aiteams-plugin-upload-") as temp_dir:
+            upload_info = self._write_uploaded_plugin_library(payload, Path(temp_dir))
+            scanned = self._plugin_scan_payload(temp_dir)
+            scanned["uploaded_file_count"] = upload_info["file_count"]
+            scanned["uploaded_total_bytes"] = upload_info["total_bytes"]
+            scanned["source_name"] = upload_info["source_name"]
+            return scanned
+
+    def _sync_validated_plugin_to_managed_install_root(
+        self,
+        plugin_scan: dict[str, Any],
+        *,
+        existing: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        manifest = dict(plugin_scan.get("manifest") or {})
+        source_dir = Path(str(plugin_scan.get("directory_path") or "")).expanduser().resolve()
+        target_dir = self._plugin_install_target(manifest)
+        previous_install_path = self._optional_str((existing or {}).get("install_path"))
+        previous_target = Path(previous_install_path).expanduser().resolve() if previous_install_path else None
+
+        if source_dir != target_dir:
+            if target_dir.exists():
+                shutil.rmtree(target_dir, ignore_errors=True)
+            target_dir.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.copytree(source_dir, target_dir)
+            except OSError as exc:
+                raise AppError(500, f"Failed to sync plugin package to managed install root: {exc}") from exc
+        elif not target_dir.exists():
+            raise AppError(500, f"Managed plugin path does not exist: {target_dir}")
+
+        if previous_target is not None and previous_target != target_dir and self._path_is_relative_to(previous_target, self._plugin_install_root()):
+            if previous_target.exists():
+                shutil.rmtree(previous_target, ignore_errors=True)
+
+        installed = self.container.plugins.validate_package(str(target_dir))
+        return {
+            "manifest": dict(installed.get("manifest") or {}),
+            "install_path": str(target_dir),
+        }
+
+    def _import_validated_plugin(self, plugin_scan: dict[str, Any]) -> dict[str, Any]:
+        manifest = dict(plugin_scan.get("manifest") or {})
+        if not manifest:
+            raise AppError(400, f"Plugin metadata is missing for '{plugin_scan.get('directory_path')}'.")
+        existing = self._find_plugin_import_target(manifest)
+        sync_result = self._sync_validated_plugin_to_managed_install_root(plugin_scan, existing=existing)
+        saved = self._save_plugin(
+            {
+                "key": manifest["key"],
+                "name": manifest["name"],
+                "version": manifest.get("version") or "v1",
+                "plugin_type": manifest.get("plugin_type") or "toolset",
+                "description": manifest.get("description") or "",
+                "install_path": sync_result["install_path"],
+                "manifest": sync_result["manifest"],
+            },
+            plugin_id=str((existing or {}).get("id") or "").strip() or None,
+        )
+        installed = self.container.plugins.install_plugin(str(saved["id"]))
+        plugin_record = installed.get("plugin") if isinstance(installed, dict) else None
+        if not isinstance(plugin_record, dict):
+            plugin_record = self.container.store.get_plugin(str(saved["id"])) or saved
+        return {
+            "created": existing is None,
+            "updated": existing is not None,
+            "directory_path": str(plugin_scan.get("directory_path") or ""),
+            "installed_path": str(sync_result["install_path"]),
+            "plugin": self._plugin_record_resource(plugin_record),
+        }
+
+    def _import_uploaded_plugin_library(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with TemporaryDirectory(prefix="aiteams-plugin-upload-") as temp_dir:
+            upload_info = self._write_uploaded_plugin_library(payload, Path(temp_dir))
+            scan = self._plugin_scan_payload(temp_dir)
+            imported: list[dict[str, Any]] = []
+            skipped: list[dict[str, Any]] = []
+            seen_tokens: set[str] = set()
+            for plugin_scan in scan["plugins"]:
+                manifest = dict(plugin_scan.get("manifest") or {})
+                if not plugin_scan.get("is_valid") or not manifest:
+                    skipped.append(
+                        {
+                            "directory_path": str(plugin_scan.get("directory_path") or ""),
+                            "reason": "invalid-plugin",
+                            "issues": list(plugin_scan.get("issues") or []),
+                        }
+                    )
+                    continue
+                token = f"{manifest.get('key') or ''}:{manifest.get('version') or 'v1'}"
+                if token in seen_tokens:
+                    skipped.append(
+                        {
+                            "directory_path": str(plugin_scan.get("directory_path") or ""),
+                            "reason": "duplicate-plugin-version",
+                            "name": str(manifest.get("name") or manifest.get("key") or "").strip(),
+                            "issues": [
+                                self._plugin_scan_issue_resource(
+                                    message="Duplicate plugin key/version in uploaded package set.",
+                                    path=str(plugin_scan.get("directory_path") or ""),
+                                    code="plugin-duplicate",
+                                    severity="warn",
+                                )
+                            ],
+                        }
+                    )
+                    continue
+                seen_tokens.add(token)
+                imported.append(self._import_validated_plugin(plugin_scan))
+
+            result = {
+                "message": f"Imported {len(imported)} plugin(s) from '{scan['source_path']}'.",
+                "source_path": scan["source_path"],
+                "source_kind": scan["source_kind"],
+                "valid": scan["valid"],
+                "imported_count": len(imported),
+                "skipped_count": len(skipped),
+                "imported": imported,
+                "skipped": skipped,
+                "scan": scan,
+            }
+            result["uploaded_file_count"] = upload_info["file_count"]
+            result["uploaded_total_bytes"] = upload_info["total_bytes"]
+            result["source_name"] = upload_info["source_name"]
+            return result
 
     def _normalize_skill_spec(self, spec: dict[str, Any]) -> dict[str, Any]:
         normalized = dict(spec or {})

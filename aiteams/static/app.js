@@ -134,6 +134,15 @@ const state = {
     limit: 10,
     offset: 0,
   },
+  pluginImportFiles: [],
+  pluginImportDragActive: false,
+  pluginImportBusy: false,
+  pluginImportMode: "import",
+  pluginImportTargetId: null,
+  pluginImportTargetKey: "",
+  pluginImportTargetVersion: "",
+  pluginImportTargetName: "",
+  pluginImportScanResult: null,
   skills: [],
   skillGroups: [],
   skillGroupCatalog: [],
@@ -276,6 +285,7 @@ const state = {
     schema: null,
     config: {},
     secretFieldPaths: [],
+    record: null,
   },
   loaded: {
     controlPlane: false,
@@ -317,7 +327,7 @@ const state = {
   },
 };
 
-const DEFAULT_LOCAL_EMBEDDING_MODEL = "BAAI/bge-m3";
+const DEFAULT_LOCAL_EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2";
 const DEFAULT_LOCAL_RERANK_MODEL = "BAAI/bge-reranker-v2-m3";
 
 const PAGE_SECTIONS = {
@@ -456,14 +466,7 @@ const providerModelSave = document.querySelector("#provider-model-save");
 const providerModelTestResult = document.querySelector("#provider-model-test-result");
 
 const pluginForm = document.querySelector("#plugin-form");
-const pluginKey = document.querySelector("#plugin-key");
 const pluginName = document.querySelector("#plugin-name");
-const pluginVersion = document.querySelector("#plugin-version");
-const pluginType = document.querySelector("#plugin-type");
-const pluginWorkbenchKey = document.querySelector("#plugin-workbench-key");
-const pluginInstallPath = document.querySelector("#plugin-install-path");
-const pluginTools = document.querySelector("#plugin-tools");
-const pluginPermissions = document.querySelector("#plugin-permissions");
 const pluginDescription = document.querySelector("#plugin-description");
 const pluginOpenCreate = document.querySelector("#plugin-open-create");
 const pluginPageSize = document.querySelector("#plugin-page-size");
@@ -479,6 +482,20 @@ const pluginConfigHint = document.querySelector("#plugin-config-hint");
 const pluginConfigSchemaEmpty = document.querySelector("#plugin-config-schema-empty");
 const pluginConfigForm = document.querySelector("#plugin-config-form");
 const pluginModalResult = document.querySelector("#plugin-modal-result");
+const pluginImportModal = document.querySelector("#plugin-import-modal");
+const pluginImportModalTitle = document.querySelector("#plugin-import-modal-title");
+const pluginImportModalCloseButtons = Array.from(document.querySelectorAll("[data-plugin-import-modal-close]"));
+const pluginImportForm = document.querySelector("#plugin-import-form");
+const pluginImportDirectoryInput = document.querySelector("#plugin-import-directory-input");
+const pluginImportDropzone = document.querySelector("#plugin-import-dropzone");
+const pluginImportDropzoneTitle = document.querySelector("#plugin-import-dropzone-title");
+const pluginImportDropzoneHint = document.querySelector("#plugin-import-dropzone-hint");
+const pluginImportDropzoneTrigger = document.querySelector("#plugin-import-dropzone-trigger");
+const pluginImportSelection = document.querySelector("#plugin-import-selection");
+const pluginImportResult = document.querySelector("#plugin-import-result");
+const pluginImportCancel = document.querySelector("#plugin-import-cancel");
+const pluginImportValidate = document.querySelector("#plugin-import-validate");
+const pluginImportSave = document.querySelector("#plugin-import-save");
 
 const skillForm = document.querySelector("#skill-form");
 const skillViewSkills = document.querySelector("#skill-view-skills");
@@ -1386,6 +1403,281 @@ function renderSkillModalResult(value) {
   `;
 }
 
+function renderPluginModalResultPluginCard(item) {
+  const manifest = isRecord(item?.manifest) ? item.manifest : {};
+  const existingPluginName = String(item?.existing_plugin_name || "").trim();
+  const existingPluginId = String(item?.existing_plugin_id || "").trim();
+  const name = String(manifest.name || "").trim() || fileNameFromPath(item?.directory_path || item?.manifest_path || "") || "Plugin";
+  const description = String(manifest.description || "").trim();
+  const isValid = Boolean(item?.is_valid);
+  const badgeTone = !isValid ? "error" : existingPluginId ? "warn" : "ok";
+  const badgeLabel = !isValid ? "未通过" : existingPluginId ? "可覆盖" : "通过";
+  const metaItems = [
+    item?.directory_path ? `目录 ${item.directory_path}` : "",
+    item?.manifest_path ? `plugin.yaml ${fileNameFromPath(item.manifest_path)}` : "",
+    manifest.key ? `key ${manifest.key}` : "",
+    Array.isArray(manifest?.actions) ? `动作 ${manifest.actions.length}` : "",
+    Array.isArray(manifest?.tools) ? `工具 ${manifest.tools.length}` : "",
+    manifest.hot_reload === false ? "不支持热加载" : manifest.key ? "支持热加载" : "",
+    existingPluginId ? `已存在 ${existingPluginName || existingPluginId}` : "",
+  ];
+  return `
+    <article class="skill-modal-result-card">
+      <div class="skill-modal-result-card-head">
+        <div>
+          <strong>${escapeHtml(name)}</strong>
+          ${item?.directory_path ? `<span class="skill-modal-result-card-path">${escapeHtml(item.directory_path)}</span>` : ""}
+        </div>
+        ${skillModalResultBadge(badgeLabel, badgeTone)}
+      </div>
+      ${description ? `<p class="skill-modal-result-card-description">${escapeHtml(description)}</p>` : ""}
+      ${skillModalResultMetaMarkup(metaItems)}
+      ${skillModalResultIssuesMarkup(item?.issues)}
+    </article>
+  `;
+}
+
+function renderPluginModalImportedCard(item) {
+  const plugin = isRecord(item?.plugin) ? item.plugin : {};
+  const manifest = isRecord(plugin?.manifest_json) ? plugin.manifest_json : {};
+  const name = String(plugin.name || manifest.name || "").trim() || fileNameFromPath(item?.installed_path || item?.directory_path || "") || "Plugin";
+  const description = String(plugin.description || manifest.description || "").trim();
+  const badgeLabel = item?.updated ? "已覆盖" : "已导入";
+  const badgeTone = item?.updated ? "warn" : "ok";
+  const metaItems = [
+    item?.installed_path ? `安装 ${item.installed_path}` : "",
+    plugin?.key ? `key ${plugin.key}` : "",
+    manifest.hot_reload === false ? "不支持热加载" : manifest.key ? "支持热加载" : "",
+  ];
+  return `
+    <article class="skill-modal-result-card">
+      <div class="skill-modal-result-card-head">
+        <div>
+          <strong>${escapeHtml(name)}</strong>
+          ${item?.installed_path ? `<span class="skill-modal-result-card-path">${escapeHtml(item.installed_path)}</span>` : ""}
+        </div>
+        ${skillModalResultBadge(badgeLabel, badgeTone)}
+      </div>
+      ${description ? `<p class="skill-modal-result-card-description">${escapeHtml(description)}</p>` : ""}
+      ${skillModalResultMetaMarkup(metaItems)}
+    </article>
+  `;
+}
+
+function renderPluginModalSkippedCard(item) {
+  const reason = String(item?.reason || "").trim();
+  const reasonLabelMap = {
+    "invalid-plugin": "校验未通过",
+    "duplicate-plugin-version": "同一批次存在重复插件",
+  };
+  const title = String(item?.name || "").trim() || fileNameFromPath(item?.directory_path || "") || "已跳过";
+  const description = reasonLabelMap[reason] || reason || "已跳过";
+  return `
+    <article class="skill-modal-result-card">
+      <div class="skill-modal-result-card-head">
+        <div>
+          <strong>${escapeHtml(title)}</strong>
+          ${item?.directory_path ? `<span class="skill-modal-result-card-path">${escapeHtml(item.directory_path)}</span>` : ""}
+        </div>
+        ${skillModalResultBadge("跳过", "warn")}
+      </div>
+      <p class="skill-modal-result-card-description">${escapeHtml(description)}</p>
+      ${skillModalResultIssuesMarkup(item?.issues)}
+    </article>
+  `;
+}
+
+function renderPluginBaseToolCard(item) {
+  const toolName = String(item?.tool_name || "").trim() || "tool";
+  const actionName = String(item?.action_name || "").trim();
+  const description = String(item?.description || "").trim();
+  const mode = String(item?.mode || "").trim() || "legacy";
+  const argsSchema = isRecord(item?.args_schema) ? item.args_schema : null;
+  const metaItems = [actionName ? `action ${actionName}` : "", mode ? `mode ${mode}` : ""];
+  return `
+    <article class="skill-modal-result-card">
+      <div class="skill-modal-result-card-head">
+        <div>
+          <strong>${escapeHtml(toolName)}</strong>
+        </div>
+        ${skillModalResultBadge(mode === "structured" ? "Structured" : "Legacy", mode === "structured" ? "ok" : "warn")}
+      </div>
+      ${description ? `<p class="skill-modal-result-card-description">${escapeHtml(description)}</p>` : ""}
+      ${skillModalResultMetaMarkup(metaItems)}
+      ${argsSchema ? `<pre class="skill-modal-result-json">${escapeHtml(prettyJson(argsSchema))}</pre>` : ""}
+    </article>
+  `;
+}
+
+function renderPluginModalResult(value) {
+  if (typeof value === "string") {
+    return `
+      <div class="skill-modal-result-shell">
+        <div class="skill-modal-result-banner ok">
+          <strong>${escapeHtml(value)}</strong>
+        </div>
+      </div>
+    `;
+  }
+  if (!isRecord(value)) {
+    return `
+      <div class="skill-modal-result-shell">
+        <pre class="skill-modal-result-json">${escapeHtml(prettyJson(value))}</pre>
+      </div>
+    `;
+  }
+
+  const payload = value;
+  if (Array.isArray(payload.base_tools)) {
+    const baseTools = payload.base_tools;
+    const tone = typeof payload.error === "string" && payload.error.trim() ? "error" : baseTools.length ? "ok" : "warn";
+    const pluginName = String(payload.plugin_name || payload.plugin_key || "Plugin").trim() || "Plugin";
+    const message =
+      String(payload.error || "").trim() ||
+      String(payload.detail || "").trim() ||
+      String(payload.message || "").trim() ||
+      `${pluginName} exposes ${baseTools.length} BaseTool(s).`;
+    const bannerMeta = [payload.plugin_key ? `key ${payload.plugin_key}` : "", payload.plugin_id ? `id ${payload.plugin_id}` : ""]
+      .filter(Boolean)
+      .join(" 路 ");
+    const stats = [
+      { label: "BaseTool", value: payload.tool_count != null ? payload.tool_count : baseTools.length },
+      { label: "Structured", value: baseTools.filter((item) => item?.mode === "structured").length },
+    ]
+      .map(
+        (item) => `
+          <div class="skill-modal-result-stat">
+            <span>${escapeHtml(item.label)}</span>
+            <strong>${escapeHtml(String(item.value))}</strong>
+          </div>
+        `,
+      )
+      .join("");
+    const sections = skillModalResultSectionMarkup(
+      "BaseTool Preview",
+      baseTools.length
+        ? `<div class="skill-modal-result-card-list">${baseTools.map((item) => renderPluginBaseToolCard(item)).join("")}</div>`
+        : '<div class="detail empty compact-detail">This plugin does not expose any BaseTool.</div>',
+      skillModalResultBadge(String(baseTools.length), tone === "error" ? "error" : baseTools.length ? "ok" : "warn"),
+    );
+    return `
+      <div class="skill-modal-result-shell">
+        <div class="skill-modal-result-banner ${escapeHtml(tone)}">
+          <div class="skill-modal-result-banner-main">
+            <strong>${escapeHtml(message)}</strong>
+            ${skillModalResultBadge(tone === "error" ? "Failed" : baseTools.length ? "Ready" : "Empty", tone)}
+          </div>
+          ${bannerMeta ? `<span>${escapeHtml(bannerMeta)}</span>` : ""}
+        </div>
+        <div class="skill-modal-result-stats">${stats}</div>
+        ${sections}
+      </div>
+    `;
+  }
+  const scan = isRecord(payload.scan) ? payload.scan : payload;
+  const tone =
+    typeof payload.error === "string" && payload.error.trim()
+      ? "error"
+      : scan.valid === false || (Array.isArray(scan.plugins) && scan.plugins.some((item) => item?.is_valid === false))
+        ? "warn"
+        : "ok";
+  const message =
+    String(payload.error || "").trim() ||
+    String(payload.detail || "").trim() ||
+    String(payload.message || "").trim() ||
+    (tone === "error" ? "操作失败" : "操作完成");
+  const bannerMeta = [
+    payload?.source_name ? `来源 ${payload.source_name}` : "",
+    scan?.source_kind ? `模式 ${scan.source_kind}` : "",
+    payload?.uploaded_file_count ? `上传文件 ${payload.uploaded_file_count}` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const stats = [
+    payload?.imported_count != null ? { label: "导入", value: payload.imported_count } : null,
+    payload?.skipped_count != null ? { label: "跳过", value: payload.skipped_count } : null,
+    scan?.plugin_count != null ? { label: "识别插件", value: scan.plugin_count } : null,
+    scan?.valid_plugin_count != null ? { label: "通过校验", value: scan.valid_plugin_count } : null,
+    Array.isArray(scan?.issues) && scan.issues.length ? { label: "全局问题", value: scan.issues.length } : null,
+  ]
+    .filter(Boolean)
+    .map(
+      (item) => `
+        <div class="skill-modal-result-stat">
+          <span>${escapeHtml(item.label)}</span>
+          <strong>${escapeHtml(String(item.value))}</strong>
+        </div>
+      `,
+    )
+    .join("");
+
+  const sections = [
+    skillModalResultSectionMarkup(
+      "全局问题",
+      skillModalResultIssuesMarkup(scan?.issues),
+      Array.isArray(scan?.issues) && scan.issues.length ? skillModalResultBadge(String(scan.issues.length), tone === "error" ? "error" : "warn") : "",
+    ),
+    skillModalResultSectionMarkup(
+      "校验结果",
+      Array.isArray(scan?.plugins) && scan.plugins.length
+        ? `<div class="skill-modal-result-card-list">${scan.plugins.map((item) => renderPluginModalResultPluginCard(item)).join("")}</div>`
+        : "",
+      Array.isArray(scan?.plugins) && scan.plugins.length ? skillModalResultBadge(String(scan.plugins.length), "ok") : "",
+    ),
+    skillModalResultSectionMarkup(
+      "已导入",
+      Array.isArray(payload?.imported) && payload.imported.length
+        ? `<div class="skill-modal-result-card-list">${payload.imported.map((item) => renderPluginModalImportedCard(item)).join("")}</div>`
+        : "",
+      Array.isArray(payload?.imported) && payload.imported.length ? skillModalResultBadge(String(payload.imported.length), "ok") : "",
+    ),
+    skillModalResultSectionMarkup(
+      "已跳过",
+      Array.isArray(payload?.skipped) && payload.skipped.length
+        ? `<div class="skill-modal-result-card-list">${payload.skipped.map((item) => renderPluginModalSkippedCard(item)).join("")}</div>`
+        : "",
+      Array.isArray(payload?.skipped) && payload.skipped.length ? skillModalResultBadge(String(payload.skipped.length), "warn") : "",
+    ),
+  ]
+    .filter(Boolean)
+    .join("");
+
+  const fallbackPayload = { ...payload };
+  delete fallbackPayload.scan;
+  delete fallbackPayload.plugins;
+  delete fallbackPayload.issues;
+  delete fallbackPayload.message;
+  delete fallbackPayload.detail;
+  delete fallbackPayload.error;
+  delete fallbackPayload.source_path;
+  delete fallbackPayload.source_kind;
+  delete fallbackPayload.valid;
+  delete fallbackPayload.plugin_count;
+  delete fallbackPayload.valid_plugin_count;
+  delete fallbackPayload.uploaded_file_count;
+  delete fallbackPayload.source_name;
+  delete fallbackPayload.imported_count;
+  delete fallbackPayload.skipped_count;
+  delete fallbackPayload.imported;
+  delete fallbackPayload.skipped;
+  const fallbackJson = !sections && Object.keys(fallbackPayload).length ? `<pre class="skill-modal-result-json">${escapeHtml(prettyJson(payload))}</pre>` : "";
+
+  return `
+    <div class="skill-modal-result-shell">
+      <div class="skill-modal-result-banner ${escapeHtml(tone)}">
+        <div class="skill-modal-result-banner-main">
+          <strong>${escapeHtml(message)}</strong>
+          ${skillModalResultBadge(tone === "error" ? "失败" : tone === "warn" ? "需处理" : "完成", tone)}
+        </div>
+        ${bannerMeta ? `<span>${escapeHtml(bannerMeta)}</span>` : ""}
+      </div>
+      ${stats ? `<div class="skill-modal-result-stats">${stats}</div>` : ""}
+      ${sections}
+      ${fallbackJson}
+    </div>
+  `;
+}
+
 function showResult(target, value) {
   if (!target) {
     return;
@@ -1394,6 +1686,10 @@ function showResult(target, value) {
   target.classList.remove("pending");
   if (target.dataset.resultFormat === "skill-modal") {
     target.innerHTML = renderSkillModalResult(value);
+    return;
+  }
+  if (target.dataset.resultFormat === "plugin-modal" || (isRecord(value) && Array.isArray(value.base_tools))) {
+    target.innerHTML = renderPluginModalResult(value);
     return;
   }
   target.textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
@@ -1622,10 +1918,6 @@ function currentAgentTemplateMetadata() {
 
 function pluginDisplayName(item) {
   return item?.name || "未命名插件";
-}
-
-function pluginDisplaySubtitle(item) {
-  return item?.description || item?.plugin_type || "未配置说明";
 }
 
 function teamSummary(spec) {
@@ -1956,6 +2248,10 @@ function pluginEditorSecretPaths() {
   return new Set(Array.isArray(state.pluginEditor?.secretFieldPaths) ? state.pluginEditor.secretFieldPaths : []);
 }
 
+function pluginEditorRecord() {
+  return state.pluginEditor?.record && typeof state.pluginEditor.record === "object" ? state.pluginEditor.record : null;
+}
+
 function coercePluginSchemaValue(rawValue, schema) {
   const type = String(schema?.type || "").trim().toLowerCase();
   if (type === "integer") {
@@ -2123,9 +2419,13 @@ function setDetailPlaceholder(target, text) {
   target.textContent = text;
 }
 
-function populateProviderTypeOptions() {
+function populateProviderTypeOptions(selectedType = "") {
+  const normalizedSelectedType = String(selectedType || providerType.value || "").trim();
   const options = state.providerTypes.map((item) => `<option value="${escapeHtml(item.provider_type)}">${escapeHtml(item.label)}</option>`).join("");
   providerType.innerHTML = options;
+  if (normalizedSelectedType) {
+    providerType.value = normalizedSelectedType;
+  }
   if (!providerType.value && state.providerTypes.length) {
     providerType.value = state.providerTypes[0].provider_type;
   }
@@ -3575,6 +3875,29 @@ function retrievalSettingsSnapshot() {
   return state.retrievalSettings?.settings || { embedding: { mode: "disabled" }, rerank: { mode: "disabled" } };
 }
 
+async function requireKnowledgeEmbeddingConfiguration() {
+  if (!state.loaded.retrievalSettings) {
+    await loadRetrievalSettings();
+    state.loaded.retrievalSettings = true;
+  }
+  const embedding = retrievalSettingsSnapshot().embedding || {};
+  const mode = String(embedding.mode || "disabled").trim().toLowerCase();
+  const configured =
+    mode === "provider"
+      ? Boolean(String(embedding.provider_id || "").trim() && String(embedding.model_name || embedding.model || "").trim())
+      : mode === "local"
+        ? Boolean(
+            String(embedding.local_model_id || "").trim() ||
+              String(embedding.model_path || "").trim() ||
+              String(embedding.model_name || embedding.model || "").trim(),
+          )
+        : false;
+  if (configured) {
+    return;
+  }
+  throw new Error("当前未配置 Embed 模型，请先前往 Agent Center 的 Embedding / Rerank 配置中设置 Embed 模型。");
+}
+
 function selectCurrentLabel(select) {
   if (!select) {
     return "";
@@ -4124,6 +4447,17 @@ function closePluginModal() {
   hideResult(pluginModalResult);
 }
 
+function openPluginImportModal() {
+  pluginImportModal?.classList.remove("hidden");
+}
+
+function closePluginImportModal() {
+  pluginImportModal?.classList.add("hidden");
+  setPluginImportMode("import");
+  resetPluginImportState();
+  hideResult(pluginImportResult);
+}
+
 function openSkillModal() {
   skillModal?.classList.remove("hidden");
 }
@@ -4363,14 +4697,23 @@ function closeStaticMemoryModal() {
   hideResult(staticMemoryModalResult);
 }
 
-function setPluginEditorState({ manifest = {}, config = {}, secretFieldPaths = [] } = {}) {
+function setPluginEditorState(options = {}) {
+  const { manifest = {}, config = {}, secretFieldPaths = [] } = options || {};
   const nextManifest = manifest && typeof manifest === "object" ? clone(manifest) : {};
   const nextConfig = deepMerge(dictOrEmpty(nextManifest.runtime), config && typeof config === "object" ? config : {});
+  const nextRecord = Object.prototype.hasOwnProperty.call(options || {}, "record")
+    ? options?.record && typeof options.record === "object"
+      ? clone(options.record)
+      : null
+    : pluginEditorRecord()
+      ? clone(pluginEditorRecord())
+      : null;
   state.pluginEditor = {
     manifest: nextManifest,
     schema: nextManifest.config_schema && typeof nextManifest.config_schema === "object" ? clone(nextManifest.config_schema) : null,
     config: nextConfig,
     secretFieldPaths: Array.isArray(secretFieldPaths) ? [...secretFieldPaths] : [],
+    record: nextRecord,
   };
   renderPluginConfigEditor();
 }
@@ -4597,55 +4940,16 @@ function readPluginConfigFromForm() {
 
 function applyPluginManifestToForm(manifest, { preserveEntered = false } = {}) {
   const normalized = manifest && typeof manifest === "object" ? manifest : {};
-  if (!preserveEntered || !pluginKey.value.trim()) {
-    pluginKey.value = normalized.key || pluginKey.value || "";
-  }
   if (!preserveEntered || !pluginName.value.trim()) {
     pluginName.value = normalized.name || pluginName.value || "";
   }
-  if (!preserveEntered || !pluginVersion.value.trim()) {
-    pluginVersion.value = normalized.version || pluginVersion.value || "v1";
-  }
-  if (!preserveEntered || !pluginType.value.trim()) {
-    pluginType.value = normalized.plugin_type || pluginType.value || "toolset";
-  }
-  pluginWorkbenchKey.value = normalized.workbench_key || pluginWorkbenchKey.value || "";
-  pluginTools.value = Array.isArray(normalized.tools) ? normalized.tools.join(", ") : pluginTools.value || "";
-  pluginPermissions.value = Array.isArray(normalized.permissions) ? normalized.permissions.join(", ") : pluginPermissions.value || "";
   if (!preserveEntered || !pluginDescription.value.trim()) {
     pluginDescription.value = normalized.description || pluginDescription.value || "";
   }
 }
 
 async function syncPluginManifestFromInstallPath() {
-  const installPath = pluginInstallPath?.value?.trim();
-  if (!installPath) {
-    if (!state.editingPluginId) {
-      setPluginEditorState({ manifest: {}, config: {}, secretFieldPaths: [] });
-    } else {
-      setPluginEditorState({
-        manifest: pluginEditorManifest(),
-        config: pluginEditorConfig(),
-        secretFieldPaths: Array.from(pluginEditorSecretPaths()),
-      });
-    }
-    return;
-  }
-  try {
-    const payload = await api("/api/agent-center/plugins/validate-package", {
-      method: "POST",
-      body: JSON.stringify({ path: installPath }),
-    });
-    const manifest = payload.manifest || {};
-    applyPluginManifestToForm(manifest, { preserveEntered: true });
-    setPluginEditorState({
-      manifest,
-      config: pluginEditorConfig(),
-      secretFieldPaths: Array.from(pluginEditorSecretPaths()),
-    });
-  } catch (error) {
-    showResult(pluginModalResult, errorResult(error));
-  }
+  return Promise.resolve();
 }
 
 function openAgentTemplateModal() {
@@ -4732,18 +5036,313 @@ function resetProviderForm() {
 
 function resetPluginForm() {
   state.editingPluginId = null;
-  pluginKey.value = "";
   pluginName.value = "";
-  pluginVersion.value = "v1";
-  pluginType.value = "toolset";
-  pluginWorkbenchKey.value = "";
-  pluginInstallPath.value = "";
-  pluginTools.value = "";
-  pluginPermissions.value = "";
   pluginDescription.value = "";
-  setPluginEditorState({ manifest: {}, config: {}, secretFieldPaths: [] });
-  pluginModalTitle.textContent = "新增插件";
+  setPluginEditorState({ manifest: {}, config: {}, secretFieldPaths: [], record: null });
+  pluginModalTitle.textContent = "编辑插件";
   hideResult(pluginModalResult);
+}
+
+function resetPluginImportState() {
+  state.pluginImportFiles = [];
+  state.pluginImportDragActive = false;
+  state.pluginImportBusy = false;
+  if (pluginImportDirectoryInput) {
+    pluginImportDirectoryInput.value = "";
+  }
+  renderPluginImportSelection();
+  setPluginImportBusy(false);
+}
+
+function renderPluginImportSelection() {
+  pluginImportDropzone?.classList.toggle("drag-active", Boolean(state.pluginImportDragActive));
+  const files = Array.isArray(state.pluginImportFiles) ? state.pluginImportFiles : [];
+  if (!pluginImportSelection) {
+    return;
+  }
+  if (!files.length) {
+    pluginImportSelection.classList.add("empty");
+    pluginImportSelection.innerHTML = `
+      <span class="skill-import-selection-placeholder">未选择文件夹</span>
+    `;
+    return;
+  }
+  const roots = Array.from(new Set(files.map((item) => item.path.split("/")[0] || item.path)));
+  const previewRoots = roots.slice(0, 3);
+  const pluginYamlCount = files.filter((item) => item.path.split("/").pop() === "plugin.yaml").length;
+  const suffix = previewRoots.length < roots.length ? " ..." : "";
+  pluginImportSelection.classList.remove("empty");
+  pluginImportSelection.innerHTML = `
+    <strong title="${escapeAttribute(previewRoots.join(" / ") + suffix)}">${escapeHtml(previewRoots.join(" / ") + suffix)}</strong>
+    <div class="skill-import-selection-meta">
+      <span class="skill-import-selection-stat">${escapeHtml(`${files.length} 个文件`)}</span>
+      <span class="skill-import-selection-stat">${escapeHtml(`${pluginYamlCount} 个 plugin.yaml`)}</span>
+    </div>
+  `;
+}
+
+function setPluginImportFiles(entries) {
+  state.pluginImportFiles = normalizeSkillImportEntries(entries);
+  state.pluginImportDragActive = false;
+  hideResult(pluginImportResult);
+  renderPluginImportSelection();
+}
+
+function setPluginImportBusy(busy) {
+  state.pluginImportBusy = Boolean(busy);
+  pluginImportDropzone?.classList.toggle("busy", state.pluginImportBusy);
+  if (pluginImportDirectoryInput) {
+    pluginImportDirectoryInput.disabled = state.pluginImportBusy;
+  }
+  if (pluginImportValidate) {
+    pluginImportValidate.disabled = !state.pluginImportFiles.length || state.pluginImportBusy;
+  }
+  if (pluginImportSave) {
+    pluginImportSave.disabled = !state.pluginImportFiles.length || state.pluginImportBusy;
+  }
+  if (pluginImportDropzoneTitle) {
+    pluginImportDropzoneTitle.textContent = "点击上传插件目录";
+  }
+  if (pluginImportDropzoneHint) {
+    pluginImportDropzoneHint.textContent = "支持单个插件目录，或包含多个插件目录的集合目录";
+  }
+  if (pluginImportDropzoneTrigger) {
+    pluginImportDropzoneTrigger.textContent = "选择文件夹";
+  }
+}
+
+function openPluginUploadModal() {
+  resetPluginImportState();
+  hideResult(pluginImportResult);
+  openPluginImportModal();
+  pluginImportDropzone?.focus();
+}
+
+async function buildPluginUploadPayload() {
+  const files = normalizeSkillImportEntries(state.pluginImportFiles);
+  if (!files.length) {
+    throw new Error("请先选择要导入的插件目录。");
+  }
+  return {
+    files: await Promise.all(
+      files.map(async (item) => ({
+        path: item.path,
+        content_base64: await readFileAsBase64(item.file),
+      })),
+    ),
+  };
+}
+
+async function scanSelectedPluginImportFiles() {
+  const payload = await buildPluginUploadPayload();
+  setPluginImportBusy(true);
+  try {
+    const result = await api("/api/agent-center/plugins/scan-upload", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    showResult(pluginImportResult, result);
+    return result;
+  } finally {
+    setPluginImportBusy(false);
+  }
+}
+
+function resetPluginImportState() {
+  state.pluginImportFiles = [];
+  state.pluginImportDragActive = false;
+  state.pluginImportBusy = false;
+  state.pluginImportScanResult = null;
+  if (pluginImportDirectoryInput) {
+    pluginImportDirectoryInput.value = "";
+  }
+  renderPluginImportSelection();
+}
+
+function pluginImportTargetLabel() {
+  return String(state.pluginImportTargetName || state.pluginImportTargetKey || "\u5f53\u524d\u63d2\u4ef6").trim();
+}
+
+function setPluginImportMode(mode, plugin = null) {
+  const isReupload = mode === "reupload";
+  const manifest = plugin && typeof plugin === "object" ? { ...(plugin.manifest_json || plugin.manifest || {}) } : {};
+  state.pluginImportMode = isReupload ? "reupload" : "import";
+  state.pluginImportTargetId = isReupload ? String(plugin?.id || "").trim() : null;
+  state.pluginImportTargetKey = isReupload ? String(plugin?.key || manifest.key || "").trim() : "";
+  state.pluginImportTargetVersion = isReupload ? String(plugin?.version || manifest.version || "v1").trim() || "v1" : "";
+  state.pluginImportTargetName = isReupload ? String(pluginDisplayName(plugin || { name: manifest.name || manifest.key || "" }) || "").trim() : "";
+  state.pluginImportScanResult = null;
+  renderPluginImportModeUi();
+}
+
+function renderPluginImportModeUi() {
+  const isReupload = state.pluginImportMode === "reupload";
+  const hasFiles = Array.isArray(state.pluginImportFiles) && state.pluginImportFiles.length > 0;
+  const targetLabel = pluginImportTargetLabel();
+  if (pluginImportModalTitle) {
+    pluginImportModalTitle.textContent = isReupload
+      ? `\u91cd\u65b0\u4e0a\u4f20\u63d2\u4ef6: ${targetLabel}`
+      : "\u65b0\u589e / \u5bfc\u5165\u63d2\u4ef6";
+  }
+  if (pluginImportDropzone) {
+    pluginImportDropzone.setAttribute(
+      "aria-label",
+      isReupload
+        ? `\u91cd\u65b0\u4e0a\u4f20\u63d2\u4ef6 ${targetLabel}\uff0c\u6216\u5c06\u63d2\u4ef6\u76ee\u5f55\u62d6\u5230\u8fd9\u91cc`
+        : "\u70b9\u51fb\u9009\u62e9\u63d2\u4ef6\u76ee\u5f55\uff0c\u6216\u5c06\u63d2\u4ef6\u76ee\u5f55\u62d6\u5230\u8fd9\u91cc",
+    );
+  }
+  if (pluginImportDropzoneTitle) {
+    pluginImportDropzoneTitle.textContent = isReupload ? "\u70b9\u51fb\u91cd\u65b0\u4e0a\u4f20\u63d2\u4ef6\u76ee\u5f55" : "\u70b9\u51fb\u4e0a\u4f20\u63d2\u4ef6\u76ee\u5f55";
+  }
+  if (pluginImportDropzoneHint) {
+    pluginImportDropzoneHint.textContent = isReupload
+      ? `\u4ec5\u5141\u8bb8\u4e0a\u4f20\u4e0e ${targetLabel} Key / Version \u4e00\u81f4\u7684\u63d2\u4ef6\u5305`
+      : "\u652f\u6301\u5355\u4e2a\u63d2\u4ef6\u76ee\u5f55\uff0c\u6216\u5305\u542b\u591a\u4e2a\u63d2\u4ef6\u76ee\u5f55\u7684\u96c6\u5408\u76ee\u5f55";
+  }
+  if (pluginImportDropzoneTrigger) {
+    pluginImportDropzoneTrigger.textContent = isReupload ? "\u91cd\u65b0\u9009\u62e9\u6587\u4ef6\u5939" : "\u9009\u62e9\u6587\u4ef6\u5939";
+  }
+  if (pluginImportValidate) {
+    pluginImportValidate.disabled = !hasFiles || state.pluginImportBusy;
+  }
+  if (pluginImportSave) {
+    pluginImportSave.textContent = isReupload ? "\u91cd\u65b0\u4e0a\u4f20\u5e76\u8986\u76d6" : "\u5bfc\u5165\u63d2\u4ef6";
+    pluginImportSave.disabled = !hasFiles || state.pluginImportBusy;
+  }
+}
+
+function renderPluginImportSelection() {
+  pluginImportDropzone?.classList.toggle("drag-active", Boolean(state.pluginImportDragActive));
+  const files = Array.isArray(state.pluginImportFiles) ? state.pluginImportFiles : [];
+  if (!pluginImportSelection) {
+    renderPluginImportModeUi();
+    return;
+  }
+  if (!files.length) {
+    pluginImportSelection.classList.add("empty");
+    pluginImportSelection.innerHTML = `
+      <span class="skill-import-selection-placeholder">\u672a\u9009\u62e9\u6587\u4ef6\u5939</span>
+    `;
+    renderPluginImportModeUi();
+    return;
+  }
+  const roots = Array.from(new Set(files.map((item) => item.path.split("/")[0] || item.path)));
+  const previewRoots = roots.slice(0, 3);
+  const pluginYamlCount = files.filter((item) => item.path.split("/").pop() === "plugin.yaml").length;
+  const suffix = previewRoots.length < roots.length ? " ..." : "";
+  pluginImportSelection.classList.remove("empty");
+  pluginImportSelection.innerHTML = `
+    <strong title="${escapeAttribute(previewRoots.join(" / ") + suffix)}">${escapeHtml(previewRoots.join(" / ") + suffix)}</strong>
+    <div class="skill-import-selection-meta">
+      <span class="skill-import-selection-stat">${escapeHtml(`${files.length} \u4e2a\u6587\u4ef6`)}</span>
+      <span class="skill-import-selection-stat">${escapeHtml(`${pluginYamlCount} \u4e2a plugin.yaml`)}</span>
+    </div>
+  `;
+  renderPluginImportModeUi();
+}
+
+function setPluginImportFiles(entries) {
+  state.pluginImportFiles = normalizeSkillImportEntries(entries);
+  state.pluginImportDragActive = false;
+  state.pluginImportScanResult = null;
+  hideResult(pluginImportResult);
+  renderPluginImportSelection();
+}
+
+function setPluginImportBusy(busy) {
+  state.pluginImportBusy = Boolean(busy);
+  pluginImportDropzone?.classList.toggle("busy", state.pluginImportBusy);
+  if (pluginImportDirectoryInput) {
+    pluginImportDirectoryInput.disabled = state.pluginImportBusy;
+  }
+  renderPluginImportModeUi();
+}
+
+function openPluginUploadModal() {
+  setPluginImportMode("import");
+  resetPluginImportState();
+  hideResult(pluginImportResult);
+  openPluginImportModal();
+  pluginImportDropzone?.focus();
+}
+
+function openPluginReuploadModal(plugin) {
+  const manifest = { ...((plugin && typeof plugin === "object" ? plugin.manifest_json || plugin.manifest || {} : {}) || {}) };
+  const pluginKey = String(plugin?.key || manifest.key || "").trim();
+  if (!plugin?.id || !pluginKey) {
+    throw new Error("\u5f53\u524d\u63d2\u4ef6\u7f3a\u5c11 Key \u6216 ID\uff0c\u65e0\u6cd5\u91cd\u65b0\u4e0a\u4f20\u3002");
+  }
+  setPluginImportMode("reupload", plugin);
+  resetPluginImportState();
+  hideResult(pluginImportResult);
+  openPluginImportModal();
+  pluginImportDropzone?.focus();
+}
+
+async function buildPluginUploadPayload() {
+  const files = normalizeSkillImportEntries(state.pluginImportFiles);
+  if (!files.length) {
+    throw new Error("\u8bf7\u5148\u9009\u62e9\u8981\u5bfc\u5165\u7684\u63d2\u4ef6\u76ee\u5f55\u3002");
+  }
+  return {
+    files: await Promise.all(
+      files.map(async (item) => ({
+        path: item.path,
+        content_base64: await readFileAsBase64(item.file),
+      })),
+    ),
+  };
+}
+
+function ensurePluginImportMatchesTarget(scan) {
+  state.pluginImportScanResult = scan || null;
+  if (state.pluginImportMode !== "reupload") {
+    return scan;
+  }
+  const targetId = String(state.pluginImportTargetId || "").trim();
+  const targetKey = String(state.pluginImportTargetKey || "").trim();
+  const targetVersion = String(state.pluginImportTargetVersion || "v1").trim() || "v1";
+  const targetLabel = pluginImportTargetLabel();
+  const plugins = Array.isArray(scan?.plugins) ? scan.plugins : [];
+  const validPlugins = plugins.filter((item) => item?.is_valid && item?.manifest);
+  if (!validPlugins.length) {
+    throw new Error("\u91cd\u65b0\u4e0a\u4f20\u672a\u68c0\u6d4b\u5230\u53ef\u7528\u63d2\u4ef6\u5305\u3002");
+  }
+  if (validPlugins.length !== 1) {
+    throw new Error("\u91cd\u65b0\u4e0a\u4f20\u53ea\u80fd\u5305\u542b 1 \u4e2a\u63d2\u4ef6\u5305\u3002");
+  }
+  const pluginScan = validPlugins[0];
+  const manifest = { ...(pluginScan.manifest || {}) };
+  const uploadKey = String(manifest.key || "").trim();
+  const uploadVersion = String(manifest.version || "v1").trim() || "v1";
+  if (!uploadKey || uploadKey !== targetKey || uploadVersion !== targetVersion) {
+    throw new Error(
+      `\u91cd\u65b0\u4e0a\u4f20\u53ea\u80fd\u8986\u76d6\u5f53\u524d\u63d2\u4ef6\u3002\u76ee\u6807\u662f ${targetLabel} (${targetKey}@${targetVersion})\uff0c\u4f46\u4e0a\u4f20\u5305\u662f ${uploadKey || "-"}@${uploadVersion}\u3002`,
+    );
+  }
+  const existingPluginId = String(pluginScan.existing_plugin_id || "").trim();
+  if (existingPluginId && targetId && existingPluginId !== targetId) {
+    throw new Error("\u5f53\u524d\u4e0a\u4f20\u5305\u4f1a\u8986\u76d6\u5176\u4ed6\u63d2\u4ef6\uff0c\u8bf7\u68c0\u67e5\u4e0a\u4f20\u5185\u5bb9\u3002");
+  }
+  return scan;
+}
+
+async function scanSelectedPluginImportFiles() {
+  const payload = await buildPluginUploadPayload();
+  setPluginImportBusy(true);
+  try {
+    const result = await api("/api/agent-center/plugins/scan-upload", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    state.pluginImportScanResult = result;
+    ensurePluginImportMatchesTarget(result);
+    showResult(pluginImportResult, result);
+    return result;
+  } finally {
+    setPluginImportBusy(false);
+  }
 }
 
 function resetAgentTemplateForm() {
@@ -4815,6 +5414,7 @@ function fillProviderForm(provider) {
   const config = provider.config_json || {};
   const secret = provider.secret_json || {};
   providerName.value = provider.name || "";
+  populateProviderTypeOptions(provider.provider_type || "");
   providerType.value = provider.provider_type || "";
   providerBaseUrl.value = config.base_url || "";
   setProviderApiKeyValue(secret.api_key || "");
@@ -4833,19 +5433,13 @@ function fillProviderForm(provider) {
 function fillPluginForm(plugin) {
   state.editingPluginId = plugin.id;
   const manifest = plugin.manifest_json || {};
-  pluginKey.value = plugin.key || "";
   pluginName.value = plugin.name || "";
-  pluginVersion.value = plugin.version || "v1";
-  pluginType.value = plugin.plugin_type || "toolset";
-  pluginWorkbenchKey.value = manifest.workbench_key || "";
-  pluginInstallPath.value = plugin.install_path || "";
-  pluginTools.value = (manifest.tools || []).join(", ");
-  pluginPermissions.value = (manifest.permissions || []).join(", ");
   pluginDescription.value = plugin.description || "";
   setPluginEditorState({
     manifest,
     config: plugin.config_json || {},
     secretFieldPaths: plugin.secret_field_paths || [],
+    record: plugin,
   });
   pluginModalTitle.textContent = "编辑插件";
   hideResult(pluginModalResult);
@@ -5390,43 +5984,33 @@ function renderPlugins() {
     ? state.pluginPage.items
         .map((item) => {
           const manifest = item.manifest_json || {};
-          const runtime = item.runtime || {};
-          const descriptor = runtime.descriptor || {};
-          const runtimeState = runtime.running ? "running" : runtime.status || (item.install_path ? "idle" : "metadata_only");
-          const tools = (descriptor.tools || manifest.tools || []).join(", ") || "-";
-          const workbenchKey = manifest.workbench_key || "-";
-          const statusHint = item.install_path ? item.install_path : "未配置安装路径";
+          const description = String(item.description || manifest.description || "").trim() || "\u6682\u65e0\u8bf4\u660e";
+          const actionNames = Array.isArray(manifest.actions)
+            ? manifest.actions.map((entry) => String((entry || {}).name || "").trim()).filter(Boolean)
+            : [];
+          const actionText = actionNames.length ? actionNames.join(", ") : "\u65e0\u52a8\u4f5c";
           return `
             <article class="resource-row plugin-row">
               <div class="resource-main">
                 <strong title="${escapeAttribute(pluginDisplayName(item))}">${escapeHtml(pluginDisplayName(item))}</strong>
-                <span title="${escapeAttribute(pluginDisplaySubtitle(item))}">${escapeHtml(pluginDisplaySubtitle(item))}</span>
               </div>
               <div class="resource-cell">
-                <strong>${escapeHtml(item.version || "-")}</strong>
-                <span>${escapeHtml(item.plugin_type || "-")}</span>
+                <strong title="${escapeAttribute(description)}">${escapeHtml(description)}</strong>
               </div>
               <div class="resource-cell">
-                <strong title="${escapeAttribute(workbenchKey)}">${escapeHtml(workbenchKey)}</strong>
-                <span title="${escapeAttribute(`tools=${tools}`)}">${escapeHtml(`tools=${tools}`)}</span>
-              </div>
-              <div class="resource-cell">
-                <strong>${escapeHtml(runtimeState)}</strong>
-                <span title="${escapeAttribute(statusHint)}">${escapeHtml(statusHint)}</span>
+                <strong title="${escapeAttribute(actionText)}">${escapeHtml(actionText)}</strong>
               </div>
               <div class="resource-row-actions">
-                <button type="button" data-plugin-edit="${item.id}">编辑</button>
-                <button type="button" class="ghost" data-plugin-validate="${item.id}">校验</button>
-                <button type="button" class="ghost" data-plugin-install="${item.id}">安装</button>
-                <button type="button" class="ghost" data-plugin-load="${item.id}">加载</button>
-                <button type="button" class="ghost" data-plugin-reload="${item.id}">重载</button>
-                <button type="button" class="ghost" data-plugin-health="${item.id}">健康</button>
+                <button type="button" data-plugin-edit="${item.id}">\u7f16\u8f91</button>
+                <button type="button" class="ghost" data-plugin-validate="${item.id}">\u6821\u9a8c</button>
+                <button type="button" class="ghost" data-plugin-reupload="${item.id}">\u91cd\u65b0\u4e0a\u4f20</button>
+                <button type="button" class="ghost warn" data-plugin-delete="${item.id}">\u5220\u9664</button>
               </div>
             </article>
           `;
         })
         .join("")
-    : '<div class="detail empty compact-detail">暂无插件，先新建一个插件。</div>';
+    : '<div class="detail empty compact-detail">\u6682\u65e0\u63d2\u4ef6\uff0c\u5148\u5bfc\u5165\u4e00\u4e2a\u63d2\u4ef6\u3002</div>';
   renderOffsetPagination(state.pluginPage, pluginPaginationMeta, "plugin-page");
 }
 
@@ -6311,25 +6895,35 @@ function buildProviderPayloadFromForm() {
 }
 
 function buildPluginPayloadFromForm() {
-  const configBundle = readPluginConfigFromForm();
+  const current = pluginEditorRecord() || state.pluginPage.items.find((item) => item.id === state.editingPluginId) || null;
   const baseManifest = pluginEditorManifest();
+  const key = String(current?.key || baseManifest.key || "").trim();
+  const version = String(current?.version || baseManifest.version || "v1").trim() || "v1";
+  const pluginType = String(current?.plugin_type || baseManifest.plugin_type || "toolset").trim() || "toolset";
+  const installPath = String(current?.install_path || "").trim() || null;
+  const name = pluginName.value.trim() || String(current?.name || baseManifest.name || "").trim();
+  if (!key) {
+    throw new Error("插件标识缺失，请重新导入该插件。");
+  }
+  if (!name) {
+    throw new Error("插件名称不能为空。");
+  }
   return {
     id: state.editingPluginId,
-    key: pluginKey.value.trim(),
-    name: pluginName.value.trim(),
-    version: pluginVersion.value.trim() || "v1",
-    plugin_type: pluginType.value.trim() || "toolset",
+    key,
+    name,
+    version,
+    plugin_type: pluginType,
     description: pluginDescription.value.trim(),
-    install_path: pluginInstallPath.value.trim() || null,
+    install_path: installPath,
     manifest: {
       ...baseManifest,
-      workbench_key: pluginWorkbenchKey.value.trim(),
-      tools: commaListToArray(pluginTools.value),
-      permissions: commaListToArray(pluginPermissions.value),
+      key,
+      name,
+      version,
+      plugin_type: pluginType,
       description: pluginDescription.value.trim(),
     },
-    config: configBundle.config,
-    ...(Object.keys(configBundle.secret).length ? { secret: configBundle.secret } : {}),
   };
 }
 
@@ -6891,8 +7485,9 @@ function setKnowledgeBaseDocumentActionBusy(busy) {
   state.knowledgeBaseDocumentActionBusy = Boolean(busy);
   const disabled = state.knowledgeBaseDocumentActionBusy;
   const hasSelection = selectedKnowledgeDocumentIds().length > 0;
+  const hasKnowledgeBase = Boolean(state.editingKnowledgeBaseId);
   if (knowledgeDocumentEmbedAdd) {
-    knowledgeDocumentEmbedAdd.disabled = disabled || !hasSelection;
+    knowledgeDocumentEmbedAdd.disabled = disabled || !hasKnowledgeBase;
     if (disabled) {
       knowledgeDocumentEmbedAdd.textContent = "处理中...";
     } else {
@@ -6914,35 +7509,11 @@ function setKnowledgeBaseDocumentActionBusy(busy) {
   }
 }
 
-function classifyKnowledgeDocumentEmbeddingTargets(documentIds) {
-  const documents = Array.isArray(state.knowledgeBaseDocuments) ? state.knowledgeBaseDocuments : [];
-  const index = new Map(documents.map((item) => [item.id, item]));
-  const addIds = [];
-  const reembedIds = [];
-  Array.from(new Set((documentIds || []).map((item) => String(item || "").trim()).filter(Boolean))).forEach((id) => {
-    const document = index.get(id);
-    if (document?.embedding_status === "embedded") {
-      reembedIds.push(id);
-    } else {
-      addIds.push(id);
-    }
-  });
-  return { addIds, reembedIds };
-}
-
-function syncKnowledgeDocumentBulkActionLabel(documentIds = selectedKnowledgeDocumentIds()) {
+function syncKnowledgeDocumentBulkActionLabel() {
   if (!knowledgeDocumentEmbedAdd) {
     return;
   }
-  const ids = Array.from(new Set((documentIds || []).map((item) => String(item || "").trim()).filter(Boolean)));
-  const { addIds, reembedIds } = classifyKnowledgeDocumentEmbeddingTargets(ids);
-  let mode = "sync";
-  if (addIds.length && !reembedIds.length) {
-    mode = "add";
-  } else if (reembedIds.length && !addIds.length) {
-    mode = "reembed";
-  }
-  knowledgeDocumentEmbedAdd.dataset.bulkEmbeddingMode = mode;
+  knowledgeDocumentEmbedAdd.dataset.bulkEmbeddingMode = "save";
   knowledgeDocumentEmbedAdd.textContent = "保存并嵌入";
 }
 
@@ -6992,7 +7563,7 @@ function renderKnowledgeBaseDocuments() {
   const hasFilters = Boolean(query || embeddingStatus !== "all");
   const allSelected = documents.length > 0 && selectedCount === documents.length;
   const partiallySelected = selectedCount > 0 && selectedCount < documents.length;
-  syncKnowledgeDocumentBulkActionLabel(Array.from(selectedIds));
+  syncKnowledgeDocumentBulkActionLabel();
   if (knowledgeBaseDocumentMoveBack) {
     knowledgeBaseDocumentMoveBack.hidden = !selectedCount;
   }
@@ -7179,10 +7750,11 @@ async function runKnowledgeDocumentEmbeddingAction(action, documentIds) {
     throw new Error("请先打开一个知识库。");
   }
   const ids = Array.from(new Set((documentIds || []).map((item) => String(item || "").trim()).filter(Boolean)));
-  if (!ids.length) {
+  const normalizedAction = String(action || "").trim().toLowerCase();
+  if (!ids.length && !["", "save", "sync"].includes(normalizedAction)) {
     throw new Error("请至少选择一个文件。");
   }
-  if (action === "delete") {
+  if (normalizedAction === "delete") {
     const scopeLabel = ids.length === 1 ? "这个文件的已有嵌入" : `选中的 ${ids.length} 个文件嵌入`;
     if (!window.confirm(`确认删除${scopeLabel}？`)) {
       return null;
@@ -7191,10 +7763,13 @@ async function runKnowledgeDocumentEmbeddingAction(action, documentIds) {
   setKnowledgeBaseDocumentActionBusy(true);
   renderKnowledgeBaseDocuments();
   try {
+    if (normalizedAction === "add" || normalizedAction === "reembed") {
+      await requireKnowledgeEmbeddingConfiguration();
+    }
     const job = await api(`/api/agent-center/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/embeddings`, {
       method: "POST",
       body: JSON.stringify({
-        action,
+        action: normalizedAction || action,
         document_ids: ids,
       }),
     });
@@ -7212,32 +7787,8 @@ async function runKnowledgeDocumentEmbeddingAction(action, documentIds) {
 }
 
 async function runKnowledgeDocumentBulkEmbeddingAction(documentIds) {
-  const ids = Array.from(new Set((documentIds || []).map((item) => String(item || "").trim()).filter(Boolean)));
-  if (!ids.length) {
-    throw new Error("请至少选择一个文件。");
-  }
-  const mode = String(knowledgeDocumentEmbedAdd?.dataset.bulkEmbeddingMode || "sync").trim() || "sync";
-  if (mode === "add" || mode === "reembed") {
-    return runKnowledgeDocumentEmbeddingAction(mode, ids);
-  }
-  const { addIds, reembedIds } = classifyKnowledgeDocumentEmbeddingTargets(ids);
-  if (!addIds.length && !reembedIds.length) {
-    throw new Error("请至少选择一个文件。");
-  }
-  const payloads = [];
-  if (addIds.length) {
-    payloads.push(await runKnowledgeDocumentEmbeddingAction("add", addIds));
-  }
-  if (reembedIds.length) {
-    payloads.push(await runKnowledgeDocumentEmbeddingAction("reembed", reembedIds));
-  }
-  if (payloads.length > 1) {
-    showResult(
-      knowledgeBaseModalResult,
-      payloads.map((payload) => buildKnowledgeDocumentEmbeddingResult(payload)).filter(Boolean).join("\n"),
-    );
-  }
-  return payloads;
+  void documentIds;
+  return runKnowledgeDocumentEmbeddingAction("save", []);
 }
 
 function resetKnowledgeBaseForm({ openModal = false } = {}) {
@@ -8196,7 +8747,7 @@ async function ensureOverviewData(force = false) {
     state.loaded.controlPlane = true;
     state.loaded.providerTypes = true;
   }
-  populateProviderTypeOptions();
+  populateProviderTypeOptions(providerType.value || "");
   renderOverview();
 }
 
@@ -8209,7 +8760,7 @@ async function ensureProvidersPage(force = false) {
     await loadProviderPage();
     state.loaded.providerPage = true;
   }
-  populateProviderTypeOptions();
+  populateProviderTypeOptions(providerType.value || "");
   providerPageSize.value = String(state.providerPage.limit || 10);
   renderProviders();
 }
@@ -8746,6 +9297,10 @@ skillForm?.addEventListener("submit", async (event) => {
         showResult(skillResult, {
           ...result,
           message: isReupload ? "Skill 已重新上传并覆盖" : "Skill 已导入",
+        });
+        showResult(pluginResult, {
+          ...result,
+          message: isReupload ? "\u63d2\u4ef6\u5df2\u91cd\u65b0\u4e0a\u4f20\u5e76\u8986\u76d6" : "\u63d2\u4ef6\u5df2\u5bfc\u5165\u5230\u6258\u7ba1\u76ee\u5f55",
         });
       } else {
         showResult(skillModalResult, result);
@@ -9292,14 +9847,118 @@ providerModelTest.addEventListener("click", async () => {
   }
 });
 pluginOpenCreate.addEventListener("click", () => {
-  resetPluginForm();
-  openPluginModal();
+  openPluginUploadModal();
 });
 pluginModalCloseButtons.forEach((button) => button.addEventListener("click", closePluginModal));
 pluginCancel.addEventListener("click", closePluginModal);
-pluginInstallPath?.addEventListener("change", async () => {
-  hideResult(pluginModalResult);
-  await syncPluginManifestFromInstallPath();
+pluginImportModalCloseButtons.forEach((button) => button.addEventListener("click", closePluginImportModal));
+pluginImportCancel?.addEventListener("click", closePluginImportModal);
+pluginImportValidate?.addEventListener("click", async () => {
+  hideResult(pluginImportResult);
+  try {
+    await scanSelectedPluginImportFiles();
+  } catch (error) {
+    showResult(pluginImportResult, errorResult(error));
+  }
+});
+pluginImportForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  hideResult(pluginImportResult);
+  hideResult(pluginResult);
+  try {
+    const isReupload = state.pluginImportMode === "reupload";
+    setPluginImportBusy(true);
+    try {
+      const payload = await buildPluginUploadPayload();
+      const scan =
+        state.pluginImportScanResult ||
+        (await api("/api/agent-center/plugins/scan-upload", {
+          method: "POST",
+          body: JSON.stringify(payload),
+        }));
+      state.pluginImportScanResult = scan;
+      ensurePluginImportMatchesTarget(scan);
+      const result = await api("/api/agent-center/plugins/import-upload", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      invalidateData("pluginPage", "pluginRefs", "agentDefinitionRefs", "agentTemplateRefs", "controlPlane");
+      if (!isReupload) {
+        state.pluginPage.offset = 0;
+      }
+      await ensurePluginsPage(true);
+      if ((result.imported_count || 0) > 0) {
+        closePluginImportModal();
+        showResult(pluginResult, {
+          ...result,
+          message: "插件已导入到受管目录，可直接用于 DeepAgents Tools。",
+        });
+      } else {
+        showResult(pluginImportResult, result);
+      }
+    } finally {
+      setPluginImportBusy(false);
+    }
+  } catch (error) {
+    setPluginImportBusy(false);
+    showResult(pluginImportResult, errorResult(error));
+  }
+});
+pluginImportDirectoryInput?.addEventListener("change", async (event) => {
+  try {
+    const entries = await collectSkillImportEntriesFromInput(event.target?.files || []);
+    setPluginImportFiles(entries);
+    if (entries.length) {
+      await scanSelectedPluginImportFiles();
+    }
+  } catch (error) {
+    showResult(pluginImportResult, errorResult(error));
+  }
+});
+pluginImportDropzone?.addEventListener("click", () => {
+  if (!state.pluginImportBusy) {
+    pluginImportDirectoryInput?.click();
+  }
+});
+pluginImportDropzone?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    if (!state.pluginImportBusy) {
+      pluginImportDirectoryInput?.click();
+    }
+  }
+});
+["dragenter", "dragover"].forEach((eventName) => {
+  pluginImportDropzone?.addEventListener(eventName, (event) => {
+    event.preventDefault();
+    state.pluginImportDragActive = true;
+    renderPluginImportSelection();
+  });
+});
+["dragleave", "dragend"].forEach((eventName) => {
+  pluginImportDropzone?.addEventListener(eventName, (event) => {
+    event.preventDefault();
+    const related = event.relatedTarget;
+    if (related && pluginImportDropzone?.contains?.(related)) {
+      return;
+    }
+    state.pluginImportDragActive = false;
+    renderPluginImportSelection();
+  });
+});
+pluginImportDropzone?.addEventListener("drop", async (event) => {
+  event.preventDefault();
+  try {
+    const entries = await collectSkillImportEntriesFromDataTransfer(event.dataTransfer);
+    setPluginImportFiles(entries);
+    if (entries.length) {
+      await scanSelectedPluginImportFiles();
+    }
+  } catch (error) {
+    state.pluginImportDragActive = false;
+    renderPluginImportSelection();
+    showResult(pluginImportResult, errorResult(error));
+  }
 });
 responsibilitySpecOpenRoleCreate?.addEventListener("click", async () => {
   await ensureResponsibilitySpecsPage(true);
@@ -9433,7 +10092,7 @@ knowledgeDocumentSelectAll?.addEventListener("change", () => {
 });
 knowledgeDocumentEmbedAdd?.addEventListener("click", async () => {
   try {
-    await runKnowledgeDocumentBulkEmbeddingAction(selectedKnowledgeDocumentIds());
+    await runKnowledgeDocumentBulkEmbeddingAction();
   } catch (error) {
     showResult(knowledgeBaseModalResult, errorResult(error));
   }
@@ -9639,9 +10298,9 @@ document.addEventListener("click", async (event) => {
   const providerEdit = event.target.closest("[data-provider-edit]");
   if (providerEdit) {
     try {
+      await switchPage("providers");
       const provider = await api(`/api/agent-center/providers/${providerEdit.dataset.providerEdit}`);
       fillProviderForm(provider);
-      await switchPage("providers");
     } catch (error) {
       providerResult?.classList.remove("empty");
       showResult(providerResult, errorResult(error));
@@ -9854,76 +10513,57 @@ document.addEventListener("click", async (event) => {
     try {
       const plugin = state.pluginPage.items.find((item) => item.id === pluginValidate.dataset.pluginValidate) || null;
       if (!plugin?.install_path) {
-        throw new Error("插件未配置安装路径。");
+        throw new Error("\u63d2\u4ef6\u672a\u914d\u7f6e\u5b89\u88c5\u8def\u5f84\u3002");
       }
-      const payload = await api("/api/agent-center/plugins/validate-package", {
+      await api("/api/agent-center/plugins/validate-package", {
         method: "POST",
         body: JSON.stringify({ path: plugin.install_path }),
       });
-      showResult(pluginResult, payload);
+      showResult(pluginResult, "\u63d2\u4ef6\u6821\u9a8c\u901a\u8fc7");
     } catch (error) {
-      showResult(pluginResult, { error: error.message });
+      showResult(pluginResult, "\u63d2\u4ef6\u6821\u9a8c\u672a\u901a\u8fc7");
     }
     return;
   }
 
-  const pluginInstall = event.target.closest("[data-plugin-install]");
-  if (pluginInstall) {
+  const pluginReupload = event.target.closest("[data-plugin-reupload]");
+  if (pluginReupload) {
     try {
-      const payload = await api(`/api/agent-center/plugins/${pluginInstall.dataset.pluginInstall}/install`, {
-        method: "POST",
-        body: JSON.stringify({}),
-      });
-      showResult(pluginResult, payload);
+      const pluginId = String(pluginReupload.dataset.pluginReupload || "").trim();
+      const plugin =
+        state.pluginPage.items.find((item) => item.id === pluginId) ||
+        state.plugins.find((item) => item.id === pluginId) ||
+        (await api(`/api/agent-center/plugins/${pluginId}`));
+      openPluginReuploadModal(plugin);
+    } catch (error) {
+      showResult(pluginResult, errorResult(error));
+    }
+    return;
+  }
+
+  const pluginDelete = event.target.closest("[data-plugin-delete]");
+  if (pluginDelete) {
+    const pluginId = pluginDelete.dataset.pluginDelete;
+    const plugin =
+      state.pluginPage.items.find((item) => item.id === pluginId) || state.plugins.find((item) => item.id === pluginId) || null;
+    const pluginNameText = pluginDisplayName(plugin || { id: pluginId, name: pluginId });
+    if (!window.confirm(`\u786e\u8ba4\u5220\u9664\u63d2\u4ef6\u201c${pluginNameText}\u201d\uff1f`)) {
+      return;
+    }
+    try {
+      if (state.pluginPage.items.length === 1 && state.pluginPage.offset > 0) {
+        state.pluginPage.offset = Math.max(0, state.pluginPage.offset - state.pluginPage.limit);
+      }
+      await api(`/api/agent-center/plugins/${pluginId}`, { method: "DELETE" });
+      if (state.editingPluginId === pluginId) {
+        resetPluginForm();
+        closePluginModal();
+      }
       invalidateData("pluginPage", "pluginRefs");
       await ensurePluginsPage(true);
+      showResult(pluginResult, { message: "\u63d2\u4ef6\u5df2\u5220\u9664", id: pluginId });
     } catch (error) {
-      showResult(pluginResult, { error: error.message });
-    }
-    return;
-  }
-
-  const pluginLoad = event.target.closest("[data-plugin-load]");
-  if (pluginLoad) {
-    try {
-      const payload = await api(`/api/agent-center/plugins/${pluginLoad.dataset.pluginLoad}/load`, {
-        method: "POST",
-        body: JSON.stringify({}),
-      });
-      showResult(pluginResult, payload);
-      invalidateData("pluginPage", "pluginRefs");
-      await ensurePluginsPage(true);
-    } catch (error) {
-      showResult(pluginResult, { error: error.message });
-    }
-    return;
-  }
-
-  const pluginReload = event.target.closest("[data-plugin-reload]");
-  if (pluginReload) {
-    try {
-      const payload = await api(`/api/agent-center/plugins/${pluginReload.dataset.pluginReload}/reload`, {
-        method: "POST",
-        body: JSON.stringify({}),
-      });
-      showResult(pluginResult, payload);
-      invalidateData("pluginPage", "pluginRefs");
-      await ensurePluginsPage(true);
-    } catch (error) {
-      showResult(pluginResult, { error: error.message });
-    }
-    return;
-  }
-
-  const pluginHealth = event.target.closest("[data-plugin-health]");
-  if (pluginHealth) {
-    try {
-      const payload = await api(`/api/agent-center/plugins/${pluginHealth.dataset.pluginHealth}/health`);
-      showResult(pluginResult, payload);
-      invalidateData("pluginPage");
-      await ensurePluginsPage(true);
-    } catch (error) {
-      showResult(pluginResult, { error: error.message });
+      showResult(pluginResult, errorResult(error));
     }
     return;
   }

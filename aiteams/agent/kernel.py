@@ -561,7 +561,7 @@ class AgentKernel:
                 BUILTIN_MEMORY_BACKGROUND_REFLECTION_PLUGIN_KEY,
                 "reflect",
             ): "Trigger LangMem background reflection over recent conversation turns.",
-            (BUILTIN_KB_RETRIEVE_PLUGIN_KEY, "retrieve"): "Retrieve relevant documents from the agent's bound knowledge bases.",
+            (BUILTIN_KB_RETRIEVE_PLUGIN_KEY, "retrieve"): "Query the agent's bound knowledge bases and return grounded source snippets.",
             (BUILTIN_TEAM_MESSAGE_SEND_PLUGIN_KEY, "send"): "Send a direct message to an adjacent-level teammate.",
             (BUILTIN_TEAM_MESSAGE_REPLY_PLUGIN_KEY, "reply"): "Reply to the current inbound adjacent-level team message.",
             (BUILTIN_HUMAN_ESCALATE_PLUGIN_KEY, "escalate"): "Escalate the current interaction for direct human review.",

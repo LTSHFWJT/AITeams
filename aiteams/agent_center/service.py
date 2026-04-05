@@ -11,7 +11,6 @@ from urllib.request import Request, urlopen
 from aiteams.agent_center.defaults import (
     default_agent_definitions,
     default_review_policies,
-    default_plugins,
     default_provider_profiles,
     default_static_memories,
     default_team_definitions,
@@ -41,7 +40,7 @@ LOCAL_MODEL_TYPE_ALIASES = {
 }
 DEFAULT_MEMORY_PLUGIN_KEY = "memory_core"
 RETRIEVAL_SETTINGS_KEY = "retrieval_models"
-DEFAULT_LOCAL_EMBEDDING_MODEL = "BAAI/bge-m3"
+DEFAULT_LOCAL_EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 DEFAULT_LOCAL_RERANK_MODEL = "BAAI/bge-reranker-v2-m3"
 LEGACY_DEFAULT_SKILL_KEYS = {
     "planning_skill",
@@ -155,44 +154,6 @@ class AgentCenterService:
                 )
             provider_id_map[str(provider["builtin_ref"])] = str(saved["id"])
 
-        plugin_id_map: dict[str, str] = {}
-        for plugin in default_plugins():
-            existing = self.store.get_plugin_by_key(str(plugin["key"]))
-            saved = existing
-            if saved is None:
-                saved = self.store.save_plugin(
-                    plugin_id=None,
-                    key=str(plugin["key"]),
-                    name=str(plugin["name"]),
-                    version=str(plugin["version"]),
-                    plugin_type=str(plugin["plugin_type"]),
-                    description=str(plugin.get("description") or ""),
-                    manifest=dict(plugin.get("manifest") or {}),
-                    config={},
-                    install_path=None,
-                )
-            elif str(plugin.get("key") or "") == DEFAULT_MEMORY_PLUGIN_KEY:
-                manifest = dict(saved.get("manifest_json") or {})
-                tools = {str(item) for item in list(manifest.get("tools") or []) if str(item).strip()}
-                if "memory.background_reflection" not in tools:
-                    merged_manifest = dict(manifest)
-                    merged_manifest["tools"] = list(dict.fromkeys([*list(manifest.get("tools") or []), "memory.background_reflection"]))
-                    if plugin.get("manifest", {}).get("description"):
-                        merged_manifest["description"] = str(plugin["manifest"]["description"])
-                    saved = self.store.save_plugin(
-                        plugin_id=str(saved["id"]),
-                        key=str(saved["key"]),
-                        name=str(saved["name"]),
-                        version=str(saved["version"]),
-                        plugin_type=str(saved["plugin_type"]),
-                        description=str(saved.get("description") or plugin.get("description") or ""),
-                        manifest=merged_manifest,
-                        config=dict(saved.get("config_json") or {}),
-                        install_path=saved.get("install_path"),
-                        status=str(saved.get("status") or "active"),
-                    )
-            plugin_id_map[str(plugin["key"])] = str(saved["id"])
-
         self._cleanup_legacy_default_skills()
         self.store.sync_skill_groups_from_skills()
 
@@ -229,7 +190,6 @@ class AgentCenterService:
                     spec=self._default_agent_definition_spec(
                         agent_definition,
                         provider_id_map=provider_id_map,
-                        plugin_id_map=plugin_id_map,
                     ),
                 )
 
@@ -287,38 +247,10 @@ class AgentCenterService:
         self.save_retrieval_settings(self._default_retrieval_settings_payload())
 
     def _default_retrieval_settings_payload(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "embedding": {
-                "mode": "local",
-                "model_name": DEFAULT_LOCAL_EMBEDDING_MODEL,
-            },
+        return {
+            "embedding": {"mode": "disabled"},
             "rerank": {"mode": "disabled"},
         }
-        default_local_model = self._preferred_default_local_embedding_model()
-        if default_local_model is not None:
-            payload["embedding"] = {
-                "mode": "local",
-                "local_model_id": str(default_local_model.get("id") or ""),
-            }
-        return payload
-
-    def _preferred_default_local_embedding_model(self) -> dict[str, Any] | None:
-        default_model_path = self._default_local_model_path(DEFAULT_LOCAL_EMBEDDING_MODEL)
-        preferred_path = self._local_model_manifest_paths().get(DEFAULT_LOCAL_EMBEDDING_MODEL) or default_model_path
-        for item in self.store.list_local_models():
-            normalized = self.normalize_local_model(item)
-            if normalized is None:
-                continue
-            if str(normalized.get("model_type") or "") != "Embed":
-                continue
-            name = str(normalized.get("name") or "").strip()
-            model_path = str(normalized.get("model_path") or "").strip()
-            if name != DEFAULT_LOCAL_EMBEDDING_MODEL and model_path != preferred_path:
-                continue
-            resolved_path = self._resolve_local_model_path(model_path)
-            if resolved_path and Path(resolved_path).exists():
-                return normalized
-        return None
 
     def provider_types(self) -> list[dict[str, Any]]:
         return list_provider_presets()
@@ -706,13 +638,12 @@ class AgentCenterService:
         definition: dict[str, Any],
         *,
         provider_id_map: dict[str, str],
-        plugin_id_map: dict[str, str],
     ) -> dict[str, Any]:
         spec = json.loads(json.dumps(definition.get("spec") or {}, ensure_ascii=False))
         provider_ref = str(spec.get("provider_ref") or "").strip()
         if provider_ref:
             spec["provider_ref"] = provider_id_map.get(provider_ref, provider_ref)
-        spec["tool_plugin_refs"] = self._ensure_default_plugin_refs([plugin_id_map.get(str(item), str(item)) for item in spec.get("tool_plugin_refs", [])])
+        spec["tool_plugin_refs"] = self._ensure_default_plugin_refs(list(spec.get("tool_plugin_refs", [])))
         spec.pop("memory_profile_ref", None)
         spec.pop("memory_profile_id", None)
         spec.pop("memory_profile", None)

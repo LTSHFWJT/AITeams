@@ -29,7 +29,7 @@ from langgraph.store.base import (
 from aiteams.ai_gateway import AIGateway, ProviderRequestError
 from aiteams.utils import json_dumps, json_loads
 
-DEFAULT_LOCAL_EMBEDDING_MODEL = "BAAI/bge-m3"
+DEFAULT_LOCAL_EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 
 try:  # pragma: no cover - optional runtime dependency
     from llama_index.embeddings.huggingface import HuggingFaceEmbedding

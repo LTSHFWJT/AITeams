@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import base64
+import io
+import json
 import sqlite3
 import tempfile
 import time
 import unittest
+import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from aiteams.agent_center.service import AgentCenterService
+from aiteams.agent_center.service import AgentCenterService, DEFAULT_LOCAL_EMBEDDING_MODEL
+from aiteams.api.application import ServiceContainer, WebApplication
 from aiteams.knowledge.service import KnowledgeBaseService
 from aiteams.storage.metadata import MetadataStore
 
@@ -22,6 +27,84 @@ def build_store(root: Path) -> MetadataStore:
         default_project_name="Default Project",
         workspace_root=root,
     )
+
+
+def build_docx_bytes(*paragraphs: str) -> bytes:
+    body = "".join(f"<w:p><w:r><w:t>{paragraph}</w:t></w:r></w:p>" for paragraph in paragraphs)
+    document_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        f"<w:body>{body}</w:body>"
+        "</w:document>"
+    )
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("word/document.xml", document_xml)
+    return buffer.getvalue()
+
+
+def build_pptx_bytes(*slides: str) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for index, slide in enumerate(slides, start=1):
+            slide_xml = (
+                '<?xml version="1.0" encoding="UTF-8"?>'
+                '<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" '
+                'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+                "<p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r>"
+                f"<a:t>{slide}</a:t>"
+                "</a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld>"
+                "</p:sld>"
+            )
+            archive.writestr(f"ppt/slides/slide{index}.xml", slide_xml)
+    return buffer.getvalue()
+
+
+def build_xlsx_bytes(rows: list[list[str]]) -> bytes:
+    shared_strings: list[str] = []
+    shared_indexes: dict[str, int] = {}
+    row_xml: list[str] = []
+    for row_index, row in enumerate(rows, start=1):
+        cell_xml: list[str] = []
+        for column_index, value in enumerate(row, start=1):
+            text = str(value)
+            if text not in shared_indexes:
+                shared_indexes[text] = len(shared_strings)
+                shared_strings.append(text)
+            ref = f"{chr(64 + column_index)}{row_index}"
+            cell_xml.append(f'<c r="{ref}" t="s"><v>{shared_indexes[text]}</v></c>')
+        row_xml.append(f'<row r="{row_index}">{"".join(cell_xml)}</row>')
+    shared_xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        + "".join(f"<si><t>{item}</t></si>" for item in shared_strings)
+        + "</sst>"
+    )
+    sheet_xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        f"<sheetData>{''.join(row_xml)}</sheetData>"
+        "</worksheet>"
+    )
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("xl/sharedStrings.xml", shared_xml)
+        archive.writestr("xl/worksheets/sheet1.xml", sheet_xml)
+    return buffer.getvalue()
+
+
+def build_ipynb_bytes() -> bytes:
+    payload = {
+        "cells": [
+            {"cell_type": "markdown", "source": ["# Heading\n", "alpha"]},
+            {
+                "cell_type": "code",
+                "source": ["print('beta')"],
+                "outputs": [{"text": ["beta\n"]}],
+            },
+        ]
+    }
+    return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
 
 class RetrievalSettingsTests(unittest.TestCase):
@@ -63,7 +146,7 @@ class RetrievalSettingsTests(unittest.TestCase):
             self.assertEqual((migrated or {}).get("name"), "旧知识库")
             self.assertNotIn("description", migrated or {})
 
-    def test_default_retrieval_settings_seed_embedding_bge_m3_and_disable_rerank(self) -> None:
+    def test_default_retrieval_settings_default_to_disabled_modes(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             models_root = root / "models"
@@ -72,18 +155,50 @@ class RetrievalSettingsTests(unittest.TestCase):
             store = build_store(root)
             service = AgentCenterService(store=store, local_models_root=models_root)
 
-            service.ensure_local_model_defaults()
-            service.ensure_retrieval_settings_defaults()
+            try:
+                service.ensure_local_model_defaults()
+                service.ensure_retrieval_settings_defaults()
 
-            settings = service.get_retrieval_settings()["settings"]
-            runtime = service.retrieval_runtime_config()
+                settings = service.get_retrieval_settings()["settings"]
+                runtime = service.retrieval_runtime_config()
 
-            self.assertEqual(settings["embedding"]["mode"], "local")
-            self.assertEqual(settings["embedding"]["model_name"], "BAAI/bge-m3")
-            self.assertEqual(settings["rerank"]["mode"], "disabled")
-            self.assertEqual(runtime["embedding"]["mode"], "local")
-            self.assertEqual(runtime["embedding"]["model_name"], "BAAI/bge-m3")
-            self.assertEqual(runtime["rerank"]["mode"], "disabled")
+                self.assertEqual(settings["embedding"]["mode"], "disabled")
+                self.assertEqual(settings["rerank"]["mode"], "disabled")
+                self.assertEqual(runtime["embedding"]["mode"], "disabled")
+                self.assertEqual(runtime["rerank"]["mode"], "disabled")
+                self.assertNotIn("model_name", settings["embedding"])
+                self.assertNotIn("local_model_id", settings["embedding"])
+            finally:
+                store.close()
+
+    def test_local_model_defaults_include_multilingual_embedding_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            models_root = root / "models"
+            models_root.mkdir(parents=True, exist_ok=True)
+
+            store = build_store(root)
+            service = AgentCenterService(store=store, local_models_root=models_root)
+
+            try:
+                service.ensure_local_model_defaults()
+                models = store.list_local_models()
+                embed = next(
+                    (
+                        item
+                        for item in models
+                        if str(item.get("name") or "") == DEFAULT_LOCAL_EMBEDDING_MODEL
+                        and str(item.get("model_type") or "") == "Embed"
+                    ),
+                    None,
+                )
+                self.assertIsNotNone(embed)
+                self.assertEqual(
+                    str((embed or {}).get("model_path") or ""),
+                    "models/sentence-transformers__paraphrase-multilingual-MiniLM-L12-v2",
+                )
+            finally:
+                store.close()
 
     def test_default_retrieval_settings_do_not_override_existing_records(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
@@ -93,18 +208,91 @@ class RetrievalSettingsTests(unittest.TestCase):
 
             store = build_store(root)
             service = AgentCenterService(store=store, local_models_root=models_root)
-            service.save_retrieval_settings(
-                {
-                    "embedding": {"mode": "disabled"},
-                    "rerank": {"mode": "disabled"},
-                }
+            try:
+                service.save_retrieval_settings(
+                    {
+                        "embedding": {"mode": "disabled"},
+                        "rerank": {"mode": "disabled"},
+                    }
+                )
+
+                service.ensure_retrieval_settings_defaults()
+
+                settings = service.get_retrieval_settings()["settings"]
+                self.assertEqual(settings["embedding"]["mode"], "disabled")
+                self.assertEqual(settings["rerank"]["mode"], "disabled")
+            finally:
+                store.close()
+
+    def test_retrieval_settings_apply_failure_rolls_back_persisted_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = build_store(root)
+            agent_center = AgentCenterService(store=store, local_models_root=root / "models")
+            agent_center.ensure_retrieval_settings_defaults()
+
+            memory_calls: list[dict[str, object]] = []
+            knowledge_calls: list[dict[str, object]] = []
+
+            class FakeMemory:
+                def configure_retrieval(self, settings: dict[str, object] | None = None) -> dict[str, object]:
+                    payload = dict(settings or {})
+                    memory_calls.append(payload)
+                    embedding = dict(payload.get("embedding") or {})
+                    if str(embedding.get("mode") or "") == "local":
+                        raise ValueError("embedding probe failed")
+                    return {"retrieval": payload}
+
+            class FakeKnowledgeBases:
+                def configure_retrieval(self, settings: dict[str, object] | None = None) -> dict[str, object]:
+                    payload = dict(settings or {})
+                    knowledge_calls.append(payload)
+                    return {"retrieval": payload}
+
+                def close(self) -> None:
+                    return None
+
+            class FakePlugins:
+                def close(self) -> None:
+                    return None
+
+            app = WebApplication(
+                ServiceContainer(
+                    store=store,
+                    runtime=SimpleNamespace(agent_kernel=SimpleNamespace(memory=FakeMemory())),
+                    workspace=SimpleNamespace(),
+                    agent_center=agent_center,
+                    plugins=FakePlugins(),
+                    knowledge_bases=FakeKnowledgeBases(),
+                    static_dir=root,
+                    local_models_root=root / "models",
+                )
             )
 
-            service.ensure_retrieval_settings_defaults()
+            try:
+                response = app.handle(
+                    "PUT",
+                    "/api/agent-center/retrieval-settings",
+                    body=json.dumps(
+                        {
+                            "embedding": {"mode": "local", "model_name": "BAAI/bge-m3"},
+                            "rerank": {"mode": "disabled"},
+                        }
+                    ).encode("utf-8"),
+                )
 
-            settings = service.get_retrieval_settings()["settings"]
-            self.assertEqual(settings["embedding"]["mode"], "disabled")
-            self.assertEqual(settings["rerank"]["mode"], "disabled")
+                self.assertEqual(response.status, 400)
+                payload = json.loads(response.body.decode("utf-8"))
+                self.assertIn("rolled back", str(payload.get("detail") or ""))
+                saved = agent_center.get_retrieval_settings()["settings"]
+                self.assertEqual(saved["embedding"]["mode"], "disabled")
+                self.assertEqual(saved["rerank"]["mode"], "disabled")
+                self.assertEqual(len(memory_calls), 2)
+                self.assertEqual(str((memory_calls[-1].get("embedding") or {}).get("mode") or ""), "disabled")
+                self.assertEqual(len(knowledge_calls), 1)
+                self.assertEqual(str((knowledge_calls[-1].get("embedding") or {}).get("mode") or ""), "disabled")
+            finally:
+                app.close()
 
     def test_agent_center_preserves_managed_local_model_runtime_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
@@ -276,6 +464,39 @@ class RetrievalSettingsTests(unittest.TestCase):
             self.assertTrue(service.retrieval_info()["rerank"]["runtime_loaded"])
             self.assertEqual(service.retrieval_info()["embedding"]["vector_dim"], 3)
 
+    def test_knowledge_service_strips_openai_v1_from_ollama_litellm_base_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = build_store(root)
+            service = KnowledgeBaseService(
+                store=store,
+                root_dir=root / "knowledge",
+                retrieval_runtime=None,
+            )
+
+            try:
+                self.assertEqual(
+                    service._resolve_litellm_api_base(
+                        {
+                            "provider_type": "ollama",
+                            "base_url": "http://127.0.0.1:11434/v1",
+                        }
+                    ),
+                    "http://127.0.0.1:11434",
+                )
+                self.assertEqual(
+                    service._resolve_litellm_api_base(
+                        {
+                            "provider_type": "ollama",
+                            "base_url": "http://127.0.0.1:11434",
+                        }
+                    ),
+                    "http://127.0.0.1:11434",
+                )
+            finally:
+                service.close()
+                store.close()
+
     def test_manage_document_embeddings_supports_add_and_delete(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
@@ -317,22 +538,116 @@ class RetrievalSettingsTests(unittest.TestCase):
             def fake_delete_document_vectors(*, knowledge_base_id: str, document_id: str) -> None:
                 deleted_pairs.append((knowledge_base_id, document_id))
 
-            with patch.object(service, "_delete_document_vectors", fake_delete_document_vectors):
-                added = service.manage_document_embeddings("kb-docs", action="add", document_ids=["doc-1"])
-                deleted = service.manage_document_embeddings("kb-docs", action="delete", document_ids=["doc-1"])
+            try:
+                with patch.object(service, "_delete_document_vectors", fake_delete_document_vectors):
+                    added = service.manage_document_embeddings("kb-docs", action="add", document_ids=["doc-1"])
+                    deleted = service.manage_document_embeddings("kb-docs", action="delete", document_ids=["doc-1"])
 
-            self.assertEqual(added["affected_count"], 1)
-            self.assertEqual(added["items"][0]["embedding_status"], "embedded")
-            self.assertGreaterEqual(added["items"][0]["embedded_chunk_count"], 1)
-            self.assertEqual(deleted["affected_count"], 1)
-            self.assertEqual(deleted["items"][0]["embedding_status"], "not_embedded")
-            self.assertEqual(deleted["items"][0]["embedded_chunk_count"], 0)
-            self.assertEqual(deleted_pairs, [("kb-docs", "doc-1")])
-            refreshed = store.get_knowledge_document("doc-1")
-            self.assertIsNotNone(refreshed)
-            refreshed_metadata = dict((refreshed or {}).get("metadata_json") or {})
-            self.assertEqual(refreshed_metadata.get("embedding_status"), "not_embedded")
-            self.assertEqual(int(refreshed_metadata.get("embedded_chunk_count") or 0), 0)
+                self.assertEqual(added["affected_count"], 1)
+                self.assertEqual(added["items"][0]["embedding_status"], "embedded")
+                self.assertGreaterEqual(added["items"][0]["embedded_chunk_count"], 1)
+                self.assertEqual(deleted["affected_count"], 1)
+                self.assertEqual(deleted["items"][0]["embedding_status"], "not_embedded")
+                self.assertEqual(deleted["items"][0]["embedded_chunk_count"], 0)
+                self.assertEqual(deleted_pairs, [("kb-docs", "doc-1")])
+                refreshed = store.get_knowledge_document("doc-1")
+                self.assertIsNotNone(refreshed)
+                refreshed_metadata = dict((refreshed or {}).get("metadata_json") or {})
+                self.assertEqual(refreshed_metadata.get("embedding_status"), "not_embedded")
+                self.assertEqual(int(refreshed_metadata.get("embedded_chunk_count") or 0), 0)
+            finally:
+                service.close()
+                store.close()
+
+    def test_manage_document_embeddings_requires_embed_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = build_store(root)
+            store.save_knowledge_base(
+                knowledge_base_id="kb-docs",
+                key="kb-docs",
+                name="知识库",
+                config={},
+            )
+            store.save_knowledge_document(
+                knowledge_document_id="doc-1",
+                knowledge_base_id="kb-docs",
+                key="doc-1",
+                title="doc.txt",
+                source_path="doc.txt",
+                content_text="alpha beta gamma\n" * 20,
+                metadata={"file_size": 128, "chunk_count": 2, "embedding_status": "not_embedded", "embedded_chunk_count": 0},
+            )
+
+            service = KnowledgeBaseService(
+                store=store,
+                root_dir=root / "knowledge",
+                retrieval_runtime=None,
+            )
+
+            try:
+                with self.assertRaisesRegex(ValueError, "Embed 模型"):
+                    service.manage_document_embeddings("kb-docs", action="add", document_ids=["doc-1"])
+            finally:
+                service.close()
+                store.close()
+
+    def test_manage_document_embeddings_refreshes_embed_configuration_from_loader(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = build_store(root)
+            store.save_knowledge_base(
+                knowledge_base_id="kb-docs",
+                key="kb-docs",
+                name="知识库",
+                config={},
+            )
+            store.save_knowledge_document(
+                knowledge_document_id="doc-1",
+                knowledge_base_id="kb-docs",
+                key="doc-1",
+                title="doc.txt",
+                source_path="doc.txt",
+                content_text="alpha beta gamma\n" * 20,
+                metadata={"file_size": 128, "chunk_count": 2, "embedding_status": "not_embedded", "embedded_chunk_count": 0},
+            )
+
+            agent_center = AgentCenterService(store=store, local_models_root=root / "models")
+            agent_center.save_retrieval_settings(
+                {
+                    "embedding": {"mode": "local", "model_name": "BAAI/bge-m3"},
+                    "rerank": {"mode": "disabled"},
+                }
+            )
+
+            service = KnowledgeBaseService(
+                store=store,
+                root_dir=root / "knowledge",
+                retrieval_runtime=None,
+            )
+            service.set_retrieval_runtime_loader(agent_center.retrieval_runtime_config)
+
+            def fake_ensure_retrieval_loaded() -> None:
+                service._embedding_model = object()
+                service._embedding_dimension = 3
+                service._embedding_runtime = {
+                    "mode": "local",
+                    "backend": "huggingface",
+                    "model_name": "BAAI/bge-m3",
+                    "vector_enabled": True,
+                    "vector_dim": 3,
+                }
+
+            try:
+                with patch.object(service, "_ensure_retrieval_loaded_for_embedding", fake_ensure_retrieval_loaded):
+                    added = service.manage_document_embeddings("kb-docs", action="add", document_ids=["doc-1"])
+
+                self.assertEqual(added["affected_count"], 1)
+                self.assertEqual(added["items"][0]["embedding_status"], "embedded")
+                self.assertEqual(service.retrieval_info()["embedding"]["mode"], "local")
+            finally:
+                service.close()
+                store.close()
 
     def test_manage_document_embeddings_supports_reembed_and_skips_duplicate_add(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
@@ -375,22 +690,118 @@ class RetrievalSettingsTests(unittest.TestCase):
             def fake_delete_document_vectors(*, knowledge_base_id: str, document_id: str) -> None:
                 delete_calls.append((knowledge_base_id, document_id))
 
-            with patch.object(service, "_delete_document_vectors", fake_delete_document_vectors):
-                skipped = service.manage_document_embeddings("kb-docs", action="add", document_ids=["doc-1"])
-                reembedded = service.manage_document_embeddings("kb-docs", action="reembed", document_ids=["doc-1"])
+            try:
+                with patch.object(service, "_delete_document_vectors", fake_delete_document_vectors):
+                    skipped = service.manage_document_embeddings("kb-docs", action="add", document_ids=["doc-1"])
+                    reembedded = service.manage_document_embeddings("kb-docs", action="reembed", document_ids=["doc-1"])
 
-            self.assertEqual(skipped["affected_count"], 0)
-            self.assertEqual(skipped["skipped_count"], 1)
-            self.assertEqual(skipped["skipped"][0]["reason"], "skipped")
-            self.assertEqual(reembedded["affected_count"], 1)
-            self.assertEqual(reembedded["items"][0]["embedding_status"], "embedded")
-            self.assertGreaterEqual(reembedded["items"][0]["embedded_chunk_count"], 1)
-            self.assertEqual(delete_calls, [("kb-docs", "doc-1")])
-            refreshed = store.get_knowledge_document("doc-1")
-            self.assertIsNotNone(refreshed)
-            refreshed_metadata = dict((refreshed or {}).get("metadata_json") or {})
-            self.assertEqual(refreshed_metadata.get("embedding_status"), "embedded")
-            self.assertGreaterEqual(int(refreshed_metadata.get("embedded_chunk_count") or 0), 1)
+                self.assertEqual(skipped["affected_count"], 0)
+                self.assertEqual(skipped["skipped_count"], 1)
+                self.assertEqual(skipped["skipped"][0]["reason"], "skipped")
+                self.assertEqual(reembedded["affected_count"], 1)
+                self.assertEqual(reembedded["items"][0]["embedding_status"], "embedded")
+                self.assertGreaterEqual(reembedded["items"][0]["embedded_chunk_count"], 1)
+                self.assertEqual(delete_calls, [("kb-docs", "doc-1")])
+                refreshed = store.get_knowledge_document("doc-1")
+                self.assertIsNotNone(refreshed)
+                refreshed_metadata = dict((refreshed or {}).get("metadata_json") or {})
+                self.assertEqual(refreshed_metadata.get("embedding_status"), "embedded")
+                self.assertGreaterEqual(int(refreshed_metadata.get("embedded_chunk_count") or 0), 1)
+            finally:
+                service.close()
+                store.close()
+
+    def test_manage_document_embeddings_save_syncs_removed_and_pending_documents(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = build_store(root)
+            store.save_knowledge_base(
+                knowledge_base_id="kb-docs",
+                key="kb-docs",
+                name="知识库",
+                config={},
+            )
+            store.save_knowledge_document(
+                knowledge_document_id="doc-1",
+                knowledge_base_id="kb-docs",
+                key="doc-1",
+                title="embedded.txt",
+                source_path="embedded.txt",
+                content_text="alpha beta gamma\n" * 20,
+                metadata={"file_size": 128, "chunk_count": 2, "embedding_status": "embedded", "embedded_chunk_count": 2},
+            )
+            store.save_knowledge_document(
+                knowledge_document_id="doc-2",
+                knowledge_base_id="kb-docs",
+                key="doc-2",
+                title="pending.txt",
+                source_path="pending.txt",
+                content_text="delta epsilon zeta\n" * 20,
+                metadata={"file_size": 128, "chunk_count": 2, "embedding_status": "not_embedded", "embedded_chunk_count": 0},
+            )
+            store.save_knowledge_document(
+                knowledge_document_id="doc-3",
+                knowledge_base_id="kb-docs",
+                key="doc-3",
+                title="stable.txt",
+                source_path="stable.txt",
+                content_text="theta iota kappa\n" * 20,
+                metadata={"file_size": 128, "chunk_count": 2, "embedding_status": "embedded", "embedded_chunk_count": 2},
+            )
+
+            service = KnowledgeBaseService(
+                store=store,
+                root_dir=root / "knowledge",
+                retrieval_runtime=None,
+            )
+            service._embedding_model = object()
+            service._embedding_dimension = 3
+            service._embedding_runtime = {
+                "mode": "local",
+                "backend": "huggingface",
+                "model_name": "BAAI/bge-m3",
+                "model_label": "BAAI/bge-m3",
+                "vector_enabled": True,
+                "vector_dim": 3,
+            }
+
+            delete_calls: list[tuple[str, str]] = []
+
+            def fake_delete_document_vectors(*, knowledge_base_id: str, document_id: str) -> None:
+                delete_calls.append((knowledge_base_id, document_id))
+
+            try:
+                removed = service.delete_document("doc-1")
+                self.assertIsNotNone(removed)
+                with (
+                    patch.object(service, "_delete_document_vectors", fake_delete_document_vectors),
+                    patch.object(service, "_ensure_retrieval_loaded_for_embedding", lambda: None),
+                ):
+                    synced = service.manage_document_embeddings("kb-docs", action="save", document_ids=[])
+
+                self.assertEqual(synced["action"], "save")
+                self.assertEqual(synced["affected_count"], 2)
+                self.assertEqual(synced["skipped_count"], 0)
+                self.assertEqual(delete_calls, [("kb-docs", "doc-1")])
+                self.assertEqual([item["id"] for item in synced["items"]], ["doc-2"])
+
+                deleted_document = store.get_knowledge_document("doc-1")
+                self.assertIsNone(deleted_document)
+
+                embedded_document = store.get_knowledge_document("doc-2")
+                self.assertIsNotNone(embedded_document)
+                embedded_metadata = dict((embedded_document or {}).get("metadata_json") or {})
+                self.assertEqual(embedded_metadata.get("embedding_status"), "embedded")
+                self.assertGreaterEqual(int(embedded_metadata.get("embedded_chunk_count") or 0), 1)
+
+                stable_document = store.get_knowledge_document("doc-3")
+                self.assertIsNotNone(stable_document)
+                stable_metadata = dict((stable_document or {}).get("metadata_json") or {})
+                self.assertEqual(stable_metadata.get("embedding_status"), "embedded")
+                self.assertEqual(int(stable_metadata.get("embedded_chunk_count") or 0), 2)
+            finally:
+                service.close()
+                store.close()
 
     def test_start_document_embedding_job_persists_progress_and_result(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
@@ -428,26 +839,64 @@ class RetrievalSettingsTests(unittest.TestCase):
                 "vector_dim": 3,
             }
 
-            with patch.object(service, "_ensure_retrieval_loaded_for_embedding", lambda: None):
-                started = service.start_document_embedding_job("kb-docs", action="add", document_ids=["doc-1"])
+            try:
+                with patch.object(service, "_ensure_retrieval_loaded_for_embedding", lambda: None):
+                    started = service.start_document_embedding_job("kb-docs", action="add", document_ids=["doc-1"])
 
-                self.assertFalse(started["reused"])
-                job_id = str(started["job"]["id"] or "")
-                self.assertTrue(job_id)
+                    self.assertFalse(started["reused"])
+                    job_id = str(started["job"]["id"] or "")
+                    self.assertTrue(job_id)
 
-                latest = None
-                for _ in range(100):
-                    latest = service.get_document_embedding_job(job_id)
-                    if latest and latest["status"] in {"completed", "error"}:
-                        break
-                    time.sleep(0.05)
+                    latest = None
+                    for _ in range(100):
+                        latest = service.get_document_embedding_job(job_id)
+                        if latest and latest["status"] in {"completed", "error"}:
+                            break
+                        time.sleep(0.05)
 
-            self.assertIsNotNone(latest)
-            self.assertEqual((latest or {}).get("status"), "completed")
-            self.assertGreaterEqual(float((latest or {}).get("progress_percent") or 0.0), 100.0)
-            result = dict((latest or {}).get("result") or {})
-            self.assertEqual(result.get("affected_count"), 1)
-            self.assertEqual(result.get("action"), "add")
+                self.assertIsNotNone(latest)
+                self.assertEqual((latest or {}).get("status"), "completed")
+                self.assertGreaterEqual(float((latest or {}).get("progress_percent") or 0.0), 100.0)
+                result = dict((latest or {}).get("result") or {})
+                self.assertEqual(result.get("affected_count"), 1)
+                self.assertEqual(result.get("action"), "add")
+            finally:
+                service.close()
+                store.close()
+
+    def test_start_document_embedding_job_requires_embed_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = build_store(root)
+            store.save_knowledge_base(
+                knowledge_base_id="kb-docs",
+                key="kb-docs",
+                name="知识库",
+                config={},
+            )
+            store.save_knowledge_document(
+                knowledge_document_id="doc-1",
+                knowledge_base_id="kb-docs",
+                key="doc-1",
+                title="doc.txt",
+                source_path="doc.txt",
+                content_text="alpha beta gamma\n" * 20,
+                metadata={"file_size": 128, "chunk_count": 2, "embedding_status": "not_embedded", "embedded_chunk_count": 0},
+            )
+
+            service = KnowledgeBaseService(
+                store=store,
+                root_dir=root / "knowledge",
+                retrieval_runtime=None,
+            )
+
+            try:
+                with self.assertRaisesRegex(ValueError, "Embed 模型"):
+                    service.start_document_embedding_job("kb-docs", action="add", document_ids=["doc-1"])
+                self.assertIsNone(store.get_active_knowledge_embedding_job("kb-docs"))
+            finally:
+                service.close()
+                store.close()
 
     def test_list_documents_page_supports_query_status_and_pagination(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
@@ -616,34 +1065,38 @@ class RetrievalSettingsTests(unittest.TestCase):
                 "vector_dim": 3,
             }
 
-            with patch.object(service, "_delete_document_vectors", lambda **_: None), patch.object(
-                service, "_index_document_chunks", lambda **_: 2
-            ):
-                uploaded = service.import_pool_uploaded_files(
-                    {
-                        "files": [
-                            {
-                                "path": "alpha/guide.txt",
-                                "content_base64": base64.b64encode(b"alpha beta gamma\n" * 30).decode("ascii"),
-                            }
-                        ]
-                    }
-                )
-                pool_id = uploaded["items"][0]["id"]
-                added = service.add_pool_documents_to_knowledge_base("kb-docs", pool_document_ids=[pool_id])
-                blocked_delete = service.manage_pool_documents(action="delete", document_ids=[pool_id])
-                kb_document_id = added["items"][0]["id"]
-                service.delete_document(kb_document_id)
-                deleted = service.manage_pool_documents(action="delete", document_ids=[pool_id])
+            try:
+                with patch.object(service, "_delete_document_vectors", lambda **_: None), patch.object(
+                    service, "_index_document_chunks", lambda **_: 2
+                ):
+                    uploaded = service.import_pool_uploaded_files(
+                        {
+                            "files": [
+                                {
+                                    "path": "alpha/guide.txt",
+                                    "content_base64": base64.b64encode(b"alpha beta gamma\n" * 30).decode("ascii"),
+                                }
+                            ]
+                        }
+                    )
+                    pool_id = uploaded["items"][0]["id"]
+                    added = service.add_pool_documents_to_knowledge_base("kb-docs", pool_document_ids=[pool_id])
+                    blocked_delete = service.manage_pool_documents(action="delete", document_ids=[pool_id])
+                    kb_document_id = added["items"][0]["id"]
+                    service.delete_document(kb_document_id)
+                    deleted = service.manage_pool_documents(action="delete", document_ids=[pool_id])
 
-            self.assertEqual(uploaded["imported_count"], 1)
-            self.assertEqual(added["affected_count"], 1)
-            self.assertEqual(added["items"][0]["pool_document_id"], pool_id)
-            self.assertEqual(blocked_delete["affected_count"], 0)
-            self.assertEqual(blocked_delete["skipped_count"], 1)
-            self.assertEqual(blocked_delete["skipped"][0]["reason"], "in-use")
-            self.assertEqual(deleted["affected_count"], 1)
-            self.assertIsNone(store.get_knowledge_pool_document(pool_id))
+                self.assertEqual(uploaded["imported_count"], 1)
+                self.assertEqual(added["affected_count"], 1)
+                self.assertEqual(added["items"][0]["pool_document_id"], pool_id)
+                self.assertEqual(blocked_delete["affected_count"], 0)
+                self.assertEqual(blocked_delete["skipped_count"], 1)
+                self.assertEqual(blocked_delete["skipped"][0]["reason"], "in-use")
+                self.assertEqual(deleted["affected_count"], 1)
+                self.assertIsNone(store.get_knowledge_pool_document(pool_id))
+            finally:
+                service.close()
+                store.close()
 
     def test_pool_upload_deduplicates_blob_storage_for_same_kb(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
@@ -661,28 +1114,194 @@ class RetrievalSettingsTests(unittest.TestCase):
                 retrieval_runtime=None,
             )
 
-            service.import_pool_uploaded_files(
-                {
-                    "knowledge_base_id": "kb-docs",
-                    "files": [
-                        {
-                            "path": "alpha/guide-a.txt",
-                            "content_base64": base64.b64encode(b"same body\n" * 16).decode("ascii"),
-                        }
-                    ],
-                }
+            try:
+                service.import_pool_uploaded_files(
+                    {
+                        "knowledge_base_id": "kb-docs",
+                        "files": [
+                            {
+                                "path": "alpha/guide-a.txt",
+                                "content_base64": base64.b64encode(b"same body\n" * 16).decode("ascii"),
+                            }
+                        ],
+                    }
+                )
+                service.import_pool_uploaded_files(
+                    {
+                        "knowledge_base_id": "kb-docs",
+                        "files": [
+                            {
+                                "path": "beta/guide-b.txt",
+                                "content_base64": base64.b64encode(b"same body\n" * 16).decode("ascii"),
+                            }
+                        ],
+                    }
+                )
+
+                self.assertEqual(len(store.list_knowledge_file_blobs()), 1)
+                self.assertEqual(len(store.list_knowledge_pool_documents(knowledge_base_id="kb-docs")), 1)
+            finally:
+                service.close()
+                store.close()
+
+    def test_pool_upload_extracts_docx_without_textutil(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = build_store(root)
+            store.save_knowledge_base(
+                knowledge_base_id="kb-docs",
+                key="kb-docs",
+                name="知识库",
+                config={},
             )
-            service.import_pool_uploaded_files(
-                {
-                    "knowledge_base_id": "kb-docs",
-                    "files": [
-                        {
-                            "path": "beta/guide-b.txt",
-                            "content_base64": base64.b64encode(b"same body\n" * 16).decode("ascii"),
-                        }
-                    ],
-                }
+            service = KnowledgeBaseService(
+                store=store,
+                root_dir=root / "knowledge",
+                retrieval_runtime=None,
             )
 
-            self.assertEqual(len(store.list_knowledge_file_blobs()), 1)
-            self.assertEqual(len(store.list_knowledge_pool_documents(knowledge_base_id="kb-docs")), 1)
+            try:
+                with patch.object(service, "_extract_with_command", return_value=""):
+                    uploaded = service.import_pool_uploaded_files(
+                        {
+                            "knowledge_base_id": "kb-docs",
+                            "files": [
+                                {
+                                    "path": "docs/guide.docx",
+                                    "content_base64": base64.b64encode(
+                                        build_docx_bytes("alpha paragraph", "beta paragraph")
+                                    ).decode("ascii"),
+                                }
+                            ],
+                        }
+                    )
+
+                self.assertEqual(uploaded["imported_count"], 1)
+                self.assertEqual(uploaded["skipped_count"], 0)
+                self.assertEqual(uploaded["items"][0]["title"], "guide.docx")
+                stored = store.get_knowledge_pool_document(str(uploaded["items"][0]["id"]))
+                self.assertIsNotNone(stored)
+                self.assertIn("alpha paragraph", str((stored or {}).get("content_text") or ""))
+                self.assertIn("beta paragraph", str((stored or {}).get("content_text") or ""))
+                self.assertEqual(dict((stored or {}).get("metadata_json") or {}).get("extension"), ".docx")
+            finally:
+                service.close()
+                store.close()
+
+    def test_pool_upload_extracts_multiple_structured_formats_with_internal_fallbacks(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = build_store(root)
+            store.save_knowledge_base(
+                knowledge_base_id="kb-docs",
+                key="kb-docs",
+                name="知识库",
+                config={},
+            )
+            service = KnowledgeBaseService(
+                store=store,
+                root_dir=root / "knowledge",
+                retrieval_runtime=None,
+            )
+
+            try:
+                with (
+                    patch.object(service, "_extract_with_llama_reader", return_value=""),
+                    patch.object(service, "_extract_with_office_converter", return_value=""),
+                ):
+                    uploaded = service.import_pool_uploaded_files(
+                        {
+                            "knowledge_base_id": "kb-docs",
+                            "files": [
+                                {
+                                    "path": "docs/deck.pptx",
+                                    "content_base64": base64.b64encode(
+                                        build_pptx_bytes("slide alpha", "slide beta")
+                                    ).decode("ascii"),
+                                },
+                                {
+                                    "path": "docs/table.xlsx",
+                                    "content_base64": base64.b64encode(
+                                        build_xlsx_bytes([["name", "score"], ["alice", "100"]])
+                                    ).decode("ascii"),
+                                },
+                                {
+                                    "path": "docs/notebook.ipynb",
+                                    "content_base64": base64.b64encode(build_ipynb_bytes()).decode("ascii"),
+                                },
+                                {
+                                    "path": "docs/sample.rtf",
+                                    "content_base64": base64.b64encode(
+                                        b"{\\rtf1\\ansi hello \\b world\\b0}"
+                                    ).decode("ascii"),
+                                },
+                                {
+                                    "path": "docs/table.csv",
+                                    "content_base64": base64.b64encode(
+                                        "name,score\nalice,100\n".encode("utf-8")
+                                    ).decode("ascii"),
+                                },
+                            ],
+                        }
+                    )
+
+                self.assertEqual(uploaded["imported_count"], 5)
+                self.assertEqual(uploaded["skipped_count"], 0)
+
+                stored_by_title = {
+                    str(item.get("title") or ""): store.get_knowledge_pool_document(str(item.get("id") or ""))
+                    for item in uploaded["items"]
+                }
+                self.assertIn("slide alpha", str((stored_by_title["deck.pptx"] or {}).get("content_text") or ""))
+                self.assertIn("Sheet 1", str((stored_by_title["table.xlsx"] or {}).get("content_text") or ""))
+                self.assertIn("alice", str((stored_by_title["table.xlsx"] or {}).get("content_text") or ""))
+                self.assertIn("Heading", str((stored_by_title["notebook.ipynb"] or {}).get("content_text") or ""))
+                self.assertIn("beta", str((stored_by_title["notebook.ipynb"] or {}).get("content_text") or ""))
+                self.assertIn("hello world", str((stored_by_title["sample.rtf"] or {}).get("content_text") or ""))
+                self.assertIn("name, score", str((stored_by_title["table.csv"] or {}).get("content_text") or ""))
+                self.assertEqual(dict((stored_by_title["deck.pptx"] or {}).get("metadata_json") or {}).get("extension"), ".pptx")
+                self.assertEqual(dict((stored_by_title["table.xlsx"] or {}).get("metadata_json") or {}).get("extension"), ".xlsx")
+                self.assertEqual(dict((stored_by_title["notebook.ipynb"] or {}).get("metadata_json") or {}).get("extension"), ".ipynb")
+                self.assertEqual(dict((stored_by_title["sample.rtf"] or {}).get("metadata_json") or {}).get("content_type"), "application/rtf")
+                self.assertEqual(dict((stored_by_title["table.csv"] or {}).get("metadata_json") or {}).get("content_type"), "text/csv")
+            finally:
+                service.close()
+                store.close()
+
+    def test_pool_upload_skipped_items_include_title(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            store = build_store(root)
+            store.save_knowledge_base(
+                knowledge_base_id="kb-docs",
+                key="kb-docs",
+                name="知识库",
+                config={},
+            )
+            service = KnowledgeBaseService(
+                store=store,
+                root_dir=root / "knowledge",
+                retrieval_runtime=None,
+            )
+
+            try:
+                with patch.object(service, "_store_uploaded_file_to_pool", side_effect=ValueError("当前环境不支持该 Office 文档的文本提取。")):
+                    result = service.import_pool_uploaded_files(
+                        {
+                            "knowledge_base_id": "kb-docs",
+                            "files": [
+                                {
+                                    "path": "docs/report.docx",
+                                    "content_base64": base64.b64encode(b"placeholder").decode("ascii"),
+                                }
+                            ],
+                        }
+                    )
+
+                self.assertEqual(result["imported_count"], 0)
+                self.assertEqual(result["skipped_count"], 1)
+                self.assertEqual(result["skipped"][0]["title"], "report.docx")
+                self.assertEqual(result["skipped"][0]["path"], "docs/report.docx")
+            finally:
+                service.close()
+                store.close()

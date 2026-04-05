@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -9,12 +8,13 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command
 from langchain_core.messages import AIMessageChunk, HumanMessage
 from langchain_core.runnables import RunnableLambda
-from langchain_core.tools import StructuredTool
+from langchain_core.tools import BaseTool, StructuredTool
 
 from aiteams.agent.kernel import AgentKernel
 from aiteams.common import events as event_types
 from aiteams.deepagents.builder import AgentLeafCompiler, DynamicTeamBuilder, TeamCompositeCompiler
 from aiteams.memory.scope import MemoryScopes
+from aiteams.plugins import build_plugin_base_tool
 from aiteams.plugins.manager import (
     BUILTIN_HUMAN_ESCALATE_PLUGIN_KEY,
     BUILTIN_KB_RETRIEVE_PLUGIN_KEY,
@@ -390,8 +390,8 @@ class DeepAgentsTeamRuntime:
         team_definition_id: str,
         workspace_id: str,
         project_id: str,
-    ) -> list[Any]:
-        tools: list[Any] = []
+    ) -> list[BaseTool]:
+        tools: list[BaseTool] = []
         memory = self.agent_kernel.memory
         scopes = MemoryScopes(
             workspace_id=workspace_id,
@@ -456,7 +456,7 @@ class DeepAgentsTeamRuntime:
                 StructuredTool.from_function(
                     name="knowledge_search",
                     coroutine=_knowledge_search,
-                    description="Retrieve relevant knowledge base documents bound to this agent.",
+                    description="Query the knowledge bases bound to this agent and return grounded source snippets.",
                 )
             )
         for plugin in list(executor.get("plugins") or []):
@@ -469,20 +469,16 @@ class DeepAgentsTeamRuntime:
                 continue
             manifest = dict(plugin.get("manifest_json") or plugin.get("manifest") or {})
             for action in list(manifest.get("actions") or []):
-                action_name = str((action or {}).get("name") or "").strip()
+                action = dict(action or {})
+                action_name = str(action.get("name") or "").strip()
                 if not action_name:
                     continue
-                tool_name = f"plugin_{str(plugin.get('key') or 'plugin').replace('.', '_')}_{action_name}"
-
-                async def _invoke_plugin(payload_json: str = "{}", *, _plugin=plugin, _action=action_name) -> str:
-                    try:
-                        payload = json.loads(payload_json) if payload_json.strip() else {}
-                    except json.JSONDecodeError as exc:
-                        return f"Invalid payload_json: {exc}"
+                fallback_tool_name = f"plugin_{str(plugin.get('key') or 'plugin').replace('.', '_')}_{action_name}"
+                def _invoke_plugin_payload(payload: dict[str, Any], *, _plugin=plugin, _action=action_name) -> str:
                     result = self.agent_kernel.plugin_manager.invoke_plugin(
                         _plugin,
                         action=_action,
-                        payload=payload if isinstance(payload, dict) else {"value": payload},
+                        payload=payload,
                         context={
                             "workspace_id": workspace_id,
                             "project_id": project_id,
@@ -496,10 +492,11 @@ class DeepAgentsTeamRuntime:
                     return pretty_json(result)
 
                 tools.append(
-                    StructuredTool.from_function(
-                        name=tool_name,
-                        coroutine=_invoke_plugin,
-                        description=f"Invoke plugin `{plugin.get('key')}` action `{action_name}` with JSON payload.",
+                    _build_plugin_base_tool(
+                        plugin_key=str(plugin.get("key") or "plugin"),
+                        action=action,
+                        fallback_tool_name=fallback_tool_name,
+                        invoker=_invoke_plugin_payload,
                     )
                 )
         return tools

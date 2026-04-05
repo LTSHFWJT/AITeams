@@ -7,7 +7,7 @@ import threading
 from pathlib import Path
 from typing import Any, Sequence
 
-from aiteams.utils import json_dumps, json_loads, make_id, make_uuid7, trim_text, utcnow_iso
+from aiteams.utils import json_dumps, json_loads, make_id, make_uuid7, slugify, trim_text, utcnow_iso
 
 
 SEARCH_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]")
@@ -199,25 +199,8 @@ SCHEMA = [
     """
     CREATE TABLE IF NOT EXISTS plugins (
         id TEXT PRIMARY KEY,
-        key TEXT NOT NULL,
         name TEXT NOT NULL,
-        version TEXT NOT NULL,
-        plugin_type TEXT NOT NULL,
-        description TEXT,
-        manifest_json TEXT NOT NULL DEFAULT '{}',
-        config_json TEXT NOT NULL DEFAULT '{}',
-        install_path TEXT,
-        status TEXT NOT NULL DEFAULT 'active',
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS plugin_secrets (
-        plugin_id TEXT PRIMARY KEY,
-        secret_json TEXT NOT NULL DEFAULT '{}',
-        updated_at TEXT NOT NULL,
-        FOREIGN KEY(plugin_id) REFERENCES plugins(id) ON DELETE CASCADE
+        install_path TEXT
     )
     """,
     """
@@ -470,7 +453,6 @@ SCHEMA = [
     "CREATE INDEX IF NOT EXISTS idx_events_run ON run_events(run_id, created_at ASC)",
     "CREATE INDEX IF NOT EXISTS idx_approvals_run ON approvals(run_id, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_artifacts_run ON artifacts(run_id, created_at DESC)",
-    "CREATE UNIQUE INDEX IF NOT EXISTS idx_plugins_key_version ON plugins(key, version)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_skills_name ON skills(name)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_groups_key ON skill_groups(key)",
     "CREATE INDEX IF NOT EXISTS idx_skill_group_members_group ON skill_group_members(skill_group_id, updated_at DESC)",
@@ -541,17 +523,7 @@ class MetadataStore:
         self.ensure_defaults()
 
     def _apply_migrations(self) -> None:
-        self._ensure_column("plugins", "config_json", "TEXT NOT NULL DEFAULT '{}'")
-        self._connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS plugin_secrets (
-                plugin_id TEXT PRIMARY KEY,
-                secret_json TEXT NOT NULL DEFAULT '{}',
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY(plugin_id) REFERENCES plugins(id) ON DELETE CASCADE
-            )
-            """
-        )
+        self._migrate_plugins_table()
         self._connection.execute(
             """
             CREATE TABLE IF NOT EXISTS skill_groups (
@@ -572,6 +544,8 @@ class MetadataStore:
         self._connection.execute("DROP INDEX IF EXISTS idx_agent_templates_role")
         self._connection.execute("DROP INDEX IF EXISTS idx_skills_key_version")
         self._connection.execute("DROP INDEX IF EXISTS idx_skill_groups_sort")
+        self._connection.execute("DROP INDEX IF EXISTS idx_plugins_key_version")
+        self._connection.execute("DROP TABLE IF EXISTS plugin_secrets")
         self._connection.execute("DROP TABLE IF EXISTS agent_templates")
         self._connection.execute("DROP INDEX IF EXISTS idx_memory_profiles_key_version")
         self._connection.execute("DROP INDEX IF EXISTS idx_memory_profiles_updated")
@@ -594,6 +568,39 @@ class MetadataStore:
             )
             """
         )
+
+    def _migrate_plugins_table(self) -> None:
+        if not self._table_exists("plugins"):
+            return
+        columns = {str(row["name"]) for row in self.fetch_all("PRAGMA table_info(plugins)")}
+        desired_columns = {"id", "name", "install_path"}
+        if columns == desired_columns:
+            return
+        legacy_order = "created_at ASC, id ASC" if "created_at" in columns else "id ASC"
+        legacy_rows = self.fetch_all(f"SELECT * FROM plugins ORDER BY {legacy_order}")
+        self._connection.execute("DROP TABLE IF EXISTS plugins__new")
+        self._connection.execute(
+            """
+            CREATE TABLE plugins__new (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                install_path TEXT
+            )
+            """
+        )
+        for row in legacy_rows:
+            record_id = str(row.get("id") or "").strip() or make_uuid7()
+            name = trim_text(str(row.get("name") or row.get("key") or "").strip(), limit=255) or record_id
+            install_path = str(row.get("install_path") or "").strip() or None
+            self._connection.execute(
+                """
+                INSERT INTO plugins__new(id, name, install_path)
+                VALUES (?, ?, ?)
+                """,
+                (record_id, name, install_path),
+            )
+        self._connection.execute("DROP TABLE plugins")
+        self._connection.execute("ALTER TABLE plugins__new RENAME TO plugins")
 
     def _normalize_skill_storage_path(self, raw_path: Any) -> str:
         text = str(raw_path or "").replace("\\", "/").strip()
@@ -1379,79 +1386,56 @@ class MetadataStore:
         status: str = "active",
     ) -> dict[str, Any]:
         record_id = plugin_id or make_uuid7()
-        now = utcnow_iso()
+        normalized_name = trim_text(name, limit=255)
+        normalized_install_path = str(install_path or "").strip() or None
+        if not normalized_name:
+            raise ValueError("Plugin name is required.")
         self.execute(
             """
-            INSERT INTO plugins(id, key, name, version, plugin_type, description, manifest_json, config_json, install_path, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM plugins WHERE id = ?), ?), ?)
+            INSERT INTO plugins(id, name, install_path)
+            VALUES (?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
-                key = excluded.key,
                 name = excluded.name,
-                version = excluded.version,
-                plugin_type = excluded.plugin_type,
-                description = excluded.description,
-                manifest_json = excluded.manifest_json,
-                config_json = excluded.config_json,
-                install_path = excluded.install_path,
-                status = excluded.status,
-                updated_at = excluded.updated_at
+                install_path = excluded.install_path
             """,
             (
                 record_id,
-                key,
-                name,
-                version,
-                plugin_type,
-                description,
-                json_dumps(manifest),
-                json_dumps(dict(config or {})),
-                install_path,
-                status,
-                record_id,
-                now,
-                now,
+                normalized_name,
+                normalized_install_path,
             ),
         )
-        if secret is not None:
-            normalized_secret = {
-                str(field): value
-                for field, value in dict(secret or {}).items()
-                if str(field).strip() and value not in (None, "")
-            }
-            if normalized_secret:
-                self.execute(
-                    """
-                    INSERT INTO plugin_secrets(plugin_id, secret_json, updated_at)
-                    VALUES (?, ?, ?)
-                    ON CONFLICT(plugin_id) DO UPDATE SET
-                        secret_json = excluded.secret_json,
-                        updated_at = excluded.updated_at
-                    """,
-                    (record_id, json_dumps(normalized_secret), now),
-                )
-            else:
-                self.execute("DELETE FROM plugin_secrets WHERE plugin_id = ?", (record_id,))
         plugin = self.get_plugin(record_id)
         assert plugin is not None
         return plugin
 
     def get_plugin(self, plugin_id: str, *, include_secret: bool = False) -> dict[str, Any] | None:
-        return self._attach_plugin_secret(
-            self._deserialize(self.fetch_one("SELECT * FROM plugins WHERE id = ?", (plugin_id,))),
-            include_secret=include_secret,
-        )
+        plugin = self._deserialize(self.fetch_one("SELECT * FROM plugins WHERE id = ?", (plugin_id,)))
+        if plugin is None and str(plugin_id or "").startswith("catalog:"):
+            plugin = self._catalog_plugin_record(key=str(plugin_id).split(":", 1)[-1], record_id=str(plugin_id))
+        return self._attach_plugin_runtime_metadata(plugin, include_secret=include_secret)
 
     def get_plugin_by_key(self, key: str, *, include_secret: bool = False) -> dict[str, Any] | None:
-        row = self.fetch_one("SELECT * FROM plugins WHERE key = ? ORDER BY updated_at DESC LIMIT 1", (key,))
-        return self._attach_plugin_secret(self._deserialize(row), include_secret=include_secret)
+        normalized_key = str(key or "").strip()
+        if not normalized_key:
+            return None
+        for item in self.list_plugins(include_secret=include_secret):
+            if str(item.get("key") or "").strip() == normalized_key:
+                return item
+        catalog = self._catalog_plugin_record(key=normalized_key)
+        if catalog is not None:
+            return self._attach_plugin_runtime_metadata(catalog, include_secret=include_secret)
+        return None
 
     def list_plugins(self, *, include_secret: bool = False) -> list[dict[str, Any]]:
-        return [self._attach_plugin_secret(item, include_secret=include_secret) for item in self._deserialize_many(self.fetch_all("SELECT * FROM plugins ORDER BY updated_at DESC"))]
+        return [
+            self._attach_plugin_runtime_metadata(item, include_secret=include_secret)
+            for item in self._deserialize_many(self.fetch_all("SELECT * FROM plugins ORDER BY id DESC"))
+        ]
 
     def list_plugins_page(self, *, limit: int | None = None, offset: int = 0, include_secret: bool = False) -> dict[str, Any]:
         total = int((self.fetch_one("SELECT COUNT(*) AS count FROM plugins") or {}).get("count", 0) or 0)
         safe_offset = max(0, int(offset or 0))
-        sql = "SELECT * FROM plugins ORDER BY updated_at DESC"
+        sql = "SELECT * FROM plugins ORDER BY id DESC"
         params: list[Any] = []
         if limit is not None:
             safe_limit = max(1, int(limit))
@@ -1461,7 +1445,7 @@ class MetadataStore:
             safe_limit = total or 0
         return {
             "items": [
-                self._attach_plugin_secret(item, include_secret=include_secret)
+                self._attach_plugin_runtime_metadata(item, include_secret=include_secret)
                 for item in self._deserialize_many(self.fetch_all(sql, tuple(params)))
             ],
             "total": total,
@@ -1469,17 +1453,106 @@ class MetadataStore:
             "limit": safe_limit,
         }
 
-    def _attach_plugin_secret(self, plugin: dict[str, Any] | None, *, include_secret: bool) -> dict[str, Any] | None:
+    def delete_plugin(self, plugin_id: str) -> dict[str, Any] | None:
+        existing = self._deserialize(self.fetch_one("SELECT * FROM plugins WHERE id = ?", (plugin_id,)))
+        if existing is None:
+            return None
+        self.execute("DELETE FROM plugins WHERE id = ?", (plugin_id,))
+        return existing
+
+    def _plugin_manifest_from_install_path(self, install_path: str | None) -> dict[str, Any]:
+        raw_path = str(install_path or "").strip()
+        if not raw_path or "://" in raw_path:
+            return {}
+        try:
+            from aiteams.plugins.manifest import load_plugin_manifest
+
+            root = Path(raw_path).expanduser().resolve()
+            manifest_path = root / "plugin.yaml"
+            if not manifest_path.exists():
+                return {}
+            return dict(load_plugin_manifest(root) or {})
+        except Exception:
+            return {}
+
+    def _catalog_plugin_definition(self, *, key: str = "", name: str = "") -> dict[str, Any] | None:
+        normalized_key = str(key or "").strip()
+        normalized_name = str(name or "").strip()
+        try:
+            from aiteams.agent_center.defaults import default_plugins
+        except Exception:
+            return None
+        for plugin in default_plugins():
+            plugin_key = str(plugin.get("key") or "").strip()
+            plugin_name = str(plugin.get("name") or "").strip()
+            if normalized_key and plugin_key == normalized_key:
+                return dict(plugin)
+            if normalized_name and normalized_name in {plugin_name, plugin_key}:
+                return dict(plugin)
+        return None
+
+    def _catalog_plugin_record(self, *, key: str = "", name: str = "", record_id: str | None = None) -> dict[str, Any] | None:
+        definition = self._catalog_plugin_definition(key=key, name=name)
+        if definition is None:
+            return None
+        plugin_key = str(definition.get("key") or "").strip()
+        manifest = dict(definition.get("manifest") or {})
+        description = str(definition.get("description") or manifest.get("description") or "").strip()
+        return {
+            "id": str(record_id or f"catalog:{plugin_key}"),
+            "name": str(definition.get("name") or plugin_key),
+            "install_path": None,
+            "key": plugin_key,
+            "version": str(definition.get("version") or "v1"),
+            "plugin_type": str(definition.get("plugin_type") or "toolset"),
+            "description": description,
+            "manifest_json": {
+                **manifest,
+                "key": plugin_key,
+                "name": str(definition.get("name") or plugin_key),
+                "version": str(definition.get("version") or "v1"),
+                "plugin_type": str(definition.get("plugin_type") or "toolset"),
+                "description": str(manifest.get("description") or description),
+            },
+            "config_json": {},
+            "status": "catalog",
+        }
+
+    def _attach_plugin_runtime_metadata(self, plugin: dict[str, Any] | None, *, include_secret: bool) -> dict[str, Any] | None:
         if plugin is None:
             return None
-        secret_row = self._deserialize(self.fetch_one("SELECT * FROM plugin_secrets WHERE plugin_id = ?", (plugin["id"],)))
-        secret = dict((secret_row or {}).get("secret_json") or {})
         item = dict(plugin)
-        item["has_secret"] = bool(secret)
-        item["secret_field_keys"] = sorted(str(key) for key in secret.keys() if str(key).strip())
-        item["secret_field_paths"] = sorted(self._flatten_object_paths(secret))
+        install_path = str(item.get("install_path") or "").strip()
+        manifest = self._plugin_manifest_from_install_path(install_path)
+        if not manifest:
+            catalog_key = install_path.split("://", 1)[-1] if install_path.startswith("catalog://") else ""
+            catalog = self._catalog_plugin_record(
+                key=catalog_key,
+                name=str(item.get("name") or ""),
+                record_id=str(item.get("id") or ""),
+            )
+            if catalog is not None:
+                manifest = dict(catalog.get("manifest_json") or {})
+                item.setdefault("key", catalog.get("key"))
+                item.setdefault("version", catalog.get("version"))
+                item.setdefault("plugin_type", catalog.get("plugin_type"))
+                item.setdefault("description", catalog.get("description"))
+        key = str(manifest.get("key") or item.get("key") or slugify(item.get("name") or "", fallback="plugin")).strip()
+        version = str(manifest.get("version") or item.get("version") or "v1").strip() or "v1"
+        plugin_type = str(manifest.get("plugin_type") or item.get("plugin_type") or "toolset").strip() or "toolset"
+        description = str(manifest.get("description") or item.get("description") or "").strip()
+        item["key"] = key
+        item["version"] = version
+        item["plugin_type"] = plugin_type
+        item["description"] = description
+        item["manifest_json"] = manifest
+        item["config_json"] = {}
+        item["status"] = str(item.get("status") or ("installed" if install_path else "active"))
+        item["has_secret"] = False
+        item["secret_field_keys"] = []
+        item["secret_field_paths"] = []
         if include_secret:
-            item["secret_json"] = secret
+            item["secret_json"] = {}
         return item
 
     def _flatten_object_paths(self, payload: dict[str, Any], prefix: str = "") -> list[str]:

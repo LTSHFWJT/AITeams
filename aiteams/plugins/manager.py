@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from aiteams.memory.scope import Scope
+from aiteams.plugins.builtin import KnowledgeBaseQueryBuiltinPlugin
 from aiteams.plugins.manifest import PLUGIN_MANIFEST, validate_plugin_package
 from aiteams.plugins.sandbox import PluginSandbox
 from aiteams.storage.metadata import MetadataStore
@@ -48,9 +49,11 @@ BUILTIN_PLUGIN_DESCRIPTORS: dict[str, dict[str, Any]] = {
     },
     BUILTIN_KB_RETRIEVE_PLUGIN_KEY: {
         "key": BUILTIN_KB_RETRIEVE_PLUGIN_KEY,
+        "name": "Knowledge Base Query",
+        "description": "Query bound knowledge bases through the built-in LlamaIndex query engine.",
         "tools": ["knowledge_search"],
         "permissions": ["readonly"],
-        "actions": [{"name": "retrieve", "description": "Retrieve relevant documents from bound knowledge bases."}],
+        "actions": [{"name": "retrieve", "description": "Query bound knowledge bases and return grounded source nodes."}],
     },
     BUILTIN_TEAM_MESSAGE_SEND_PLUGIN_KEY: {
         "key": BUILTIN_TEAM_MESSAGE_SEND_PLUGIN_KEY,
@@ -132,11 +135,13 @@ class PluginManager:
         source_path = plugin.get("install_path")
         if not source_path:
             raise ValueError("Plugin install_path is required for installation.")
-        manifest = validate_plugin_package(source_path)
+        source = Path(source_path).expanduser().resolve()
+        manifest = validate_plugin_package(source)
         target = self.install_root / manifest["key"] / manifest["version"]
-        if target.exists():
-            shutil.rmtree(target)
-        shutil.copytree(Path(source_path).expanduser().resolve(), target)
+        if source != target:
+            if target.exists():
+                shutil.rmtree(target)
+            shutil.copytree(source, target)
         installed_manifest = validate_plugin_package(target)
         saved = self.store.save_plugin(
             plugin_id=str(plugin["id"]),
@@ -180,6 +185,41 @@ class PluginManager:
             "status": "running",
             "health": sandbox.health(),
             "runtime": sandbox.snapshot(),
+        }
+
+    def delete_plugin(self, plugin_id: str) -> dict[str, Any]:
+        plugin = self._require_plugin(plugin_id)
+        sandbox = self._sandboxes.pop(str(plugin["id"]), None)
+        if sandbox is not None:
+            sandbox.stop()
+
+        removed_install_path: str | None = None
+        install_path = str(plugin.get("install_path") or "").strip()
+        if install_path:
+            root = Path(install_path).expanduser().resolve()
+            deletable_root: Path | None = root
+            try:
+                root.relative_to(self.install_root)
+            except ValueError:
+                deletable_root = None
+            if deletable_root is not None and deletable_root.exists():
+                shutil.rmtree(deletable_root)
+                removed_install_path = str(deletable_root)
+                parent = deletable_root.parent
+                while parent != self.install_root and parent.exists():
+                    try:
+                        parent.rmdir()
+                    except OSError:
+                        break
+                    parent = parent.parent
+
+        deleted = self.store.delete_plugin(plugin_id)
+        if deleted is None:
+            raise ValueError("Plugin does not exist.")
+        return {
+            "deleted": True,
+            "plugin": plugin,
+            "removed_install_path": removed_install_path,
         }
 
     def snapshot(self, plugin_id: str) -> dict[str, Any]:
@@ -344,40 +384,15 @@ class PluginManager:
                 runtime=dict(context.get("memory_runtime") or {}),
             )
         if plugin_key == BUILTIN_KB_RETRIEVE_PLUGIN_KEY:
-            if action != "retrieve":
-                raise ValueError(f"Builtin plugin `{plugin_key}` does not support action `{action}`.")
-            knowledge_bases = list(payload.get("knowledge_bases") or plugin_ref.get("knowledge_bases") or context.get("knowledge_bases") or [])
-            knowledge_base_ids = [str(item.get("id") or "") for item in knowledge_bases if str(item.get("id") or "").strip()]
-            knowledge_base_keys = [str(item.get("key") or "") for item in knowledge_bases if str(item.get("key") or "").strip()]
-            query = str(payload.get("query") or "").strip()
-            limit = max(1, int(payload.get("limit", 4) or 4))
-            if self.knowledge_bases is not None:
-                items = self.knowledge_bases.search(
-                    query=query,
-                    knowledge_base_ids=knowledge_base_ids or None,
-                    knowledge_base_keys=knowledge_base_keys or None,
-                    limit=limit,
-                )
-            else:
-                items = self.store.search_knowledge_documents(
-                    query=query,
-                    knowledge_base_ids=knowledge_base_ids or None,
-                    knowledge_base_keys=knowledge_base_keys or None,
-                    limit=limit,
-                )
-            return {
-                "query": query,
-                "count": len(items),
-                "items": items,
-                "knowledge_bases": [
-                    {
-                        "id": item.get("id"),
-                        "key": item.get("key"),
-                        "name": item.get("name"),
-                    }
-                    for item in knowledge_bases
-                ],
-            }
+            return KnowledgeBaseQueryBuiltinPlugin(
+                store=self.store,
+                knowledge_bases=self.knowledge_bases,
+            ).invoke(
+                action=action,
+                payload=payload,
+                context=context,
+                plugin_ref=plugin_ref,
+            )
         if plugin_key == BUILTIN_TEAM_MESSAGE_SEND_PLUGIN_KEY:
             if action != "send":
                 raise ValueError(f"Builtin plugin `{plugin_key}` does not support action `{action}`.")

@@ -280,7 +280,7 @@
               </div>
               <form id="local-model-form" class="form resource-editor-form">
                 <div class="form-grid two">
-                  <label><span>名称</span><input id="local-model-name" placeholder="BAAI bge-m3 本地模型" /></label>
+                  <label><span>名称</span><input id="local-model-name" placeholder="sentence-transformers paraphrase-multilingual-MiniLM-L12-v2 本地模型" /></label>
                   <label>
                     <span>类型</span>
                     <select id="local-model-type">
@@ -433,14 +433,13 @@
             <div class="page-grid resource-page-grid">
               <section class="panel panel-wide">
                 <div class="resource-toolbar">
-                  <button id="plugin-open-create" type="button">新增</button>
+                  <button id="plugin-open-create" type="button">新增 / 导入</button>
                 </div>
                 <div class="resource-list-head plugin-list-head">
-                  <span>插件</span>
-                  <span>版本</span>
-                  <span>Workbench</span>
-                  <span>运行状态</span>
-                  <span>操作</span>
+                  <span>&#x63d2;&#x4ef6;</span>
+                  <span>&#x8bf4;&#x660e;</span>
+                  <span>&#x52a8;&#x4f5c;</span>
+                  <span>&#x64cd;&#x4f5c;</span>
                 </div>
                 <div id="plugin-list" class="resource-list"></div>
                 <div class="provider-pagination">
@@ -462,36 +461,61 @@
               <div class="modal-backdrop" data-plugin-modal-close></div>
               <section class="modal-card resource-modal-card">
                 <div class="modal-head">
-                  <h3 id="plugin-modal-title">新增插件</h3>
+                  <h3 id="plugin-modal-title">编辑插件</h3>
                 </div>
                 <form id="plugin-form" class="form resource-editor-form">
-                  <div class="form-grid two">
-                    <label>
-                      <span>插件包标识 / Slug</span>
-                      <input id="plugin-key" placeholder="research_kit" />
-                      <small class="field-note">用于插件包、安装目录和运行时引用，不作为展示名称。</small>
-                    </label>
+                  <div class="form-grid">
                     <label><span>名称</span><input id="plugin-name" placeholder="研究工具集" /></label>
-                    <label><span>版本</span><input id="plugin-version" value="v1" /></label>
-                    <label><span>类型</span><input id="plugin-type" value="toolset" /></label>
-                    <label><span>Workbench 标识</span><input id="plugin-workbench-key" placeholder="research" /></label>
-                    <label><span>安装路径</span><input id="plugin-install-path" placeholder="本地插件目录" /></label>
                   </div>
-                  <label><span>工具</span><input id="plugin-tools" placeholder="search, docs" /></label>
-                  <label><span>权限</span><input id="plugin-permissions" placeholder="readonly, network_limited" /></label>
                   <label><span>说明</span><textarea id="plugin-description" rows="3" placeholder="简短说明"></textarea></label>
-                  <section id="plugin-config-panel" class="retrieval-block">
-                    <div class="retrieval-block-head">
-                      <h4>运行配置</h4>
-                      <p id="plugin-config-hint" class="field-note">从插件包 `config_schema` 渲染。修改后会在插件下次加载或当前运行实例重载时生效。</p>
-                    </div>
-                    <div id="plugin-config-schema-empty" class="detail empty compact-detail">当前插件未声明 `config_schema`，无需额外运行配置。</div>
-                    <div id="plugin-config-form" class="form"></div>
-                  </section>
                   <pre id="plugin-modal-result" class="result hidden"></pre>
                   <div class="modal-actions">
                     <button id="plugin-cancel" type="button" class="ghost">取消</button>
                     <button id="plugin-save" type="submit">保存</button>
+                  </div>
+                </form>
+              </section>
+            </div>
+
+            <div id="plugin-import-modal" class="modal-shell hidden">
+              <div class="modal-backdrop" data-plugin-import-modal-close></div>
+              <section class="modal-card resource-modal-card skill-modal-card">
+                <div class="modal-head">
+                  <h3 id="plugin-import-modal-title">新增 / 导入插件</h3>
+                </div>
+                <form id="plugin-import-form" class="form resource-editor-form">
+                  <div id="plugin-import-panel" class="skill-import-panel">
+                    <input id="plugin-import-directory-input" type="file" class="hidden" aria-hidden="true" tabindex="-1" webkitdirectory directory multiple />
+                    <div
+                      id="plugin-import-dropzone"
+                      class="skill-import-dropzone"
+                      role="button"
+                      tabindex="0"
+                      aria-label="点击选择插件目录，或将插件目录拖到这里"
+                    >
+                      <div class="skill-import-dropzone-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none">
+                          <path d="M12 15.5V7.25" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+                          <path d="M8.75 10.5 12 7.25l3.25 3.25" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+                          <path d="M8 17.25h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+                          <path d="M7.5 19.5h9a4.5 4.5 0 0 0 1-8.89A6 6 0 0 0 6.32 9.2 4 4 0 0 0 7.5 19.5Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"></path>
+                        </svg>
+                      </div>
+                      <strong id="plugin-import-dropzone-title">点击上传插件目录</strong>
+                      <span id="plugin-import-dropzone-hint">支持单个插件目录，或包含多个插件目录的集合目录</span>
+                      <span id="plugin-import-dropzone-trigger" class="skill-import-dropzone-trigger">选择文件夹</span>
+                    </div>
+                    <div id="plugin-import-selection" class="skill-import-selection empty" aria-live="polite">
+                      <span class="skill-import-selection-placeholder">未选择文件夹</span>
+                    </div>
+                  </div>
+                  <div class="skill-modal-footer">
+                    <div id="plugin-import-result" class="result skill-modal-result hidden" data-result-format="plugin-modal"></div>
+                    <div class="modal-actions skill-modal-actions">
+                      <button id="plugin-import-cancel" type="button" class="ghost">取消</button>
+                      <button id="plugin-import-validate" type="button" class="ghost">校验结构</button>
+                      <button id="plugin-import-save" type="submit">新增插件</button>
+                    </div>
                   </div>
                 </form>
               </section>

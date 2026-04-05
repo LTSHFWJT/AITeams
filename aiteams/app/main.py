@@ -54,6 +54,7 @@ def _build_container(settings: AppSettings) -> ServiceContainer:
         gateway=gateway,
         local_models_root=settings.local_models_root,
     )
+    knowledge_bases.set_retrieval_runtime_loader(agent_center.retrieval_runtime_config)
     if seed_agent_center_defaults:
         agent_center.ensure_defaults()
     agent_center.ensure_local_model_defaults()

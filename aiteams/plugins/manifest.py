@@ -93,7 +93,20 @@ def _normalize_actions(items: list[Any]) -> list[dict[str, Any]]:
         if isinstance(item, dict):
             name = str(item.get("name") or "").strip()
             if name:
-                actions.append({"name": name, "description": str(item.get("description") or "")})
+                action = {
+                    "name": name,
+                    "description": str(item.get("description") or ""),
+                }
+                tool_name = str(item.get("tool_name") or "").strip()
+                if tool_name:
+                    action["tool_name"] = tool_name
+                input_schema = item.get("input_schema")
+                if isinstance(input_schema, dict):
+                    action["input_schema"] = input_schema
+                output_schema = item.get("output_schema")
+                if isinstance(output_schema, dict):
+                    action["output_schema"] = output_schema
+                actions.append(action)
     return actions
 
 

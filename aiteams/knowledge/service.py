@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import csv
 import hashlib
 from importlib import metadata as importlib_metadata
 import json
@@ -12,8 +13,11 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import zipfile
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Callable
+from urllib.parse import urlsplit, urlunsplit
+from xml.etree import ElementTree as ET
 
 try:  # pragma: no cover - optional runtime dependency
     import xxhash
@@ -73,44 +77,63 @@ TEXT_EXTENSIONS = {
     ".conf",
     ".env",
 }
-OFFICE_EXTENSIONS = {".doc", ".docx", ".rtf", ".odt"}
 PDF_EXTENSIONS = {".pdf"}
+DELIMITED_TEXT_EXTENSIONS = {".csv", ".tsv"}
+HTML_EXTENSIONS = {".html", ".htm"}
+XML_EXTENSIONS = {".xml"}
+JUPYTER_EXTENSIONS = {".ipynb"}
+EBOOK_EXTENSIONS = {".epub"}
+MAILBOX_EXTENSIONS = {".mbox"}
+LEGACY_OFFICE_EXTENSIONS = {".doc", ".xls", ".ppt"}
 HTML_TAG_RE = re.compile(r"<[^>]+>")
 HTML_SCRIPT_RE = re.compile(r"<(script|style)\b.*?</\1>", re.IGNORECASE | re.DOTALL)
+WORDPROCESSINGML_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+DRAWINGML_NS = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+SPREADSHEETML_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 LOGGER = logging.getLogger(__name__)
 
-DEFAULT_LOCAL_EMBEDDING_MODEL = "BAAI/bge-m3"
+DEFAULT_LOCAL_EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 DEFAULT_LOCAL_RERANK_MODEL = "BAAI/bge-reranker-v2-m3"
+MISSING_EMBEDDING_CONFIGURATION_MESSAGE = (
+    "当前未配置 Embed 模型，请先前往 Agent Center 的 Embedding / Rerank 配置中设置 Embed 模型。"
+)
 
 VECTOR_IMPORT_ERROR: Exception | None = None
 LITELLM_IMPORT_ERROR: Exception | None = None
 PROVIDER_EMBED_IMPORT_ERROR: Exception | None = None
 LOCAL_EMBED_IMPORT_ERROR: Exception | None = None
 LOCAL_RERANK_IMPORT_ERROR: Exception | None = None
+FILE_READERS_IMPORT_ERROR: Exception | None = None
 
 try:  # pragma: no cover - optional runtime dependency
     import lancedb
-    from llama_index.core import SimpleDirectoryReader, StorageContext, VectorStoreIndex
+    from llama_index.core import StorageContext, VectorStoreIndex
     from llama_index.core.bridge.pydantic import Field, PrivateAttr
     from llama_index.core.embeddings import MockEmbedding
+    from llama_index.core.llms.mock import MockLLM
     from llama_index.core.node_parser import SentenceSplitter
+    from llama_index.core.query_engine import RetrieverQueryEngine
+    from llama_index.core.response_synthesizers.no_text import NoText
     try:
         from llama_index.core.postprocessor import LLMRerank
     except Exception:  # pragma: no cover - optional runtime dependency
         LLMRerank = None
     from llama_index.core.postprocessor.types import BaseNodePostprocessor
-    from llama_index.core.schema import NodeRelationship, NodeWithScore, QueryBundle, RelatedNodeInfo, TextNode
+    from llama_index.core.schema import Document, NodeRelationship, NodeWithScore, QueryBundle, RelatedNodeInfo, TextNode
     from llama_index.core.vector_stores.types import VectorStoreQuery
     from llama_index.vector_stores.lancedb import LanceDBVectorStore
 except Exception as exc:  # pragma: no cover - optional runtime dependency
     VECTOR_IMPORT_ERROR = exc
     lancedb = None
-    SimpleDirectoryReader = None
+    Document = None
     StorageContext = None
     VectorStoreIndex = None
     Field = None
     PrivateAttr = None
     MockEmbedding = None
+    MockLLM = None
+    RetrieverQueryEngine = None
+    NoText = None
     SentenceSplitter = None
     LLMRerank = None
     BaseNodePostprocessor = None
@@ -147,6 +170,30 @@ try:  # pragma: no cover - optional runtime dependency
 except Exception as exc:  # pragma: no cover - optional runtime dependency
     LOCAL_RERANK_IMPORT_ERROR = exc
     FlagEmbeddingReranker = None
+
+try:  # pragma: no cover - optional runtime dependency
+    from llama_index.readers.file import (
+        CSVReader,
+        DocxReader,
+        EpubReader,
+        MboxReader,
+        PandasCSVReader,
+        PandasExcelReader,
+        PDFReader,
+        PptxReader,
+        RTFReader,
+    )
+except Exception as exc:  # pragma: no cover - optional runtime dependency
+    FILE_READERS_IMPORT_ERROR = exc
+    CSVReader = None
+    DocxReader = None
+    EpubReader = None
+    MboxReader = None
+    PandasCSVReader = None
+    PandasExcelReader = None
+    PDFReader = None
+    PptxReader = None
+    RTFReader = None
 
 
 def _optional_import_detail(exc: Exception | None) -> str:
@@ -408,6 +455,7 @@ class KnowledgeBaseService:
         root_dir: str | Path,
         gateway: AIGateway | None = None,
         retrieval_runtime: dict[str, Any] | None = None,
+        retrieval_runtime_loader: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self.store = store
         self.root_dir = Path(root_dir).expanduser().resolve()
@@ -432,6 +480,7 @@ class KnowledgeBaseService:
         }
         self._rerank_runtime: dict[str, Any] = {"mode": "disabled", "runtime_loaded": False}
         self._rerank_postprocessor: Any = None
+        self._retrieval_runtime_loader = retrieval_runtime_loader
         self._embedding_job_lock = threading.RLock()
         self._embedding_execution_lock = threading.Lock()
         self._embedding_job_threads: dict[str, threading.Thread] = {}
@@ -442,6 +491,12 @@ class KnowledgeBaseService:
         with self._embedding_job_lock:
             self._embedding_job_threads.clear()
         return None
+
+    def set_retrieval_runtime_loader(
+        self,
+        loader: Callable[[], dict[str, Any]] | None,
+    ) -> None:
+        self._retrieval_runtime_loader = loader
 
     def configure_retrieval(self, runtime_settings: dict[str, Any] | None = None) -> dict[str, Any]:
         runtime = dict(runtime_settings or {})
@@ -478,6 +533,12 @@ class KnowledgeBaseService:
         selected_ids = self._normalize_embedding_document_ids(document_ids)
         if normalized_action in {"add", "reembed", "delete"} and not selected_ids:
             raise ValueError("请至少选择一个文件。")
+        if self._embedding_action_requires_configuration(
+            knowledge_base_id,
+            action=normalized_action,
+            document_ids=selected_ids,
+        ):
+            self._require_embedding_model_configuration()
         with self._embedding_job_lock:
             existing = self.store.get_active_knowledge_embedding_job(knowledge_base_id)
             if existing is not None:
@@ -532,6 +593,40 @@ class KnowledgeBaseService:
 
     def _normalize_embedding_document_ids(self, document_ids: list[str]) -> list[str]:
         return list(dict.fromkeys(str(item or "").strip() for item in list(document_ids or []) if str(item or "").strip()))
+
+    def _embedding_action_requires_configuration(
+        self,
+        knowledge_base_id: str,
+        *,
+        action: str,
+        document_ids: list[str],
+    ) -> bool:
+        normalized_action = self._normalize_embedding_action(action)
+        selected_ids = self._normalize_embedding_document_ids(document_ids)
+        if normalized_action == "delete":
+            return False
+        if normalized_action == "add":
+            for document_id in selected_ids:
+                document = self.store.get_knowledge_document(document_id)
+                if document is None or str(document.get("knowledge_base_id") or "").strip() != knowledge_base_id:
+                    continue
+                if self._document_embedding_status(document) != "embedded":
+                    return True
+            return False
+        if normalized_action == "reembed":
+            for document_id in selected_ids:
+                document = self.store.get_knowledge_document(document_id)
+                if document is None or str(document.get("knowledge_base_id") or "").strip() != knowledge_base_id:
+                    continue
+                if self._document_embedding_status(document) == "embedded":
+                    return True
+            return False
+        pending_rows = self.store.list_knowledge_documents(
+            knowledge_base_id=knowledge_base_id,
+            include_removed=False,
+            document_statuses=["not_embedded"],
+        )
+        return bool(pending_rows)
 
     def _save_embedding_job_record(self, job: dict[str, Any], **overrides: Any) -> dict[str, Any]:
         return self.store.save_knowledge_embedding_job(
@@ -866,6 +961,7 @@ class KnowledgeBaseService:
             except ValueError as exc:
                 skipped.append(
                     {
+                        "title": PurePosixPath(entry["path"]).name or entry["path"],
                         "path": entry["path"],
                         "reason": "invalid-file",
                         "message": str(exc),
@@ -1252,16 +1348,17 @@ class KnowledgeBaseService:
         limit: int = 8,
     ) -> list[dict[str, Any]]:
         safe_limit = max(1, int(limit or 8))
-        kb_ids = {str(item).strip() for item in list(knowledge_base_ids or []) if str(item).strip()}
-        for key in list(knowledge_base_keys or []):
-            record = self.store.get_knowledge_base_by_key(str(key))
-            if record is not None:
-                kb_ids.add(str(record.get("id") or ""))
+        normalized_query = str(query or "").strip()
+        kb_ids = self._resolve_knowledge_base_ids(
+            knowledge_base_ids=knowledge_base_ids,
+            knowledge_base_keys=knowledge_base_keys,
+        )
+        self._ensure_retrieval_loaded_for_query()
 
         items: list[dict[str, Any]]
         if self._embedding_model is not None and self._embedding_dimension:
             try:
-                items = self._search_vector(query=str(query or "").strip(), knowledge_base_ids=sorted(kb_ids), limit=safe_limit)
+                items = self._search_vector(query=normalized_query, knowledge_base_ids=kb_ids, limit=safe_limit)
             except Exception as exc:
                 LOGGER.warning("Knowledge base vector search failed, falling back to lexical search: %s", exc)
                 items = []
@@ -1270,12 +1367,112 @@ class KnowledgeBaseService:
 
         if not items:
             items = self._search_lexical(
-                query=str(query or "").strip(),
-                knowledge_base_ids=sorted(kb_ids) or None,
+                query=normalized_query,
+                knowledge_base_ids=kb_ids or None,
                 knowledge_base_keys=knowledge_base_keys,
                 limit=max(safe_limit * VECTOR_HEAD_MULTIPLIER, safe_limit),
             )
-        return self._maybe_rerank_results(query=str(query or "").strip(), items=items, limit=safe_limit)
+        return self._maybe_rerank_results(query=normalized_query, items=items, limit=safe_limit)
+
+    def query(
+        self,
+        *,
+        query: str,
+        knowledge_base_ids: list[str] | None = None,
+        knowledge_base_keys: list[str] | None = None,
+        limit: int = 8,
+    ) -> dict[str, Any]:
+        normalized_query = str(query or "").strip()
+        safe_limit = max(1, int(limit or 8))
+        kb_ids = self._resolve_knowledge_base_ids(
+            knowledge_base_ids=knowledge_base_ids,
+            knowledge_base_keys=knowledge_base_keys,
+        )
+        kb_records = self._candidate_knowledge_bases(kb_ids)
+        self._ensure_retrieval_loaded_for_query()
+
+        items: list[dict[str, Any]] = []
+        mode = "search_fallback"
+        response_mode = "search"
+        if (
+            normalized_query
+            and self._embedding_model is not None
+            and self._embedding_dimension is not None
+            and RetrieverQueryEngine is not None
+            and MockLLM is not None
+            and NoText is not None
+        ):
+            head_size = max(safe_limit * VECTOR_HEAD_MULTIPLIER, safe_limit)
+            seen: set[tuple[str, str]] = set()
+            for knowledge_base in kb_records:
+                knowledge_base_id = str(knowledge_base.get("id") or "").strip()
+                if not knowledge_base_id or not self._vector_table_exists(knowledge_base_id):
+                    continue
+                try:
+                    query_engine = self._query_engine_for_kb(knowledge_base_id, similarity_top_k=head_size)
+                    response = query_engine.query(normalized_query)
+                    items.extend(
+                        self._knowledge_result_items_from_nodes(
+                            knowledge_base=knowledge_base,
+                            nodes=list(getattr(response, "source_nodes", []) or []),
+                            seen=seen,
+                        )
+                    )
+                except Warning:
+                    continue
+                except Exception as exc:
+                    LOGGER.warning("Knowledge base query engine failed for %s: %s", knowledge_base_id, exc)
+            if items:
+                items.sort(key=lambda item: (float(item.get("score") or 0.0), str(item.get("title") or "")), reverse=True)
+                items = items[:safe_limit]
+                mode = "llamaindex_query_engine"
+                response_mode = "no_text"
+
+        if not items:
+            items = self.search(
+                query=normalized_query,
+                knowledge_base_ids=kb_ids or None,
+                knowledge_base_keys=knowledge_base_keys,
+                limit=safe_limit,
+            )
+
+        return {
+            "query": normalized_query,
+            "count": len(items),
+            "items": items,
+            "knowledge_bases": [self._knowledge_base_binding_payload(item) for item in kb_records],
+            "engine": {
+                "backend": mode,
+                "response_mode": response_mode,
+                "vector_enabled": bool(self._embedding_model is not None and self._embedding_dimension is not None),
+                "rerank_enabled": bool(self._rerank_postprocessor is not None),
+            },
+        }
+
+    def _resolve_knowledge_base_ids(
+        self,
+        *,
+        knowledge_base_ids: list[str] | None,
+        knowledge_base_keys: list[str] | None,
+    ) -> list[str]:
+        kb_ids = {str(item).strip() for item in list(knowledge_base_ids or []) if str(item).strip()}
+        for key in list(knowledge_base_keys or []):
+            record = self.store.get_knowledge_base_by_key(str(key))
+            if record is not None:
+                kb_ids.add(str(record.get("id") or ""))
+        return sorted(kb_ids)
+
+    def _ensure_retrieval_loaded_for_query(self) -> None:
+        if self._embedding_model is None or self._embedding_dimension is None:
+            try:
+                self._ensure_embedding_loaded_for_embedding()
+            except Exception as exc:
+                LOGGER.debug("Knowledge base embedding runtime not loaded for query: %s", exc)
+        if self._rerank_postprocessor is None:
+            try:
+                self._ensure_rerank_loaded_for_embedding()
+            except Exception as exc:
+                LOGGER.debug("Knowledge base rerank runtime not loaded for query: %s", exc)
 
     def _unload_retrieval_runtime(self) -> None:
         self._embedding_model = None
@@ -1305,6 +1502,43 @@ class KnowledgeBaseService:
         rerank_state = self._build_rerank_state(dict(self._rerank_runtime_settings or {}))
         self._rerank_runtime = dict(rerank_state["public"])
         self._rerank_postprocessor = rerank_state["postprocessor"]
+
+    def _embedding_model_is_configured(self) -> bool:
+        if self._embedding_model is not None or self._embedding_dimension is not None:
+            return True
+        runtime_preview = dict(self._embedding_runtime or {})
+        if str(runtime_preview.get("mode") or "").strip().lower() not in {"", "disabled"}:
+            return True
+        runtime = dict(self._embedding_runtime_settings or {})
+        mode = str(runtime.get("mode") or "").strip().lower()
+        if mode == "provider":
+            return bool(str(runtime.get("provider_id") or "").strip() and str(runtime.get("model_name") or runtime.get("model") or "").strip())
+        if mode == "local":
+            return bool(
+                str(runtime.get("local_model_id") or "").strip()
+                or str(runtime.get("model_path") or "").strip()
+                or str(runtime.get("model_name") or runtime.get("model") or "").strip()
+            )
+        return False
+
+    def _refresh_retrieval_runtime_from_loader(self) -> bool:
+        if not callable(self._retrieval_runtime_loader):
+            return False
+        try:
+            runtime = dict(self._retrieval_runtime_loader() or {})
+        except Exception as exc:
+            LOGGER.warning("Knowledge base retrieval runtime refresh skipped: %s", exc)
+            return False
+        self.configure_retrieval(runtime)
+        return True
+
+    def _require_embedding_model_configuration(self) -> None:
+        if self._embedding_model_is_configured():
+            return
+        self._refresh_retrieval_runtime_from_loader()
+        if self._embedding_model_is_configured():
+            return
+        raise ValueError(MISSING_EMBEDDING_CONFIGURATION_MESSAGE)
 
     def _preview_embedding_runtime(self, runtime: dict[str, Any]) -> dict[str, Any]:
         mode = str(runtime.get("mode") or "").strip().lower()
@@ -1733,41 +1967,64 @@ class KnowledgeBaseService:
             except Exception as exc:
                 LOGGER.warning("Knowledge base vector query failed for %s: %s", knowledge_base_id, exc)
                 continue
-            for node_with_score in list(nodes or []):
-                node = getattr(node_with_score, "node", None)
-                metadata = dict(getattr(node, "metadata", {}) or {})
-                document_id = str(getattr(node, "ref_doc_id", None) or metadata.get("knowledge_document_id") or "").strip()
-                if not document_id:
-                    continue
-                node_id = str(getattr(node, "node_id", None) or getattr(node, "id_", None) or document_id).strip() or document_id
-                identity = (document_id, node_id)
-                if identity in seen:
-                    continue
-                seen.add(identity)
-                text = str(node.get_content() if hasattr(node, "get_content") else getattr(node, "text", "") or "").strip()
-                score = float(getattr(node_with_score, "score", 0.0) or 0.0)
-                items.append(
-                    {
-                        "id": document_id,
-                        "knowledge_base_id": knowledge_base_id,
-                        "knowledge_base_key": metadata.get("knowledge_base_key") or knowledge_base.get("key"),
-                        "knowledge_base_name": metadata.get("knowledge_base_name") or knowledge_base.get("name"),
-                        "key": metadata.get("document_key") or metadata.get("key"),
-                        "title": metadata.get("title"),
-                        "source_path": metadata.get("source_path"),
-                        "metadata_json": {
-                            "chunk_count": self._coerce_int(metadata.get("chunk_count"), minimum=0) or 0,
-                            "file_size": self._coerce_int(metadata.get("file_size"), minimum=0) or 0,
-                        },
-                        "score": score,
-                        "chunk_index": self._coerce_int(metadata.get("chunk_index"), minimum=0) or 0,
-                        "chunk_count": self._coerce_int(metadata.get("chunk_count"), minimum=0) or 0,
-                        "snippet": trim_text(text, limit=320),
-                        "content_text": text,
-                    }
+            items.extend(
+                self._knowledge_result_items_from_nodes(
+                    knowledge_base=knowledge_base,
+                    nodes=list(nodes or []),
+                    seen=seen,
                 )
+            )
         items.sort(key=lambda item: (float(item.get("score") or 0.0), str(item.get("title") or "")), reverse=True)
         return items[: max(limit * VECTOR_HEAD_MULTIPLIER, limit)]
+
+    def _knowledge_result_items_from_nodes(
+        self,
+        *,
+        knowledge_base: dict[str, Any],
+        nodes: list[Any],
+        seen: set[tuple[str, str]],
+    ) -> list[dict[str, Any]]:
+        knowledge_base_id = str(knowledge_base.get("id") or "").strip()
+        items: list[dict[str, Any]] = []
+        for node_with_score in list(nodes or []):
+            node = getattr(node_with_score, "node", None)
+            metadata = dict(getattr(node, "metadata", {}) or {})
+            document_id = str(
+                getattr(node, "ref_doc_id", None)
+                or metadata.get("knowledge_document_id")
+                or metadata.get("document_id")
+                or ""
+            ).strip()
+            if not document_id:
+                continue
+            node_id = str(getattr(node, "node_id", None) or getattr(node, "id_", None) or document_id).strip() or document_id
+            identity = (document_id, node_id)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            text = str(node.get_content() if hasattr(node, "get_content") else getattr(node, "text", "") or "").strip()
+            score = float(getattr(node_with_score, "score", 0.0) or 0.0)
+            items.append(
+                {
+                    "id": document_id,
+                    "knowledge_base_id": knowledge_base_id,
+                    "knowledge_base_key": metadata.get("knowledge_base_key") or knowledge_base.get("key"),
+                    "knowledge_base_name": metadata.get("knowledge_base_name") or knowledge_base.get("name"),
+                    "key": metadata.get("document_key") or metadata.get("key"),
+                    "title": metadata.get("title"),
+                    "source_path": metadata.get("source_path"),
+                    "metadata_json": {
+                        "chunk_count": self._coerce_int(metadata.get("chunk_count"), minimum=0) or 0,
+                        "file_size": self._coerce_int(metadata.get("file_size"), minimum=0) or 0,
+                    },
+                    "score": score,
+                    "chunk_index": self._coerce_int(metadata.get("chunk_index"), minimum=0) or 0,
+                    "chunk_count": self._coerce_int(metadata.get("chunk_count"), minimum=0) or 0,
+                    "snippet": trim_text(text, limit=320),
+                    "content_text": text,
+                }
+            )
+        return items
 
     def _search_lexical(
         self,
@@ -1998,6 +2255,18 @@ class KnowledgeBaseService:
             transformations=self._vector_transformations(),
         )
 
+    def _query_engine_for_kb(self, knowledge_base_id: str, *, similarity_top_k: int) -> Any:
+        self._require_vector_dependencies()
+        if RetrieverQueryEngine is None or MockLLM is None or NoText is None:
+            raise RuntimeError("LlamaIndex RetrieverQueryEngine is not available.")
+        retriever = self._index_for_kb(knowledge_base_id).as_retriever(similarity_top_k=similarity_top_k)
+        node_postprocessors = [self._rerank_postprocessor] if self._rerank_postprocessor is not None else None
+        return RetrieverQueryEngine(
+            retriever=retriever,
+            response_synthesizer=NoText(llm=MockLLM(max_tokens=1)),
+            node_postprocessors=node_postprocessors,
+        )
+
     def _build_index_for_kb_insert(self, knowledge_base_id: str, document: Any | None = None) -> Any:
         self._require_vector_dependencies()
         assert VectorStoreIndex is not None
@@ -2034,6 +2303,13 @@ class KnowledgeBaseService:
             for item in records
             if item is not None and str(item.get("status") or "active").strip().lower() == "active"
         ]
+
+    def _knowledge_base_binding_payload(self, knowledge_base: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": str(knowledge_base.get("id") or "").strip() or None,
+            "key": str(knowledge_base.get("key") or "").strip() or None,
+            "name": str(knowledge_base.get("name") or "").strip() or None,
+        }
 
     def _document_text_for_rerank(self, value: dict[str, Any]) -> str:
         parts: list[str] = []
@@ -2084,7 +2360,7 @@ class KnowledgeBaseService:
             item is not None
             for item in (
                 lancedb,
-                SimpleDirectoryReader,
+                Document,
                 VectorStoreIndex,
                 SentenceSplitter,
                 MockEmbedding,
@@ -2241,6 +2517,7 @@ class KnowledgeBaseService:
                 ),
             )
         if pending_map or reembed_rows:
+            self._require_embedding_model_configuration()
             self._ensure_retrieval_loaded_for_embedding()
         if (pending_map or reembed_rows) and (self._embedding_model is None or self._embedding_dimension is None):
             raise ValueError("当前未启用 Embedding，无法执行保存并嵌入。")
@@ -2410,25 +2687,20 @@ class KnowledgeBaseService:
                         )
             if not materialized:
                 return {"items": items, "skipped": skipped, "affected_count": len(items) + deleted_count}
-            assert SimpleDirectoryReader is not None
-            documents = SimpleDirectoryReader(input_dir=str(tmp_dir), recursive=True).load_data()
-            parsed_by_path = {
-                str(Path(str((doc.metadata or {}).get("file_path") or "")).resolve()): doc
-                for doc in list(documents or [])
-                if str((doc.metadata or {}).get("file_path") or "").strip()
-            }
+            assert Document is not None
             index: Any | None = None
-            for resolved_path, (_temp_path, row, blob, alias) in materialized.items():
+            for _resolved_path, (temp_path, row, blob, alias) in materialized.items():
                 document_id = str(row.get("id") or "").strip()
                 document_title = str(row.get("title") or row.get("source_path") or document_id)
-                parsed = parsed_by_path.get(resolved_path)
-                if parsed is None:
-                    message = "文件已准备完成，但解析结果缺失。"
+                try:
+                    body, _extra_metadata = self._extract_text(temp_path)
+                except Exception as exc:
+                    message = trim_text(str(exc), limit=300) or "文档解析失败。"
                     skipped.append(
                         {
                             "id": document_id,
                             "title": str(row.get("title") or row.get("source_path") or document_id),
-                            "reason": "reader-missing",
+                            "reason": "extract-failed",
                             "message": message,
                         }
                     )
@@ -2443,7 +2715,7 @@ class KnowledgeBaseService:
                             current_document_title=document_title,
                         )
                     continue
-                body = str(getattr(parsed, "text", "") or (parsed.get_content() if hasattr(parsed, "get_content") else "") or "").strip()
+                body = str(body or "").strip()
                 if not body:
                     message = "文件解析结果为空，无法嵌入。"
                     skipped.append(
@@ -2465,7 +2737,6 @@ class KnowledgeBaseService:
                             current_document_title=document_title,
                         )
                     continue
-                parsed.id_ = document_id
                 chunk_count = len(self._chunk_text(body))
                 metadata = self._llama_document_metadata(
                     knowledge_base=knowledge_base,
@@ -2473,9 +2744,9 @@ class KnowledgeBaseService:
                     blob=blob,
                     alias=alias,
                     chunk_count=chunk_count,
-                        file_size=int(((blob or {}).get("byte_size") or len(body.encode("utf-8"))) or 0),
+                    file_size=int(((blob or {}).get("byte_size") or len(body.encode("utf-8"))) or 0),
                 )
-                parsed.metadata = metadata
+                parsed = Document(id_=document_id, text=body, metadata=metadata)
                 if job_id:
                     self._increment_embedding_job(
                         job_id,
@@ -2654,26 +2925,35 @@ class KnowledgeBaseService:
         chunk_count: int,
         file_size: int,
     ) -> dict[str, Any]:
-        metadata = dict(document.get("metadata_json") or {})
-        metadata.update(
-            {
-                "knowledge_base_id": str(knowledge_base.get("id") or ""),
-                "knowledge_base_key": str(knowledge_base.get("key") or knowledge_base.get("id") or ""),
-                "knowledge_base_name": str(knowledge_base.get("name") or knowledge_base.get("id") or ""),
-                "knowledge_document_id": str(document.get("id") or ""),
-                "document_key": str(document.get("key") or ""),
-                "key": str(document.get("key") or ""),
-                "title": str(document.get("title") or document.get("source_path") or document.get("id") or "文档"),
-                "source_path": str(document.get("source_path") or "").strip() or None,
-                "file_size": int(file_size or 0),
-                "chunk_count": int(chunk_count or 0),
-                "blob_id": str((blob or {}).get("id") or document.get("blob_id") or ""),
-                "xxh128": str((blob or {}).get("xxh128") or metadata.get("blob_xxh128") or ""),
-                "filename": str((alias or {}).get("filename") or metadata.get("filename") or ""),
-                "suffix": str((alias or {}).get("suffix") or metadata.get("suffix") or ""),
-            }
-        )
-        return metadata
+        stored_metadata = dict(document.get("metadata_json") or {})
+        blob_hash = str((blob or {}).get("xxh128") or stored_metadata.get("blob_xxh128") or stored_metadata.get("xxh128") or "")
+        suffix = str((alias or {}).get("suffix") or stored_metadata.get("suffix") or stored_metadata.get("extension") or "")
+        return {
+            "knowledge_base_id": str(knowledge_base.get("id") or ""),
+            "knowledge_base_key": str(knowledge_base.get("key") or knowledge_base.get("id") or ""),
+            "knowledge_base_name": str(knowledge_base.get("name") or knowledge_base.get("id") or ""),
+            "knowledge_document_id": str(document.get("id") or ""),
+            "document_id": str(document.get("id") or ""),
+            "document_key": str(document.get("key") or ""),
+            "key": str(document.get("key") or ""),
+            "title": str(document.get("title") or document.get("source_path") or document.get("id") or "文档"),
+            "source_path": str(document.get("source_path") or "").strip() or None,
+            "file_size": int(file_size or 0),
+            "chunk_count": int(chunk_count or 0),
+            "blob_id": str((blob or {}).get("id") or document.get("blob_id") or ""),
+            "blob_xxh128": blob_hash,
+            "xxh128": blob_hash,
+            "filename": str((alias or {}).get("filename") or stored_metadata.get("filename") or ""),
+            "suffix": suffix,
+            "extension": suffix,
+            "content_type": str(stored_metadata.get("content_type") or ""),
+            "pool_document_id": str(document.get("pool_document_id") or stored_metadata.get("pool_document_id") or ""),
+            "pool_document_key": str(stored_metadata.get("pool_document_key") or ""),
+            "preview": trim_text(
+                str(stored_metadata.get("preview") or document.get("content_text") or ""),
+                limit=200,
+            ),
+        }
 
     def _materialize_document_for_ingest(
         self,
@@ -2831,24 +3111,384 @@ class KnowledgeBaseService:
 
     def _extract_text(self, file_path: Path) -> tuple[str, dict[str, Any]]:
         suffix = file_path.suffix.lower()
-        if suffix in PDF_EXTENSIONS:
-            text = self._extract_with_command(["pdftotext", "-q", str(file_path), "-"])
-            if text.strip():
-                return self._normalize_text(text), {"content_type": "application/pdf", "extension": suffix}
-            raise ValueError("当前环境不支持 PDF 文本提取。")
-        if suffix in OFFICE_EXTENSIONS:
-            text = self._extract_with_command(["textutil", "-convert", "txt", "-stdout", str(file_path)])
-            if text.strip():
-                return self._normalize_text(text), {"content_type": "application/octet-stream", "extension": suffix}
-            raise ValueError("当前环境不支持该 Office 文档的文本提取。")
-        raw = file_path.read_bytes()
         mime_type, _ = mimetypes.guess_type(file_path.name)
+        structured = self._extract_structured_text(file_path=file_path, suffix=suffix, mime_type=mime_type)
+        if structured is not None:
+            return structured
+        raw = file_path.read_bytes()
         text = self._decode_text(raw)
         if not text and suffix not in TEXT_EXTENSIONS and not str(mime_type or "").startswith("text/"):
             raise ValueError("暂不支持该文件类型的文本提取。")
         if suffix in {".html", ".htm"}:
             text = self._html_to_text(text)
         return self._normalize_text(text), {"content_type": mime_type or "text/plain", "extension": suffix}
+
+    def _extract_structured_text(
+        self,
+        *,
+        file_path: Path,
+        suffix: str,
+        mime_type: str | None,
+    ) -> tuple[str, dict[str, Any]] | None:
+        if suffix in PDF_EXTENSIONS:
+            text = self._extract_with_llama_reader(file_path, suffix=suffix)
+            if not text.strip():
+                text = self._extract_with_command(["pdftotext", "-q", str(file_path), "-"])
+            if text.strip():
+                return self._normalize_text(text), {"content_type": mime_type or "application/pdf", "extension": suffix}
+            raise ValueError("当前环境不支持 PDF 文本提取。")
+        if suffix == ".docx":
+            text = self._extract_with_llama_reader(file_path, suffix=suffix)
+            if not text.strip():
+                text = self._extract_docx_text(file_path)
+            if text.strip():
+                return self._normalize_text(text), {
+                    "content_type": mime_type or "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    "extension": suffix,
+                }
+            raise ValueError("当前环境不支持该 Word 文档的文本提取。")
+        if suffix in {".pptx", ".pptm"}:
+            text = self._extract_with_llama_reader(file_path, suffix=suffix)
+            if not text.strip():
+                text = self._extract_pptx_text(file_path)
+            if not text.strip():
+                text = self._extract_with_office_converter(file_path)
+            if text.strip():
+                return self._normalize_text(text), {
+                    "content_type": mime_type or "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    "extension": suffix,
+                }
+            raise ValueError("当前环境不支持该 PowerPoint 文档的文本提取。")
+        if suffix == ".xlsx":
+            text = self._extract_with_llama_reader(file_path, suffix=suffix)
+            if not text.strip():
+                text = self._extract_xlsx_text(file_path)
+            if not text.strip():
+                text = self._extract_with_office_converter(file_path)
+            if text.strip():
+                return self._normalize_text(text), {
+                    "content_type": mime_type or "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    "extension": suffix,
+                }
+            raise ValueError("当前环境不支持该 Excel 文档的文本提取。")
+        if suffix == ".odt":
+            text = self._extract_odt_text(file_path)
+            if not text.strip():
+                text = self._extract_with_office_converter(file_path)
+            if text.strip():
+                return self._normalize_text(text), {
+                    "content_type": mime_type or "application/vnd.oasis.opendocument.text",
+                    "extension": suffix,
+                }
+            raise ValueError("当前环境不支持该 ODT 文档的文本提取。")
+        if suffix == ".rtf":
+            text = self._extract_with_llama_reader(file_path, suffix=suffix)
+            if not text.strip():
+                text = self._extract_rtf_text(file_path)
+            if text.strip():
+                return self._normalize_text(text), {"content_type": "application/rtf", "extension": suffix}
+            raise ValueError("当前环境不支持该 RTF 文档的文本提取。")
+        if suffix in DELIMITED_TEXT_EXTENSIONS:
+            text = self._extract_delimited_text(file_path, delimiter="\t" if suffix == ".tsv" else ",")
+            if not text.strip():
+                text = self._extract_with_llama_reader(file_path, suffix=suffix)
+            if text.strip():
+                return self._normalize_text(text), {
+                    "content_type": "text/tab-separated-values" if suffix == ".tsv" else "text/csv",
+                    "extension": suffix,
+                }
+            raise ValueError("当前环境不支持该表格文本的提取。")
+        if suffix in HTML_EXTENSIONS:
+            raw = file_path.read_bytes()
+            text = self._decode_text(raw)
+            if text.strip():
+                return self._normalize_text(self._html_to_text(text)), {"content_type": mime_type or "text/html", "extension": suffix}
+            raise ValueError("当前环境不支持该 HTML 文档的文本提取。")
+        if suffix in XML_EXTENSIONS:
+            text = self._extract_xml_text(file_path)
+            if text.strip():
+                return self._normalize_text(text), {"content_type": mime_type or "application/xml", "extension": suffix}
+            raise ValueError("当前环境不支持该 XML 文档的文本提取。")
+        if suffix in JUPYTER_EXTENSIONS:
+            text = self._extract_ipynb_text(file_path)
+            if text.strip():
+                return self._normalize_text(text), {"content_type": mime_type or "application/x-ipynb+json", "extension": suffix}
+            raise ValueError("当前环境不支持该 Notebook 的文本提取。")
+        if suffix in EBOOK_EXTENSIONS | MAILBOX_EXTENSIONS:
+            text = self._extract_with_llama_reader(file_path, suffix=suffix)
+            if text.strip():
+                return self._normalize_text(text), {"content_type": mime_type or "text/plain", "extension": suffix}
+            raise ValueError("当前环境缺少该文件类型的解析依赖。")
+        if suffix in LEGACY_OFFICE_EXTENSIONS:
+            text = self._extract_with_office_converter(file_path)
+            if text.strip():
+                return self._normalize_text(text), {"content_type": mime_type or "application/octet-stream", "extension": suffix}
+            raise ValueError("当前环境不支持该 Office 文档的文本提取。")
+        return None
+
+    def _extract_with_llama_reader(self, file_path: Path, *, suffix: str) -> str:
+        reader = self._llama_reader_for_suffix(suffix)
+        if reader is None:
+            return ""
+        try:
+            documents = list(reader.load_data(file_path) or [])
+        except Exception as exc:
+            LOGGER.debug("Llama file reader skipped for %s (%s): %s", file_path.name, suffix, exc)
+            return ""
+        parts: list[str] = []
+        for item in documents:
+            text = str(getattr(item, "text", "") or (item.get_content() if hasattr(item, "get_content") else "") or "").strip()
+            if text:
+                parts.append(text)
+        return "\n\n".join(parts)
+
+    def _llama_reader_for_suffix(self, suffix: str) -> Any | None:
+        normalized = str(suffix or "").strip().lower()
+        factories: dict[str, Callable[[], Any | None]] = {
+            ".pdf": lambda: PDFReader(return_full_document=True) if PDFReader is not None else None,
+            ".docx": lambda: DocxReader() if DocxReader is not None else None,
+            ".pptx": lambda: PptxReader(num_workers=0, raise_on_error=True) if PptxReader is not None else None,
+            ".pptm": lambda: PptxReader(num_workers=0, raise_on_error=True) if PptxReader is not None else None,
+            ".csv": lambda: PandasCSVReader(concat_rows=True) if PandasCSVReader is not None else (CSVReader(concat_rows=True) if CSVReader is not None else None),
+            ".tsv": lambda: PandasCSVReader(concat_rows=True, pandas_config={"sep": "\t"}) if PandasCSVReader is not None else None,
+            ".xlsx": lambda: PandasExcelReader(concat_rows=True) if PandasExcelReader is not None else None,
+            ".xls": lambda: PandasExcelReader(concat_rows=True) if PandasExcelReader is not None else None,
+            ".rtf": lambda: RTFReader() if RTFReader is not None else None,
+            ".epub": lambda: EpubReader() if EpubReader is not None else None,
+            ".mbox": lambda: MboxReader() if MboxReader is not None else None,
+        }
+        factory = factories.get(normalized)
+        return factory() if factory is not None else None
+
+    def _extract_docx_text(self, file_path: Path) -> str:
+        try:
+            with zipfile.ZipFile(file_path) as archive:
+                names = set(archive.namelist())
+                parts = [name for name in ("word/document.xml", "word/footnotes.xml", "word/endnotes.xml") if name in names]
+                parts.extend(sorted(name for name in names if name.startswith("word/header") and name.endswith(".xml")))
+                parts.extend(sorted(name for name in names if name.startswith("word/footer") and name.endswith(".xml")))
+                sections: list[str] = []
+                for part in parts:
+                    text = self._extract_docx_xml_text(archive.read(part))
+                    if text.strip():
+                        sections.append(text)
+                return "\n\n".join(section for section in sections if section.strip())
+        except Exception:
+            return ""
+
+    def _extract_docx_xml_text(self, xml_bytes: bytes) -> str:
+        try:
+            root = ET.fromstring(xml_bytes)
+        except ET.ParseError:
+            return ""
+        paragraphs: list[str] = []
+        for paragraph in root.iterfind(f".//{WORDPROCESSINGML_NS}p"):
+            fragments: list[str] = []
+            for node in paragraph.iter():
+                if node.tag == f"{WORDPROCESSINGML_NS}t":
+                    fragments.append(str(node.text or ""))
+                elif node.tag == f"{WORDPROCESSINGML_NS}tab":
+                    fragments.append("\t")
+                elif node.tag in {f"{WORDPROCESSINGML_NS}br", f"{WORDPROCESSINGML_NS}cr"}:
+                    fragments.append("\n")
+            text = "".join(fragments).strip()
+            if text:
+                paragraphs.append(text)
+        return "\n\n".join(paragraphs)
+
+    def _extract_pptx_text(self, file_path: Path) -> str:
+        try:
+            with zipfile.ZipFile(file_path) as archive:
+                slide_names = sorted(
+                    (name for name in archive.namelist() if re.fullmatch(r"ppt/slides/slide\d+\.xml", name)),
+                    key=self._archive_numeric_sort_key,
+                )
+                sections: list[str] = []
+                for index, name in enumerate(slide_names, start=1):
+                    slide_text = self._extract_pptx_xml_text(archive.read(name))
+                    notes_name = f"ppt/notesSlides/notesSlide{index}.xml"
+                    notes_text = self._extract_pptx_xml_text(archive.read(notes_name)) if notes_name in archive.namelist() else ""
+                    block_parts = [part for part in [slide_text, f"备注:\n{notes_text}" if notes_text else ""] if part.strip()]
+                    if block_parts:
+                        sections.append(f"Slide {index}\n" + "\n\n".join(block_parts))
+                return "\n\n".join(section for section in sections if section.strip())
+        except Exception:
+            return ""
+
+    def _extract_pptx_xml_text(self, xml_bytes: bytes) -> str:
+        try:
+            root = ET.fromstring(xml_bytes)
+        except ET.ParseError:
+            return ""
+        values = [str(node.text or "").strip() for node in root.iterfind(f".//{DRAWINGML_NS}t") if str(node.text or "").strip()]
+        return "\n".join(values)
+
+    def _extract_xlsx_text(self, file_path: Path) -> str:
+        try:
+            with zipfile.ZipFile(file_path) as archive:
+                shared_strings = self._extract_xlsx_shared_strings(archive)
+                sheet_names = sorted(
+                    (name for name in archive.namelist() if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", name)),
+                    key=self._archive_numeric_sort_key,
+                )
+                sections: list[str] = []
+                for index, name in enumerate(sheet_names, start=1):
+                    sheet_text = self._extract_xlsx_sheet_text(archive.read(name), shared_strings)
+                    if sheet_text.strip():
+                        sections.append(f"Sheet {index}\n{sheet_text}")
+                return "\n\n".join(section for section in sections if section.strip())
+        except Exception:
+            return ""
+
+    def _extract_xlsx_shared_strings(self, archive: zipfile.ZipFile) -> list[str]:
+        if "xl/sharedStrings.xml" not in archive.namelist():
+            return []
+        try:
+            root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+        except ET.ParseError:
+            return []
+        values: list[str] = []
+        for item in root.iterfind(f".//{SPREADSHEETML_NS}si"):
+            text = "".join(str(node.text or "") for node in item.iterfind(f".//{SPREADSHEETML_NS}t")).strip()
+            values.append(text)
+        return values
+
+    def _extract_xlsx_sheet_text(self, xml_bytes: bytes, shared_strings: list[str]) -> str:
+        try:
+            root = ET.fromstring(xml_bytes)
+        except ET.ParseError:
+            return ""
+        rows: list[str] = []
+        for row in root.iterfind(f".//{SPREADSHEETML_NS}row"):
+            values: list[str] = []
+            for cell in row.iterfind(f"{SPREADSHEETML_NS}c"):
+                value = self._extract_xlsx_cell_value(cell, shared_strings)
+                if value.strip():
+                    reference = str(cell.attrib.get("r") or "").strip()
+                    values.append(f"{reference}: {value}" if reference else value)
+            if values:
+                rows.append(" | ".join(values))
+        return "\n".join(rows)
+
+    def _extract_xlsx_cell_value(self, cell: ET.Element, shared_strings: list[str]) -> str:
+        cell_type = str(cell.attrib.get("t") or "").strip()
+        if cell_type == "inlineStr":
+            return "".join(str(node.text or "") for node in cell.iterfind(f".//{SPREADSHEETML_NS}t")).strip()
+        value_node = cell.find(f"{SPREADSHEETML_NS}v")
+        if value_node is None or value_node.text is None:
+            return ""
+        raw_value = str(value_node.text or "").strip()
+        if cell_type == "s" and raw_value.isdigit():
+            index = int(raw_value)
+            if 0 <= index < len(shared_strings):
+                return shared_strings[index]
+        return raw_value
+
+    def _extract_odt_text(self, file_path: Path) -> str:
+        try:
+            with zipfile.ZipFile(file_path) as archive:
+                if "content.xml" not in archive.namelist():
+                    return ""
+                return self._extract_xml_bytes_text(archive.read("content.xml"))
+        except Exception:
+            return ""
+
+    def _extract_rtf_text(self, file_path: Path) -> str:
+        try:
+            from striprtf.striprtf import rtf_to_text
+        except Exception:
+            return ""
+        try:
+            return rtf_to_text(file_path.read_text(encoding="utf-8", errors="ignore"))
+        except Exception:
+            return ""
+
+    def _extract_delimited_text(self, file_path: Path, *, delimiter: str) -> str:
+        try:
+            with file_path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
+                reader = csv.reader(handle, delimiter=delimiter)
+                return "\n".join(", ".join(str(value or "").strip() for value in row if str(value or "").strip()) for row in reader if any(str(value or "").strip() for value in row))
+        except Exception:
+            return ""
+
+    def _extract_ipynb_text(self, file_path: Path) -> str:
+        try:
+            payload = json.loads(file_path.read_text(encoding="utf-8"))
+        except Exception:
+            return ""
+        cells = list(payload.get("cells") or [])
+        sections: list[str] = []
+        for index, cell in enumerate(cells, start=1):
+            cell_type = str(cell.get("cell_type") or "cell").strip() or "cell"
+            source = self._coerce_notebook_fragment(cell.get("source"))
+            outputs = self._extract_notebook_outputs(cell)
+            block_parts = [part for part in [f"{cell_type} {index}", source, outputs] if part.strip()]
+            if block_parts:
+                sections.append("\n".join(block_parts))
+        return "\n\n".join(sections)
+
+    def _coerce_notebook_fragment(self, value: Any) -> str:
+        if isinstance(value, list):
+            return "".join(str(item or "") for item in value).strip()
+        return str(value or "").strip()
+
+    def _extract_notebook_outputs(self, cell: dict[str, Any]) -> str:
+        outputs: list[str] = []
+        for item in list(cell.get("outputs") or []):
+            text = self._coerce_notebook_fragment(item.get("text"))
+            if text:
+                outputs.append(text)
+                continue
+            data = item.get("data")
+            if isinstance(data, dict):
+                plain = self._coerce_notebook_fragment(data.get("text/plain"))
+                if plain:
+                    outputs.append(plain)
+        return "\n".join(part for part in outputs if part.strip())
+
+    def _extract_xml_text(self, file_path: Path) -> str:
+        try:
+            return self._extract_xml_bytes_text(file_path.read_bytes())
+        except Exception:
+            return ""
+
+    def _extract_xml_bytes_text(self, xml_bytes: bytes) -> str:
+        try:
+            root = ET.fromstring(xml_bytes)
+        except ET.ParseError:
+            return ""
+        parts = [str(text).strip() for text in root.itertext() if str(text).strip()]
+        return "\n".join(parts)
+
+    def _extract_with_office_converter(self, file_path: Path) -> str:
+        text = self._extract_with_command(["textutil", "-convert", "txt", "-stdout", str(file_path)])
+        if text.strip():
+            return text
+        executable = shutil.which("soffice") or shutil.which("libreoffice")
+        if not executable:
+            return ""
+        try:
+            with tempfile.TemporaryDirectory() as tempdir:
+                output_dir = Path(tempdir)
+                completed = subprocess.run(
+                    [executable, "--headless", "--convert-to", "txt:Text", "--outdir", str(output_dir), str(file_path)],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                if completed.returncode != 0:
+                    return ""
+                txt_files = sorted(output_dir.glob("*.txt"))
+                if not txt_files:
+                    return ""
+                return txt_files[0].read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            return ""
+
+    def _archive_numeric_sort_key(self, value: str) -> tuple[int, str]:
+        match = re.search(r"(\d+)(?=\.xml$)", value)
+        return (int(match.group(1)) if match else 0, value)
 
     def _decode_text(self, raw: bytes) -> str:
         if not raw:
@@ -3204,6 +3844,11 @@ class KnowledgeBaseService:
         base_url = self._resolve_base_url(provider)
         if not base_url:
             return None
+        if provider_type == "ollama":
+            parsed = urlsplit(base_url)
+            normalized_path = parsed.path.rstrip("/")
+            if normalized_path == "/v1":
+                return urlunsplit((parsed.scheme, parsed.netloc, "", parsed.query, parsed.fragment))
         if provider_type == "cohere":
             return base_url[:-3] if base_url.endswith("/v2") else base_url
         return base_url
