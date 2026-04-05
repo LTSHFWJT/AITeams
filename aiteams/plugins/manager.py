@@ -27,6 +27,7 @@ BUILTIN_KB_RETRIEVE_PLUGIN_ID = f"builtin:{BUILTIN_KB_RETRIEVE_PLUGIN_KEY}"
 BUILTIN_TEAM_MESSAGE_SEND_PLUGIN_ID = f"builtin:{BUILTIN_TEAM_MESSAGE_SEND_PLUGIN_KEY}"
 BUILTIN_TEAM_MESSAGE_REPLY_PLUGIN_ID = f"builtin:{BUILTIN_TEAM_MESSAGE_REPLY_PLUGIN_KEY}"
 BUILTIN_HUMAN_ESCALATE_PLUGIN_ID = f"builtin:{BUILTIN_HUMAN_ESCALATE_PLUGIN_KEY}"
+DEFAULT_PLUGIN_SANDBOX_TIMEOUT_SECONDS = 30.0
 
 BUILTIN_PLUGIN_DESCRIPTORS: dict[str, dict[str, Any]] = {
     BUILTIN_MEMORY_SEARCH_PLUGIN_KEY: {
@@ -319,6 +320,7 @@ class PluginManager:
         if not root.exists() or not (root / PLUGIN_MANIFEST).exists():
             raise ValueError(f"Plugin package `{install_path}` does not exist or is missing `{PLUGIN_MANIFEST}`.")
         loaded_manifest = validate_plugin_package(root)
+        sandbox_timeout = self._sandbox_timeout_seconds(loaded_manifest, runtime_config)
         sandbox = self._sandboxes.get(plugin_id)
         if sandbox is None:
             sandbox = PluginSandbox(
@@ -327,6 +329,7 @@ class PluginManager:
                 root_path=root,
                 runtime_config=runtime_config,
                 runtime_secret=runtime_secret,
+                stdout_timeout=sandbox_timeout,
             )
             self._sandboxes[plugin_id] = sandbox
         else:
@@ -334,9 +337,27 @@ class PluginManager:
             sandbox.root_path = root
             sandbox.runtime_config = runtime_config
             sandbox.runtime_secret = runtime_secret
+            sandbox.stdout_timeout = sandbox_timeout
             if force_reload:
                 sandbox.restart()
         return sandbox
+
+    def _sandbox_timeout_seconds(self, manifest: dict[str, Any], runtime_config: dict[str, Any]) -> float:
+        runtime = dict(manifest.get("runtime") or {})
+        candidates = [
+            runtime_config.get("sandbox_timeout_seconds"),
+            runtime_config.get("request_timeout_seconds"),
+            runtime.get("sandbox_timeout_seconds"),
+            runtime.get("request_timeout_seconds"),
+        ]
+        for value in candidates:
+            try:
+                timeout = float(value)
+            except (TypeError, ValueError):
+                continue
+            if timeout > 0:
+                return timeout
+        return DEFAULT_PLUGIN_SANDBOX_TIMEOUT_SECONDS
 
     def _require_plugin(self, plugin_id: str) -> dict[str, Any]:
         plugin = self.store.get_plugin(plugin_id, include_secret=True)

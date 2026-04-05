@@ -14,12 +14,20 @@ from aiteams.agent.kernel import AgentKernel
 from aiteams.common import events as event_types
 from aiteams.deepagents.builder import AgentLeafCompiler, DynamicTeamBuilder, TeamCompositeCompiler
 from aiteams.memory.scope import MemoryScopes
-from aiteams.plugins import build_plugin_base_tool
+from aiteams.plugins import build_plugin_base_tool, sanitize_tool_name
 from aiteams.plugins.manager import (
     BUILTIN_HUMAN_ESCALATE_PLUGIN_KEY,
     BUILTIN_KB_RETRIEVE_PLUGIN_KEY,
     BUILTIN_MEMORY_MANAGE_PLUGIN_KEY,
     BUILTIN_MEMORY_SEARCH_PLUGIN_KEY,
+)
+from aiteams.review_policies import (
+    FINAL_DELIVERY_REVIEW_TRIGGERS,
+    MEMORY_REVIEW_TRIGGERS,
+    TASK_REVIEW_TRIGGERS,
+    policy_has_trigger,
+    tool_policy_allowed_decisions,
+    union_allowed_decisions,
 )
 from aiteams.storage.metadata import MetadataStore
 from aiteams.utils import make_uuid7, pretty_json, trim_text, utcnow_iso
@@ -473,7 +481,10 @@ class DeepAgentsTeamRuntime:
                 action_name = str(action.get("name") or "").strip()
                 if not action_name:
                     continue
-                fallback_tool_name = f"plugin_{str(plugin.get('key') or 'plugin').replace('.', '_')}_{action_name}"
+                fallback_tool_name = self._plugin_action_fallback_tool_name(
+                    plugin_key=str(plugin.get("key") or "plugin"),
+                    action_name=action_name,
+                )
                 def _invoke_plugin_payload(payload: dict[str, Any], *, _plugin=plugin, _action=action_name) -> str:
                     result = self.agent_kernel.plugin_manager.invoke_plugin(
                         _plugin,
@@ -492,7 +503,7 @@ class DeepAgentsTeamRuntime:
                     return pretty_json(result)
 
                 tools.append(
-                    _build_plugin_base_tool(
+                    build_plugin_base_tool(
                         plugin_key=str(plugin.get("key") or "plugin"),
                         action=action,
                         fallback_tool_name=fallback_tool_name,
@@ -500,6 +511,13 @@ class DeepAgentsTeamRuntime:
                     )
                 )
         return tools
+
+    def _plugin_action_fallback_tool_name(self, *, plugin_key: str, action_name: str) -> str:
+        return f"plugin_{str(plugin_key or 'plugin').replace('.', '_')}_{str(action_name or '').strip()}"
+
+    def _plugin_action_tool_name(self, *, plugin_key: str, action: dict[str, Any], action_name: str) -> str:
+        fallback = self._plugin_action_fallback_tool_name(plugin_key=plugin_key, action_name=action_name)
+        return sanitize_tool_name(str(action.get("tool_name") or ""), fallback=fallback)
 
     def _memory_scope_list(self, scopes: MemoryScopes, *, scope: str) -> list[Any]:
         normalized = str(scope or "agent").strip().lower()
@@ -812,62 +830,56 @@ class DeepAgentsTeamRuntime:
         review_policies = [dict(item) for item in list(executor.get("review_policies") or []) if isinstance(item, dict)]
         if not review_policies:
             return None
-        if self._has_review_trigger(review_policies, {"before_agent_to_agent_message", "before_handoff_to_lower_level", "before_agent_receive_task"}):
+        task_policies = [policy for policy in review_policies if policy_has_trigger(policy, TASK_REVIEW_TRIGGERS)]
+        if task_policies:
             config["task"] = {
-                "allowed_decisions": ["approve", "reject", "edit"],
+                "allowed_decisions": union_allowed_decisions(task_policies),
                 "description": self._task_review_description(executor),
             }
-        if self._has_review_trigger(review_policies, {"before_memory_write"}):
+        memory_policies = [policy for policy in review_policies if policy_has_trigger(policy, MEMORY_REVIEW_TRIGGERS)]
+        if memory_policies:
             config["memory_remember"] = {
-                "allowed_decisions": ["approve", "reject", "edit"],
+                "allowed_decisions": union_allowed_decisions(memory_policies),
                 "description": self._memory_review_description(executor),
             }
         for plugin in list(executor.get("plugins") or []):
-            if not self._plugin_requires_review(review_policies, dict(plugin)):
-                continue
             manifest = dict(plugin.get("manifest_json") or plugin.get("manifest") or {})
+            permissions = {str(item).strip() for item in list(manifest.get("permissions") or []) if str(item).strip()}
             for action in list(manifest.get("actions") or []):
-                action_name = str((action or {}).get("name") or "").strip()
+                action_payload = dict(action or {})
+                action_name = str(action_payload.get("name") or "").strip()
                 if not action_name:
                     continue
-                tool_name = f"plugin_{str(plugin.get('key') or 'plugin').replace('.', '_')}_{action_name}"
+                matched: list[dict[str, Any]] = []
+                allowed_decisions: list[str] = []
+                for policy in review_policies:
+                    decisions = tool_policy_allowed_decisions(
+                        policy,
+                        plugin_key=str(plugin.get("key") or ""),
+                        action_name=action_name,
+                        permissions=permissions,
+                    )
+                    if not decisions:
+                        continue
+                    matched.append(policy)
+                    allowed_decisions.extend(decisions)
+                if not allowed_decisions:
+                    continue
+                tool_name = self._plugin_action_tool_name(
+                    plugin_key=str(plugin.get("key") or "plugin"),
+                    action=action_payload,
+                    action_name=action_name,
+                )
                 config[tool_name] = {
-                    "allowed_decisions": ["approve", "reject", "edit"],
+                    "allowed_decisions": list(dict.fromkeys(allowed_decisions)),
                     "description": self._plugin_review_description(executor, dict(plugin), action_name),
                 }
         return config or None
 
-    def _has_review_trigger(self, review_policies: list[dict[str, Any]], triggers: set[str]) -> bool:
-        for policy in review_policies:
-            config = dict(policy.get("config") or {})
-            policy_triggers = {str(item).strip() for item in list(config.get("triggers") or []) if str(item).strip()}
-            if policy_triggers.intersection(triggers):
-                return True
-        return False
-
-    def _plugin_requires_review(self, review_policies: list[dict[str, Any]], plugin: dict[str, Any]) -> bool:
-        manifest = dict(plugin.get("manifest_json") or plugin.get("manifest") or {})
-        plugin_key = str(plugin.get("key") or "")
-        permissions = {str(item).strip() for item in list(manifest.get("permissions") or []) if str(item).strip()}
-        for policy in review_policies:
-            config = dict(policy.get("config") or {})
-            policy_triggers = {str(item).strip() for item in list(config.get("triggers") or []) if str(item).strip()}
-            if not policy_triggers.intersection({"before_tool_call", "before_external_side_effect"}):
-                continue
-            conditions = dict(config.get("conditions") or {})
-            plugin_keys = {str(item).strip() for item in list(conditions.get("plugin_keys") or []) if str(item).strip()}
-            risk_tags = {str(item).strip() for item in list(conditions.get("risk_tags") or []) if str(item).strip()}
-            if plugin_keys and plugin_key not in plugin_keys:
-                continue
-            if risk_tags and not permissions.intersection(risk_tags):
-                continue
-            return True
-        return False
-
     def _should_review_final_delivery(self, executor: dict[str, Any]) -> bool:
-        return self._has_review_trigger(
-            [dict(item) for item in list(executor.get("review_policies") or []) if isinstance(item, dict)],
-            {"before_final_delivery", "final_delivery"},
+        return any(
+            policy_has_trigger(policy, FINAL_DELIVERY_REVIEW_TRIGGERS)
+            for policy in [dict(item) for item in list(executor.get("review_policies") or []) if isinstance(item, dict)]
         )
 
     def _task_review_description(self, executor: dict[str, Any]):

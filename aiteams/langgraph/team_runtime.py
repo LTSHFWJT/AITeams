@@ -18,6 +18,7 @@ from aiteams.plugins.manager import (
     BUILTIN_TEAM_MESSAGE_REPLY_PLUGIN_KEY,
     BUILTIN_TEAM_MESSAGE_SEND_PLUGIN_KEY,
 )
+from aiteams.review_policies import policy_matches_memory, policy_matches_tool
 from aiteams.storage.metadata import MetadataStore
 from aiteams.utils import make_id, pretty_json, trim_text, utcnow_iso
 from aiteams.workspace.manager import WorkspaceManager
@@ -1386,29 +1387,18 @@ class LangGraphTeamRuntime:
         candidates = self._review_candidates(team=team, source_agent_id=source_agent_id)
         plugin_key = str(plugin_ref.get("key") or "")
         permissions = {str(item) for item in list(dict(plugin_ref.get("manifest") or {}).get("permissions") or []) if str(item).strip()}
-        risk_tags = set(self._tool_call_risk_tags(plugin_ref))
         matched: list[dict[str, Any]] = []
         seen: set[str] = set()
         for policy in candidates:
             key = str(policy.get("id") or policy.get("key") or "")
             if key in seen:
                 continue
-            spec = dict(policy.get("spec") or {})
-            triggers = {str(item) for item in list(spec.get("triggers") or []) if str(item).strip()}
-            if not triggers.intersection({"before_tool_call", "before_external_side_effect"}):
-                continue
-            conditions = dict(spec.get("conditions") or {})
-            plugin_keys = {str(item) for item in list(conditions.get("plugin_keys") or []) if str(item).strip()}
-            if plugin_keys and plugin_key not in plugin_keys:
-                continue
-            actions = {str(item) for item in list(conditions.get("actions") or []) if str(item).strip()}
-            if actions and action not in actions:
-                continue
-            required_permissions = {str(item) for item in list(conditions.get("permissions") or []) if str(item).strip()}
-            if required_permissions and not required_permissions.intersection(permissions):
-                continue
-            required_risk_tags = {str(item) for item in list(conditions.get("risk_tags") or []) if str(item).strip()}
-            if required_risk_tags and not required_risk_tags.intersection(risk_tags):
+            if not policy_matches_tool(
+                policy,
+                plugin_key=plugin_key,
+                action_name=action,
+                permissions=permissions,
+            ):
                 continue
             matched.append(policy)
             seen.add(key)
@@ -1423,7 +1413,6 @@ class LangGraphTeamRuntime:
         records: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         candidates = self._review_candidates(team=team, source_agent_id=source_agent_id)
-        risk_tags = set(self._memory_write_risk_tags(target_name))
         record_kinds = {
             str((dict(item.get("metadata") or {})).get("kind") or "summary")
             for item in records
@@ -1435,19 +1424,11 @@ class LangGraphTeamRuntime:
             key = str(policy.get("id") or policy.get("key") or "")
             if key in seen:
                 continue
-            spec = dict(policy.get("spec") or {})
-            triggers = {str(item) for item in list(spec.get("triggers") or []) if str(item).strip()}
-            if not triggers.intersection({"before_memory_write", "memory_write"}):
-                continue
-            conditions = dict(spec.get("conditions") or {})
-            memory_scopes = {str(item) for item in list(conditions.get("memory_scopes") or conditions.get("scopes") or []) if str(item).strip()}
-            if memory_scopes and target_name not in memory_scopes:
-                continue
-            memory_kinds = {str(item) for item in list(conditions.get("memory_kinds") or []) if str(item).strip()}
-            if memory_kinds and not memory_kinds.intersection(record_kinds):
-                continue
-            required_risk_tags = {str(item) for item in list(conditions.get("risk_tags") or []) if str(item).strip()}
-            if required_risk_tags and not required_risk_tags.intersection(risk_tags):
+            if not policy_matches_memory(
+                policy,
+                memory_scope=target_name,
+                memory_kinds=record_kinds,
+            ):
                 continue
             matched.append(policy)
             seen.add(key)

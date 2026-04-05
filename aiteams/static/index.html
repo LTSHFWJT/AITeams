@@ -1142,43 +1142,55 @@
                 <h2>审核策略</h2>
               </div>
             </div>
-            <div class="page-grid resource-page-grid">
-              <section class="panel">
-                <div class="panel-title">
-                  <h3>Review Policy</h3>
+            <div class="page-grid provider-page-grid">
+              <section class="panel panel-wide">
+                <div class="provider-toolbar">
+                  <button id="review-policy-open-create" type="button">新增</button>
+                </div>
+                <div class="provider-list-head review-policy-list-head">
+                  <span>策略名称</span>
+                  <span>插件动作</span>
+                  <span>决策类型</span>
+                  <span>操作</span>
+                </div>
+                <div id="review-policy-list" class="provider-list"></div>
+                <div class="provider-pagination">
+                  <div id="review-policy-pagination-meta" class="provider-pagination-meta"></div>
+                  <label class="page-size-mini">
+                    <span>每页</span>
+                    <select id="review-policy-page-size">
+                      <option value="10" selected>10</option>
+                      <option value="20">20</option>
+                      <option value="50">50</option>
+                    </select>
+                  </label>
+                </div>
+                <pre id="review-policy-result" class="result hidden"></pre>
+              </section>
+            </div>
+
+            <div id="review-policy-modal" class="modal-shell hidden">
+              <div class="modal-backdrop" data-review-policy-modal-close></div>
+              <section class="modal-card resource-modal-card agent-definition-modal-card">
+                <div class="modal-head">
+                  <h3 id="review-policy-modal-title">新增审核策略</h3>
                 </div>
                 <form id="review-policy-form" class="form resource-editor-form">
-                  <div class="form-grid two">
-                    <label><span>Key</span><input id="review-policy-key" placeholder="review.high_risk_tools" /></label>
-                    <label><span>名称</span><input id="review-policy-name" placeholder="高风险工具审核" /></label>
+                  <label><span>名称</span><input id="review-policy-name" placeholder="高风险工具审核" /></label>
+                  <div class="member-toolbar">
+                    <span class="section-mini-title">策略列表</span>
+                    <div class="member-toolbar-actions">
+                      <button id="review-policy-rule-add" type="button" class="ghost">添加策略</button>
+                    </div>
                   </div>
-                  <label><span>说明</span><textarea id="review-policy-description" rows="3" placeholder="说明何时触发人工审核"></textarea></label>
-                  <div class="form-grid two">
-                    <label><span>触发器</span><select id="review-policy-triggers" multiple size="7"></select></label>
-                    <label><span>动作</span><select id="review-policy-actions" multiple size="7"></select></label>
-                  </div>
-                  <div class="form-grid three">
-                    <label><span>插件 Keys</span><select id="review-policy-plugin-keys" multiple size="7"></select></label>
-                    <label><span>权限 / 风险标签</span><textarea id="review-policy-risk-tags" rows="5" placeholder="每行一个"></textarea></label>
-                    <label><span>消息类型</span><select id="review-policy-message-types" multiple size="7"></select></label>
-                  </div>
-                  <div class="form-grid two">
-                    <label><span>记忆作用域</span><select id="review-policy-memory-scopes" multiple size="7"></select></label>
-                    <label><span>记忆类型</span><select id="review-policy-memory-kinds" multiple size="7"></select></label>
-                  </div>
+                  <div id="review-policy-rule-list" class="member-list"></div>
+                  <textarea id="review-policy-rules" class="hidden" aria-hidden="true"></textarea>
+                  <pre id="review-policy-modal-result" class="result hidden"></pre>
                   <div class="modal-actions">
-                    <button id="review-policy-reset" type="button" class="ghost">新建</button>
+                    <button id="review-policy-cancel" type="button" class="ghost">取消</button>
                     <button id="review-policy-save" type="submit">保存</button>
                   </div>
                 </form>
-                <pre id="review-policy-result" class="result hidden"></pre>
-              </section>
-
-              <section class="panel panel-wide">
-                <div class="panel-title">
-                  <h3>列表</h3>
-                </div>
-                <div id="review-policy-list" class="list"></div>
               </section>
             </div>
           </section>
@@ -1266,7 +1278,17 @@
                     <select id="agent-definition-skills" multiple class="hidden" aria-hidden="true" tabindex="-1"></select>
                   </div>
                   <label><span>知识库</span><select id="agent-definition-knowledge-bases"></select></label>
-                  <label><span>审核策略</span><select id="agent-definition-review-policies"></select></label>
+                  <div class="tag-multi-select-field">
+                    <span>审核策略</span>
+                    <div
+                      class="tag-multi-select"
+                      data-tag-select="agent-definition-review-policies"
+                      data-placeholder="搜索审核策略后点击选择"
+                      data-empty-selection-label="可多选，也可以不选"
+                      data-empty-list-label="暂无可选审核策略"
+                    ></div>
+                    <select id="agent-definition-review-policies" multiple class="hidden" aria-hidden="true" tabindex="-1"></select>
+                  </div>
                 </div>
                 <pre id="agent-definition-modal-result" class="result hidden"></pre>
                 <div class="modal-actions">
@@ -1493,7 +1515,7 @@
                   ></textarea>
                   <button id="team-chat-send" type="submit">发送</button>
                 </form>
-                <pre id="team-chat-result" class="result hidden"></pre>
+                <div id="team-chat-result" class="result team-chat-result hidden" data-result-format="team-chat-inline"></div>
               </section>
             </div>
           </section>
@@ -1509,7 +1531,30 @@
                 <div class="panel-title">
                   <h3>待审批事项</h3>
                 </div>
-                <div id="approval-list" class="list"></div>
+                <div class="provider-toolbar approvals-toolbar">
+                  <div class="skill-view-switch">
+                    <button id="approvals-view-pending" type="button" class="skill-view-toggle active">待审批</button>
+                    <button id="approvals-view-history" type="button" class="skill-view-toggle ghost">历史审批</button>
+                  </div>
+                </div>
+                <div class="provider-list-head approval-list-head">
+                  <span>审批项</span>
+                  <span>审批内容</span>
+                  <span>时间 / 结果</span>
+                  <span>操作</span>
+                </div>
+                <div id="approval-list" class="provider-list"></div>
+                <div class="provider-pagination">
+                  <div id="approval-pagination-meta" class="provider-pagination-meta"></div>
+                  <label class="page-size-mini">
+                    <span>每页</span>
+                    <select id="approval-page-size">
+                      <option value="10" selected>10</option>
+                      <option value="20">20</option>
+                      <option value="50">50</option>
+                    </select>
+                  </label>
+                </div>
               </section>
             </div>
           </section>

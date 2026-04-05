@@ -7,6 +7,7 @@ import threading
 from pathlib import Path
 from typing import Any, Sequence
 
+from aiteams.review_policy_migration import migrate_review_policies_in_connection
 from aiteams.utils import json_dumps, json_loads, make_id, make_uuid7, slugify, trim_text, utcnow_iso
 
 
@@ -541,6 +542,7 @@ class MetadataStore:
         self._normalize_skill_storage_layout()
         self._migrate_knowledge_bases_table()
         self._migrate_agent_templates_to_definitions()
+        self._migrate_review_policy_specs()
         self._connection.execute("DROP INDEX IF EXISTS idx_agent_templates_role")
         self._connection.execute("DROP INDEX IF EXISTS idx_skills_key_version")
         self._connection.execute("DROP INDEX IF EXISTS idx_skill_groups_sort")
@@ -900,6 +902,11 @@ class MetadataStore:
             migrated["tool_plugin_refs"] = list(dict.fromkeys(plugin_refs))
         migrated.pop("plugin_refs", None)
         return migrated
+
+    def _migrate_review_policy_specs(self) -> None:
+        if not self._table_exists("review_policies"):
+            return
+        migrate_review_policies_in_connection(self._connection, commit=False)
 
     def _migrate_skill_groups(self) -> None:
         return
@@ -2716,14 +2723,17 @@ class MetadataStore:
         self,
         *,
         review_policy_id: str | None,
-        key: str,
+        key: str | None,
         name: str,
-        description: str,
+        description: str | None,
         version: str,
         spec: dict[str, Any],
         status: str = "active",
     ) -> dict[str, Any]:
+        existing = self.get_review_policy(review_policy_id) if review_policy_id else None
         record_id = review_policy_id or make_uuid7()
+        stored_key = str(key or "").strip() or str((existing or {}).get("key") or "").strip() or record_id
+        stored_description = description if description is not None else str((existing or {}).get("description") or "")
         now = utcnow_iso()
         self.execute(
             """
@@ -2738,7 +2748,7 @@ class MetadataStore:
                 status = excluded.status,
                 updated_at = excluded.updated_at
             """,
-            (record_id, key, name, description, version, json_dumps(spec), status, record_id, now, now),
+            (record_id, stored_key, name, stored_description, version, json_dumps(spec), status, record_id, now, now),
         )
         saved = self.get_review_policy(record_id)
         assert saved is not None
@@ -2752,6 +2762,23 @@ class MetadataStore:
 
     def list_review_policies(self) -> list[dict[str, Any]]:
         return self._deserialize_many(self.fetch_all("SELECT * FROM review_policies ORDER BY updated_at DESC"))
+
+    def list_review_policies_page(self, *, limit: int | None = None, offset: int = 0) -> dict[str, Any]:
+        total = int((self.fetch_one("SELECT COUNT(*) AS count FROM review_policies") or {}).get("count", 0) or 0)
+        page_limit = max(1, limit or 10)
+        page_offset = max(0, offset)
+        items = self._deserialize_many(
+            self.fetch_all(
+                "SELECT * FROM review_policies ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                (page_limit, page_offset),
+            )
+        )
+        return {
+            "items": items,
+            "total": total,
+            "limit": page_limit,
+            "offset": page_offset,
+        }
 
     def delete_review_policy(self, review_policy_id: str) -> dict[str, Any] | None:
         existing = self.get_review_policy(review_policy_id)
@@ -3383,6 +3410,51 @@ class MetadataStore:
             sql += f" WHERE {' AND '.join(clauses)}"
         sql += " ORDER BY created_at DESC"
         return self._deserialize_many(self.fetch_all(sql, tuple(params)))
+
+    def list_approvals_page(
+        self,
+        *,
+        run_id: str | None = None,
+        status: str | None = None,
+        view: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if run_id:
+            clauses.append("run_id = ?")
+            params.append(run_id)
+        normalized_view = str(view or "").strip().lower()
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        elif normalized_view == "pending":
+            clauses.append("status = 'pending'")
+        elif normalized_view == "history":
+            clauses.append("status != 'pending'")
+        where_sql = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        total = int((self.fetch_one(f"SELECT COUNT(*) AS count FROM approvals{where_sql}", tuple(params)) or {}).get("count", 0) or 0)
+        page_limit = max(1, int(limit or 10))
+        page_offset = max(0, int(offset or 0))
+        rows = self._deserialize_many(
+            self.fetch_all(
+                (
+                    "SELECT * FROM approvals"
+                    f"{where_sql} "
+                    "ORDER BY COALESCE(resolved_at, created_at) DESC, created_at DESC "
+                    "LIMIT ? OFFSET ?"
+                ),
+                (*params, page_limit, page_offset),
+            )
+        )
+        return {
+            "items": rows,
+            "total": total,
+            "limit": page_limit,
+            "offset": page_offset,
+            "view": normalized_view or "all",
+        }
 
     def create_artifact(
         self,

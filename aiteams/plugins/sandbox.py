@@ -25,7 +25,7 @@ class PluginSandbox:
     root_path: Path
     runtime_config: dict[str, Any] = field(default_factory=dict)
     runtime_secret: dict[str, Any] = field(default_factory=dict)
-    stdout_timeout: float = 10.0
+    stdout_timeout: float = 30.0
     process: subprocess.Popen[str] | None = None
     started_at: str | None = None
     last_error: str | None = None
@@ -125,7 +125,9 @@ class PluginSandbox:
             try:
                 line = self._stdout_queue.get(timeout=self.stdout_timeout)
             except queue.Empty as exc:
-                self.last_error = f"Plugin sandbox request `{method}` timed out after {self.stdout_timeout:.1f}s."
+                stderr = "\n".join(self._stderr_lines[-6:])
+                suffix = f" stderr_tail={stderr}" if stderr else ""
+                self.last_error = f"Plugin sandbox request `{method}` timed out after {self.stdout_timeout:.1f}s.{suffix}"
                 raise RuntimeError(self.last_error) from exc
             if not line:
                 self.last_error = self._compose_crash_error()

@@ -1,81 +1,6 @@
-/*
 const DEFAULT_UI_METADATA = {
   review_policy: {
-    triggers: [
-      { value: "before_tool_call", label: "before_tool_call / 工具调用前" },
-      { value: "before_external_side_effect", label: "before_external_side_effect / 外部副作用前" },
-      { value: "before_memory_write", label: "before_memory_write / 记忆写入前" },
-      { value: "before_agent_to_agent_message", label: "before_agent_to_agent_message / Agent 消息前" },
-      { value: "before_handoff_to_lower_level", label: "before_handoff_to_lower_level / 向下交接前" },
-      { value: "before_escalation_to_upper_level", label: "before_escalation_to_upper_level / 向上升级前" },
-      { value: "before_final_delivery", label: "before_final_delivery / 最终交付前" },
-      { value: "before_agent_receive_task", label: "before_agent_receive_task / Agent 接任务前" },
-      { value: "before_task_ingress", label: "before_task_ingress / 任务入站前" },
-      { value: "final_delivery", label: "final_delivery / 交付消息" },
-    actions: [
-      { value: "approve", label: "approve / 允许" },
-      { value: "reject", label: "reject / 拒绝" },
-      { value: "edit_payload", label: "edit_payload / 编辑载荷" },
-      { value: "edit_records", label: "edit_records / 编辑记忆记录" },
-      { value: "reroute", label: "reroute / 改路由" },
-    ],
-    message_types: [
-      { value: "task", label: "task / 任务" },
-      { value: "dialogue", label: "dialogue / 对话" },
-      { value: "handoff", label: "handoff / 交接" },
-      { value: "delivery", label: "delivery / 交付" },
-      { value: "human_escalation", label: "human_escalation / 人工介入" },
-      { value: "escalation", label: "escalation / 升级" },
-    ],
-    memory_scopes: [
-      { value: "agent", label: "agent / Agent 私有" },
-      { value: "team", label: "team / 团队共享" },
-      { value: "project", label: "project / 项目共享" },
-      { value: "run", label: "run / 运行回顾" },
-      { value: "working", label: "working / 工作记忆" },
-    ],
-    memory_kinds: [
-      { value: "summary", label: "summary / 摘要" },
-      { value: "fact", label: "fact / 事实" },
-      { value: "deliverable", label: "deliverable / 交付物" },
-      { value: "risk", label: "risk / 风险" },
-      { value: "next_focus", label: "next_focus / 下一步焦点" },
-      { value: "team_message", label: "team_message / 团队消息" },
-      { value: "human_escalation", label: "human_escalation / 人工介入" },
-    ],
-  },
-  /*
-  team_edge_review: {
-    modes: [{ value: "must_review_before", label: "must_review_before / 必须前审" }],
-    message_types: [
-      { value: "task", label: "task / 任务" },
-      { value: "dialogue", label: "dialogue / 对话" },
-      { value: "handoff", label: "handoff / 交接" },
-    ],
-    phases: [
-      { value: "down", label: "down / 向下" },
-      { value: "up", label: "up / 向上" },
-    ],
-  },
-      { value: "agent", label: "agent / Agent 私有" },
-      { value: "team", label: "team / 团队共享" },
-      { value: "project", label: "project / 项目共享" },
-      { value: "run", label: "run / 当前运行" },
-      { value: "retrospective", label: "retrospective / 运行回顾" },
-    ],
-  },
-  legacy_memory_profile_block_removed
-};
-
-*/
-
-const DEFAULT_UI_METADATA = {
-  review_policy: {
-    triggers: [],
-    actions: [],
-    message_types: [],
-    memory_scopes: [],
-    memory_kinds: [],
+    decision_types: [],
   },
   team_edge_review: {
     modes: [],
@@ -175,6 +100,12 @@ const state = {
     offset: 0,
   },
   reviewPolicies: [],
+  reviewPolicyPage: {
+    items: [],
+    total: 0,
+    limit: 10,
+    offset: 0,
+  },
   agentTemplates: [],
   agentTemplatePage: {
     items: [],
@@ -210,8 +141,18 @@ const state = {
     messages: [],
     sending: false,
     draftMode: false,
+    pollTimer: 0,
+    pollBusy: false,
+    resultTimer: 0,
   },
   approvals: [],
+  approvalPage: {
+    items: [],
+    total: 0,
+    limit: 10,
+    offset: 0,
+    view: "pending",
+  },
   selectedTaskTeamDefinitionId: null,
   taskSessionThreads: loadPersistedTaskSessionThreads(),
   activePage: "overview",
@@ -308,6 +249,7 @@ const state = {
     knowledgeBaseRefs: false,
     knowledgeBasePage: false,
     reviewPolicyRefs: false,
+    reviewPolicyPage: false,
     agentTemplateRefs: false,
     agentTemplatePage: false,
     agentDefinitionRefs: false,
@@ -603,19 +545,20 @@ const knowledgeBaseSave = document.querySelector("#knowledge-base-save");
 const knowledgeBaseModalResult = document.querySelector("#knowledge-base-modal-result");
 
 const reviewPolicyForm = document.querySelector("#review-policy-form");
-const reviewPolicyKey = document.querySelector("#review-policy-key");
 const reviewPolicyName = document.querySelector("#review-policy-name");
-const reviewPolicyDescription = document.querySelector("#review-policy-description");
-const reviewPolicyTriggers = document.querySelector("#review-policy-triggers");
-const reviewPolicyActions = document.querySelector("#review-policy-actions");
-const reviewPolicyPluginKeys = document.querySelector("#review-policy-plugin-keys");
-const reviewPolicyRiskTags = document.querySelector("#review-policy-risk-tags");
-const reviewPolicyMessageTypes = document.querySelector("#review-policy-message-types");
-const reviewPolicyMemoryScopes = document.querySelector("#review-policy-memory-scopes");
-const reviewPolicyMemoryKinds = document.querySelector("#review-policy-memory-kinds");
-const reviewPolicyReset = document.querySelector("#review-policy-reset");
+const reviewPolicyRuleAdd = document.querySelector("#review-policy-rule-add");
+const reviewPolicyRuleList = document.querySelector("#review-policy-rule-list");
+const reviewPolicyRules = document.querySelector("#review-policy-rules");
+const reviewPolicyOpenCreate = document.querySelector("#review-policy-open-create");
+const reviewPolicyPageSize = document.querySelector("#review-policy-page-size");
+const reviewPolicyPaginationMeta = document.querySelector("#review-policy-pagination-meta");
 const reviewPolicyList = document.querySelector("#review-policy-list");
 const reviewPolicyResult = document.querySelector("#review-policy-result");
+const reviewPolicyModal = document.querySelector("#review-policy-modal");
+const reviewPolicyModalTitle = document.querySelector("#review-policy-modal-title");
+const reviewPolicyModalCloseButtons = Array.from(document.querySelectorAll("[data-review-policy-modal-close]"));
+const reviewPolicyCancel = document.querySelector("#review-policy-cancel");
+const reviewPolicyModalResult = document.querySelector("#review-policy-modal-result");
 
 const agentDefinitionForm = document.querySelector("#agent-definition-form");
 const agentDefinitionName = document.querySelector("#agent-definition-name");
@@ -752,6 +695,11 @@ const runPageSize = document.querySelector("#run-page-size");
 const runPaginationMeta = document.querySelector("#run-pagination-meta");
 const runDetail = document.querySelector("#run-detail");
 const approvalList = document.querySelector("#approval-list");
+const approvalsPanelTitle = document.querySelector('.page-view[data-page="approvals"] .panel-title h3');
+const approvalsViewPending = document.querySelector("#approvals-view-pending");
+const approvalsViewHistory = document.querySelector("#approvals-view-history");
+const approvalPageSize = document.querySelector("#approval-page-size");
+const approvalPaginationMeta = document.querySelector("#approval-pagination-meta");
 const teamChatTeamDefinition = document.querySelector("#team-chat-team-definition");
 const teamChatNewThread = document.querySelector("#team-chat-new-thread");
 const teamChatThreadList = document.querySelector("#team-chat-thread-list");
@@ -1678,12 +1626,93 @@ function renderPluginModalResult(value) {
   `;
 }
 
+function clearTeamChatResultTimer() {
+  if (state.teamChat.resultTimer) {
+    window.clearTimeout(state.teamChat.resultTimer);
+    state.teamChat.resultTimer = 0;
+  }
+}
+
+function teamChatResultPayload(value) {
+  if (typeof value === "string") {
+    return { message: value };
+  }
+  return isRecord(value) ? value : { message: String(value ?? "").trim() };
+}
+
+function teamChatResultTone(value) {
+  const payload = teamChatResultPayload(value);
+  if (typeof payload.error === "string" && payload.error.trim()) {
+    return "error";
+  }
+  if (
+    (typeof payload.detail === "string" && payload.detail.trim() && !String(payload.message || "").trim()) ||
+    (Array.isArray(payload.errors) && payload.errors.length)
+  ) {
+    return "error";
+  }
+  if (typeof payload.detail === "string" && payload.detail.trim()) {
+    return "warn";
+  }
+  return "ok";
+}
+
+function renderTeamChatResult(value) {
+  const payload = teamChatResultPayload(value);
+  const tone = teamChatResultTone(payload);
+  const title =
+    String(payload.error || "").trim() ||
+    String(payload.message || "").trim() ||
+    String(payload.detail || "").trim() ||
+    "\u64cd\u4f5c\u5b8c\u6210";
+  const meta = [
+    payload.thread_id ? `thread_id ${payload.thread_id}` : "",
+    payload.run_id ? `run ${payload.run_id}` : "",
+    payload.status ? `status ${payload.status}` : "",
+    payload.id ? `id ${payload.id}` : "",
+  ]
+    .filter(Boolean)
+    .map((item) => `<span>${escapeHtml(item)}</span>`)
+    .join("");
+  return `
+    <div class="team-chat-result-shell ${escapeHtml(tone)}">
+      <div class="team-chat-result-main">
+        <div class="team-chat-result-title">${escapeHtml(title)}</div>
+        ${meta ? `<div class="team-chat-result-meta">${meta}</div>` : ""}
+      </div>
+      <button type="button" class="team-chat-result-close" data-team-chat-result-close aria-label="\u5173\u95ed">
+        <span aria-hidden="true">\u00d7</span>
+      </button>
+    </div>
+  `;
+}
+
+function showTeamChatResult(value) {
+  if (!teamChatResult) {
+    return;
+  }
+  clearTeamChatResultTimer();
+  teamChatResult.innerHTML = renderTeamChatResult(value);
+  const tone = teamChatResultTone(value);
+  if (tone === "error") {
+    return;
+  }
+  state.teamChat.resultTimer = window.setTimeout(() => {
+    state.teamChat.resultTimer = 0;
+    hideResult(teamChatResult);
+  }, 10000);
+}
+
 function showResult(target, value) {
   if (!target) {
     return;
   }
   target.classList.remove("hidden");
   target.classList.remove("pending");
+  if (target === teamChatResult || target.dataset.resultFormat === "team-chat-inline") {
+    showTeamChatResult(value);
+    return;
+  }
   if (target.dataset.resultFormat === "skill-modal") {
     target.innerHTML = renderSkillModalResult(value);
     return;
@@ -1790,6 +1819,9 @@ function hideResult(target) {
   if (!target) {
     return;
   }
+  if (target === teamChatResult || target.dataset.resultFormat === "team-chat-inline") {
+    clearTeamChatResultTimer();
+  }
   target.classList.add("hidden");
   target.classList.remove("pending");
   target.innerHTML = "";
@@ -1799,6 +1831,9 @@ function hideResult(target) {
 async function switchPage(pageName, options = {}) {
   if (pageName === "static-memories" || pageName === "role-management" || pageName === "team-rules") {
     pageName = "responsibility-specs";
+  }
+  if (pageName !== "team-chat") {
+    stopTeamChatRunPolling();
   }
   state.activePage = pageName;
   state.activeNavSection = PAGE_SECTIONS[pageName] || "overview";
@@ -2855,22 +2890,321 @@ function populatePluginOptions() {
   );
 }
 
-function populateReviewPolicyPluginOptions() {
-  renderMultiSelect(reviewPolicyPluginKeys, pluginKeyOptions());
+function reviewPolicyDecisionTypeOptions() {
+  const options = uiMetadataOptions("review_policy", "decision_types");
+  return options.length
+    ? options
+    : [
+        { value: "approve", label: "approve / \u6279\u51c6" },
+        { value: "reject", label: "reject / \u62d2\u7edd" },
+        { value: "edit", label: "edit / \u7f16\u8f91" },
+      ];
 }
 
-function populateReviewPolicyConditionOptions() {
-  renderMultiSelect(reviewPolicyTriggers, uiMetadataOptions("review_policy", "triggers"));
-  renderMultiSelect(reviewPolicyActions, uiMetadataOptions("review_policy", "actions"));
-  renderMultiSelect(reviewPolicyMessageTypes, uiMetadataOptions("review_policy", "message_types"));
-  renderMultiSelect(reviewPolicyMemoryScopes, uiMetadataOptions("review_policy", "memory_scopes"));
-  renderMultiSelect(reviewPolicyMemoryKinds, uiMetadataOptions("review_policy", "memory_kinds"));
+function reviewPolicyDecisionTypeValues() {
+  return reviewPolicyDecisionTypeOptions()
+    .map((item) => String(item.value || "").trim())
+    .filter(Boolean);
+}
+
+function reviewPolicyDefaultDecisionValues() {
+  return Array.from(new Set(reviewPolicyDecisionTypeValues()));
+}
+
+function normalizeReviewPolicyRule(rule = {}) {
+  const pluginKey = String(rule?.plugin_key || rule?.pluginKey || "").trim();
+  const action = String(rule?.action || rule?.action_name || rule?.actionName || "").trim();
+  const allowedDecisionSet = new Set(reviewPolicyDecisionTypeValues());
+  const allowedDecisions = Array.from(
+    new Set((Array.isArray(rule?.allowed_decisions) ? rule.allowed_decisions : []).map((value) => String(value || "").trim()).filter(Boolean)),
+  ).filter((value) => allowedDecisionSet.has(value));
+  return {
+    plugin_key: pluginKey,
+    action: pluginKey ? action || "*" : "",
+    allowed_decisions: allowedDecisions,
+  };
+}
+
+function reviewPolicyRulesValue() {
+  try {
+    const parsed = safeParseJson(reviewPolicyRules?.value, []);
+    return Array.isArray(parsed)
+      ? parsed.filter((item) => item && typeof item === "object").map((item) => normalizeReviewPolicyRule(item))
+      : [];
+  } catch (error) {
+    return [];
+  }
+}
+
+function reviewPolicyPluginCatalog() {
+  const items = [];
+  const seen = new Set();
+  state.plugins.forEach((item) => {
+    const pluginKey = String(item?.key || "").trim();
+    if (!pluginKey || seen.has(pluginKey)) {
+      return;
+    }
+    seen.add(pluginKey);
+    items.push(item);
+  });
+  return items.sort((left, right) => {
+    const leftLabel = String(left?.name || left?.key || "").trim();
+    const rightLabel = String(right?.name || right?.key || "").trim();
+    return leftLabel.localeCompare(rightLabel, "zh-CN");
+  });
+}
+
+function reviewPolicyPluginLabel(pluginKey) {
+  const normalized = String(pluginKey || "").trim();
+  if (!normalized) {
+    return "";
+  }
+  const record = reviewPolicyPluginCatalog().find((item) => String(item?.key || "").trim() === normalized);
+  return String(record?.name || record?.key || normalized).trim() || normalized;
+}
+
+function reviewPolicyPluginOptions() {
+  return reviewPolicyPluginCatalog().map((item) => {
+    const pluginKey = String(item?.key || "").trim();
+    return {
+      value: pluginKey,
+      label: String(item?.name || pluginKey).trim() || pluginKey,
+    };
+  });
+}
+
+function reviewPolicyActionOptions(pluginKey) {
+  const normalizedPluginKey = String(pluginKey || "").trim();
+  if (!normalizedPluginKey) {
+    return [];
+  }
+  const options = [];
+  const seen = new Set();
+  const pushOption = (value, label) => {
+    const normalizedValue = String(value || "").trim();
+    if (!normalizedValue || seen.has(normalizedValue)) {
+      return;
+    }
+    seen.add(normalizedValue);
+    options.push({ value: normalizedValue, label });
+  };
+  pushOption("*", "\u5168\u90e8\u52a8\u4f5c");
+  reviewPolicyPluginCatalog()
+    .filter((plugin) => String(plugin?.key || "").trim() === normalizedPluginKey)
+    .forEach((plugin) => {
+      const manifest = isRecord(plugin?.manifest_json) ? plugin.manifest_json : isRecord(plugin?.manifest) ? plugin.manifest : isRecord(plugin?.descriptor) ? plugin.descriptor : {};
+      const actions = Array.isArray(manifest?.actions) ? manifest.actions : [];
+      actions.forEach((action) => {
+        const actionName = String(action?.name || "").trim();
+        if (!actionName) {
+          return;
+        }
+        pushOption(actionName, actionName);
+      });
+    });
+  return options.sort((left, right) => {
+    if (left.value === "*") {
+      return -1;
+    }
+    if (right.value === "*") {
+      return 1;
+    }
+    return left.label.localeCompare(right.label, "zh-CN");
+  });
+}
+
+function reviewPolicyRulesFromSpec(spec = {}) {
+  const directRules = Array.isArray(spec?.rules)
+    ? spec.rules.map((item) => normalizeReviewPolicyRule(item)).filter((item) => item.plugin_key)
+    : [];
+  if (directRules.length) {
+    return directRules;
+  }
+  const fallbackDecisions = Array.from(
+    new Set((spec?.allowed_decisions || []).map((value) => String(value || "").trim()).filter(Boolean)),
+  );
+  const decisions = fallbackDecisions.length ? fallbackDecisions : reviewPolicyDefaultDecisionValues();
+  const conditions = dictOrEmpty(spec.conditions);
+  return (conditions.plugin_actions || [])
+    .map((item) =>
+      normalizeReviewPolicyRule({
+        plugin_key: item?.plugin_key,
+        action: item?.action,
+        allowed_decisions: decisions,
+      }),
+    )
+    .filter((item) => item.plugin_key);
+}
+
+function setReviewPolicyRules(rules) {
+  if (!reviewPolicyRules) {
+    return;
+  }
+  reviewPolicyRules.value = prettyJson((rules || []).map((item) => normalizeReviewPolicyRule(item)));
+  renderReviewPolicyRules();
+}
+
+function mutateReviewPolicyRules(mutator) {
+  const rules = reviewPolicyRulesValue().map((item) => ({
+    ...item,
+    allowed_decisions: [...(item.allowed_decisions || [])],
+  }));
+  mutator(rules);
+  setReviewPolicyRules(rules);
+}
+
+function reviewPolicyRuleDecisionSet(rule) {
+  return new Set((rule?.allowed_decisions || []).map((value) => String(value || "").trim()).filter(Boolean));
+}
+
+function reviewPolicyRuleCardMarkup(rule, index) {
+  const normalizedRule = normalizeReviewPolicyRule(rule);
+  const pluginOptions = reviewPolicyPluginOptions();
+  const actionOptions = reviewPolicyActionOptions(normalizedRule.plugin_key);
+  if (normalizedRule.action && !actionOptions.some((item) => item.value === normalizedRule.action)) {
+    actionOptions.push({ value: normalizedRule.action, label: normalizedRule.action });
+  }
+  const selectedAction = actionOptions.some((item) => item.value === normalizedRule.action)
+    ? normalizedRule.action
+    : actionOptions[0]?.value || "";
+  const decisionOptions = reviewPolicyDecisionTypeOptions();
+  const decisionValues = reviewPolicyDefaultDecisionValues();
+  const selectedDecisionSet = reviewPolicyRuleDecisionSet(normalizedRule);
+  const allSelected = decisionValues.length > 0 && decisionValues.every((value) => selectedDecisionSet.has(value));
+  const decisionMarkup = decisionOptions
+    .map((item) => {
+      const value = String(item.value || "").trim();
+      return `
+        <label class="toggle-chip">
+          <input type="checkbox" data-review-policy-rule-decision="${escapeAttribute(value)}" data-rule-index="${index}" ${selectedDecisionSet.has(value) ? "checked" : ""} />
+          <span>${escapeHtml(item.label || value)}</span>
+        </label>
+      `;
+    })
+    .join("");
+  return `
+    <article class="member-card review-policy-rule-card">
+      <div class="member-card-head">
+        <strong>${escapeHtml(`\u7b56\u7565 ${index + 1}`)}</strong>
+        <div class="member-toolbar-actions">
+          <button type="button" class="ghost" data-review-policy-rule-remove="${index}">\u79fb\u9664</button>
+        </div>
+      </div>
+      <div class="form-grid two">
+        <label>
+          <span>\u63d2\u4ef6</span>
+          <select data-review-policy-rule-field="plugin_key" data-rule-index="${index}">
+            ${teamDefinitionSelectOptionsMarkup(pluginOptions, normalizedRule.plugin_key, {
+              allowBlank: true,
+              blankLabel: "\u8bf7\u9009\u62e9\u63d2\u4ef6",
+              fallbackLabel: "\u6682\u65e0\u53ef\u7528\u63d2\u4ef6",
+            })}
+          </select>
+        </label>
+        <label>
+          <span>\u63d2\u4ef6\u52a8\u4f5c</span>
+          <select data-review-policy-rule-field="action" data-rule-index="${index}" ${normalizedRule.plugin_key ? "" : "disabled"}>
+            ${teamDefinitionSelectOptionsMarkup(actionOptions, selectedAction, {
+              fallbackLabel: "\u8bf7\u5148\u9009\u62e9\u63d2\u4ef6",
+            })}
+          </select>
+        </label>
+      </div>
+      <div class="review-policy-rule-decisions">
+        <div class="member-card-head">
+          <strong>\u51b3\u7b56\u7c7b\u578b</strong>
+          <div class="member-toolbar-actions">
+            <button type="button" class="ghost" data-review-policy-rule-toggle-all="${index}">
+              ${allSelected ? "\u53d6\u6d88\u5168\u9009" : "\u5168\u9009"}
+            </button>
+          </div>
+        </div>
+        <div class="review-policy-rule-decision-list">${decisionMarkup}</div>
+      </div>
+    </article>
+  `;
+}
+
+function renderReviewPolicyRules() {
+  if (!reviewPolicyRuleList) {
+    return;
+  }
+  const rules = reviewPolicyRulesValue();
+  reviewPolicyRuleList.innerHTML = rules.length
+    ? rules.map((rule, index) => reviewPolicyRuleCardMarkup(rule, index)).join("")
+    : '<div class="detail empty compact-detail"><strong>\u6682\u65e0\u7b56\u7565</strong><p>\u8bf7\u5148\u6dfb\u52a0\u4e00\u6761\u63d2\u4ef6\u5ba1\u6838\u89c4\u5219\u3002</p></div>';
+}
+
+function addReviewPolicyRule() {
+  mutateReviewPolicyRules((rules) => {
+    const firstPlugin = reviewPolicyPluginOptions()[0]?.value || "";
+    const firstAction = reviewPolicyActionOptions(firstPlugin)[0]?.value || (firstPlugin ? "*" : "");
+    rules.push({
+      plugin_key: firstPlugin,
+      action: firstAction,
+      allowed_decisions: reviewPolicyDefaultDecisionValues(),
+    });
+  });
+}
+
+function removeReviewPolicyRule(index) {
+  mutateReviewPolicyRules((rules) => {
+    rules.splice(index, 1);
+  });
+}
+
+function updateReviewPolicyRuleField(index, field, value) {
+  mutateReviewPolicyRules((rules) => {
+    const rule = rules[index];
+    if (!rule) {
+      return;
+    }
+    if (field === "plugin_key") {
+      rule.plugin_key = String(value || "").trim();
+      const actionOptions = reviewPolicyActionOptions(rule.plugin_key);
+      rule.action = actionOptions.some((item) => item.value === rule.action) ? rule.action : actionOptions[0]?.value || (rule.plugin_key ? "*" : "");
+      return;
+    }
+    if (field === "action") {
+      rule.action = String(value || "").trim() || (rule.plugin_key ? "*" : "");
+    }
+  });
+}
+
+function toggleReviewPolicyRuleDecision(index, decisionValue, checked) {
+  mutateReviewPolicyRules((rules) => {
+    const rule = rules[index];
+    if (!rule) {
+      return;
+    }
+    const normalizedValue = String(decisionValue || "").trim();
+    const selected = new Set((rule.allowed_decisions || []).map((value) => String(value || "").trim()).filter(Boolean));
+    if (checked) {
+      selected.add(normalizedValue);
+    } else {
+      selected.delete(normalizedValue);
+    }
+    rule.allowed_decisions = Array.from(selected);
+  });
+}
+
+function toggleReviewPolicyRuleAllDecisions(index) {
+  mutateReviewPolicyRules((rules) => {
+    const rule = rules[index];
+    if (!rule) {
+      return;
+    }
+    const decisionValues = reviewPolicyDefaultDecisionValues();
+    const selected = new Set((rule.allowed_decisions || []).map((value) => String(value || "").trim()).filter(Boolean));
+    const allSelected = decisionValues.length > 0 && decisionValues.every((value) => selected.has(value));
+    rule.allowed_decisions = allSelected ? [] : decisionValues;
+  });
 }
 
 function populateTeamDefinitionReviewPolicyOptions() {
   renderMultiSelect(
     teamDefinitionReviewPolicies,
-    state.reviewPolicies.map((item) => ({ value: item.id, label: `${item.name || item.key || item.id} / ${item.key || item.id}` })),
+    state.reviewPolicies.map((item) => ({ value: item.id, label: `${item.name || item.id}` })),
   );
 }
 
@@ -2908,12 +3242,9 @@ function populateAgentDefinitionReferenceOptions(includeStaticMemoryRefs = []) {
     "暂无知识库",
     { allowBlank: true, blankLabel: "不选择" },
   );
-  renderSingleSelect(
+  renderMultiSelect(
     agentDefinitionReviewPolicies,
-    state.reviewPolicies.map((item) => ({ value: item.id, label: `${item.name || item.key || item.id} / ${item.key || item.id}` })),
-    agentDefinitionReviewPolicies?.value || "",
-    "暂无审核策略",
-    { allowBlank: true, blankLabel: "不选择" },
+    state.reviewPolicies.map((item) => ({ value: item.id, label: `${item.name || item.id}` })),
   );
 }
 
@@ -3195,6 +3526,120 @@ function currentTeamChatThread() {
 
 function teamChatThreadSessionId(thread) {
   return String(thread?.thread_id || thread?.session_thread_id || thread?.metadata_json?.session_thread_id || "").trim();
+}
+
+function currentTeamChatRunId(thread = currentTeamChatThread()) {
+  return String(thread?.last_run_id || thread?.metadata_json?.last_run_id || "").trim();
+}
+
+function teamChatNeedsRunPolling(thread = currentTeamChatThread()) {
+  if (state.activePage !== "team-chat" || !thread) {
+    return false;
+  }
+  const runId = currentTeamChatRunId(thread);
+  if (!runId) {
+    return false;
+  }
+  let hasInterrupted = false;
+  let hasResolvedAssistant = false;
+  state.teamChat.messages.forEach((item) => {
+    const payload = dictOrEmpty(item?.payload_json);
+    const messageRunId = String(item?.run_id || payload.run_id || "").trim();
+    if (messageRunId !== runId) {
+      return;
+    }
+    const interrupted = Boolean(payload.interrupted) || String(item?.status || "").trim() === "interrupted";
+    if (interrupted) {
+      hasInterrupted = true;
+      return;
+    }
+    const role = String(payload.role || item?.message_type || "").trim().toLowerCase();
+    if (role === "assistant") {
+      hasResolvedAssistant = true;
+    }
+  });
+  return hasInterrupted && !hasResolvedAssistant;
+}
+
+function teamChatResultMessageForStatus(status) {
+  return status === "completed"
+    ? "\u5ba1\u6279\u5df2\u5904\u7406\uff0c\u56e2\u961f\u6d4b\u8bd5\u7ed3\u679c\u5df2\u56de\u5199\u5230\u5f53\u524d\u4f1a\u8bdd\u3002"
+    : "\u5ba1\u6279\u5df2\u5904\u7406\uff0c\u5f53\u524d\u4f1a\u8bdd\u5df2\u540c\u6b65\u6700\u65b0\u8fd0\u884c\u72b6\u6001\u3002";
+}
+
+function hasTeamChatStatusNotice(runId, status) {
+  const expectedMessage = teamChatResultMessageForStatus(status);
+  return state.teamChat.messages.some((item) => {
+    const payload = dictOrEmpty(item?.payload_json);
+    const messageRunId = String(item?.run_id || payload.run_id || "").trim();
+    const body = String(payload.body || payload.content || payload.text || "").trim();
+    return messageRunId === String(runId || "").trim() && body === expectedMessage;
+  });
+}
+
+function stopTeamChatRunPolling() {
+  if (state.teamChat.pollTimer) {
+    window.clearTimeout(state.teamChat.pollTimer);
+    state.teamChat.pollTimer = 0;
+  }
+}
+
+async function pollTeamChatRun(expectedRunId) {
+  const activeThread = currentTeamChatThread();
+  const activeRunId = currentTeamChatRunId(activeThread);
+  if (
+    state.activePage !== "team-chat" ||
+    !activeThread ||
+    !activeRunId ||
+    activeRunId !== String(expectedRunId || "").trim() ||
+    !teamChatNeedsRunPolling(activeThread)
+  ) {
+    return;
+  }
+  state.teamChat.pollBusy = true;
+  try {
+    const payload = await api(`/api/runs/${activeRunId}`);
+    const status = String(payload?.run?.status || "").trim();
+    if (status && status !== "waiting_approval") {
+      await refreshTeamChatThreads(state.teamChat.selectedTeamDefinitionId, {
+        selectRecordId: state.teamChat.selectedThreadRecordId || "",
+        selectSessionThreadId: state.teamChat.selectedSessionThreadId || "",
+        preserveSelection: true,
+        allowEmptySelection: state.teamChat.draftMode,
+      });
+      await loadTeamChatMessages(state.teamChat.selectedThreadRecordId);
+      renderTeamChat();
+      scrollTeamChatToBottom();
+      if (!teamChatNeedsRunPolling(currentTeamChatThread()) && !hasTeamChatStatusNotice(activeRunId, status)) {
+        showResult(teamChatResult, {
+          message: teamChatResultMessageForStatus(status),
+          run_id: activeRunId,
+          status,
+        });
+      }
+    }
+  } catch (error) {
+    console.warn("Failed to poll team chat run", error);
+  } finally {
+    state.teamChat.pollBusy = false;
+    scheduleTeamChatRunPolling();
+  }
+}
+
+function scheduleTeamChatRunPolling() {
+  stopTeamChatRunPolling();
+  if (state.teamChat.pollBusy) {
+    return;
+  }
+  const activeThread = currentTeamChatThread();
+  const runId = currentTeamChatRunId(activeThread);
+  if (!runId || !teamChatNeedsRunPolling(activeThread)) {
+    return;
+  }
+  state.teamChat.pollTimer = window.setTimeout(() => {
+    state.teamChat.pollTimer = 0;
+    void pollTeamChatRun(runId);
+  }, 2500);
 }
 
 function teamChatMessageRole(item) {
@@ -3718,6 +4163,7 @@ function renderTeamChat() {
   renderTeamChatThreads();
   renderTeamChatMessages();
   renderTeamChatStatus();
+  scheduleTeamChatRunPolling();
 }
 
 function scrollTeamChatToBottom() {
@@ -3848,7 +4294,7 @@ async function submitTeamChatMessage() {
     if (response.interrupted) {
       showResult(teamChatResult, {
         message:
-          "\u672c\u6b21\u56e2\u961f\u6d4b\u8bd5\u89e6\u53d1\u4e86\u5ba1\u6279\u4e2d\u65ad\uff0c\u6d88\u606f\u5df2\u8bb0\u5f55\u5230\u4f1a\u8bdd\u6d41\u4e2d\u3002",
+          "\u672c\u6b21\u56e2\u961f\u6d4b\u8bd5\u5df2\u8fdb\u5165\u5ba1\u6279\u7b49\u5f85\uff0c\u5ba1\u6279\u5b8c\u6210\u540e\u7ed3\u679c\u4f1a\u81ea\u52a8\u56de\u5199\u5230\u5f53\u524d\u4f1a\u8bdd\u3002",
         thread_id: state.teamChat.selectedSessionThreadId || null,
       });
     }
@@ -6855,7 +7301,7 @@ function renderRuns() {
     : '<div class="detail empty compact-detail"><strong>暂无 Run</strong><p>启动任务后显示。</p></div>';
 }
 
-function renderApprovals() {
+function renderApprovalsLegacy() {
   approvalList.innerHTML = state.approvals.length
     ? state.approvals
         .map((item) =>
@@ -6871,6 +7317,96 @@ function renderApprovals() {
         )
         .join("")
     : cardMarkup({ title: "暂无待审批项", body: "当前无待审批。", meta: "" });
+}
+
+function approvalStatusLabel(status) {
+  const normalized = String(status || "").trim().toLowerCase();
+  if (normalized === "approved") {
+    return "已通过";
+  }
+  if (normalized === "rejected") {
+    return "已拒绝";
+  }
+  return "待审批";
+}
+
+function approvalStatusBadge(status) {
+  const normalized = String(status || "").trim().toLowerCase() || "pending";
+  return `<span class="approval-status-badge ${escapeHtml(normalized)}">${escapeHtml(approvalStatusLabel(normalized))}</span>`;
+}
+
+function approvalResultSummary(item) {
+  const resolution = dictOrEmpty(item?.resolution_json);
+  const comment = String(resolution.comment || "").trim();
+  const createdAt = formatTeamChatTime(item?.created_at) || item?.created_at || "-";
+  const resolvedAt = formatTeamChatTime(item?.resolved_at) || item?.resolved_at || "";
+  const statusLabel = approvalStatusLabel(item?.status);
+  if (state.approvalPage.view === "history") {
+    return {
+      primary: statusLabel,
+      secondary: [resolvedAt ? `审批时间 ${resolvedAt}` : "", comment ? `备注：${comment}` : ""].filter(Boolean).join(" / ") || "—",
+    };
+  }
+  return {
+    primary: statusLabel,
+    secondary: `创建时间 ${createdAt}`,
+  };
+}
+
+function approvalRowMarkup(item) {
+  const title = String(item?.title || item?.id || "-").trim() || "-";
+  const detail = String(item?.detail || "").trim() || "无审批内容";
+  const runId = String(item?.run_id || "").trim();
+  const result = approvalResultSummary(item);
+  const runAction = runId ? `<button type="button" class="ghost" data-run-open="${escapeAttribute(runId)}">查看 Run</button>` : "";
+  const actions =
+    state.approvalPage.view === "history"
+      ? `
+          ${runAction}
+        `
+      : `
+          <button type="button" data-approval-approve="${escapeAttribute(item.id || "")}" data-run-id="${escapeAttribute(runId)}">批准</button>
+          <button type="button" class="ghost" data-approval-reject="${escapeAttribute(item.id || "")}" data-run-id="${escapeAttribute(runId)}">拒绝</button>
+          ${runAction}
+        `;
+  return `
+    <article class="provider-row approval-row">
+      <div class="provider-main">
+        <strong title="${escapeAttribute(title)}">${escapeHtml(title)}</strong>
+        <span title="${escapeAttribute(runId || "")}">${escapeHtml(runId ? `run ${runId}` : "-")}</span>
+      </div>
+      <div class="provider-cell">
+        <strong title="${escapeAttribute(detail)}">${escapeHtml(detail)}</strong>
+        <span title="${escapeAttribute(detail)}">${escapeHtml(detail)}</span>
+      </div>
+      <div class="provider-cell">
+        <strong>${approvalStatusBadge(item?.status)}</strong>
+        <span title="${escapeAttribute(result.secondary)}">${escapeHtml(result.secondary)}</span>
+      </div>
+      <div class="provider-row-actions">
+        ${actions}
+      </div>
+    </article>
+  `;
+}
+
+function renderApprovals() {
+  if (approvalsPanelTitle) {
+    approvalsPanelTitle.textContent = state.approvalPage.view === "history" ? "历史审批" : "待审批事项";
+  }
+  approvalsViewPending?.classList.toggle("active", state.approvalPage.view === "pending");
+  approvalsViewPending?.classList.toggle("ghost", state.approvalPage.view !== "pending");
+  approvalsViewHistory?.classList.toggle("active", state.approvalPage.view === "history");
+  approvalsViewHistory?.classList.toggle("ghost", state.approvalPage.view !== "history");
+  if (approvalPageSize) {
+    approvalPageSize.value = String(state.approvalPage.limit || 10);
+  }
+  renderOffsetPagination(state.approvalPage, approvalPaginationMeta, "approval-page");
+  approvalList.innerHTML = state.approvalPage.items.length
+    ? state.approvalPage.items.map((item) => approvalRowMarkup(item)).join("")
+    : state.approvalPage.view === "history"
+      ? '<div class="detail empty compact-detail"><strong>暂无历史审批</strong><p>已完成的审批会显示在这里。</p></div>'
+      : '<div class="detail empty compact-detail"><strong>暂无待审批事项</strong><p>当前没有需要处理的审批。</p></div>';
 }
 
 function buildProviderPayloadFromForm() {
@@ -7881,85 +8417,158 @@ function renderKnowledgeBases() {
   renderOffsetPagination(state.knowledgeBasePage, knowledgeBasePaginationMeta, "knowledge-base-page");
 }
 
-function resetReviewPolicyForm() {
-  state.editingReviewPolicyId = null;
-  state.reviewPolicyBaseSpec = {};
-  reviewPolicyKey.value = "";
-  reviewPolicyName.value = "";
-  reviewPolicyDescription.value = "";
-  populateReviewPolicyPluginOptions();
-  populateReviewPolicyConditionOptions();
-  setMultiSelectValues(reviewPolicyTriggers, []);
-  setMultiSelectValues(reviewPolicyActions, []);
-  setMultiSelectValues(reviewPolicyPluginKeys, []);
-  reviewPolicyRiskTags.value = "";
-  setMultiSelectValues(reviewPolicyMessageTypes, []);
-  setMultiSelectValues(reviewPolicyMemoryScopes, []);
-  setMultiSelectValues(reviewPolicyMemoryKinds, []);
-  hideResult(reviewPolicyResult);
-  renderReviewPolicies();
+function openReviewPolicyModal() {
+  reviewPolicyModal?.classList.remove("hidden");
 }
 
-function fillReviewPolicyForm(item) {
+function closeReviewPolicyModal() {
+  reviewPolicyModal?.classList.add("hidden");
+  hideResult(reviewPolicyModalResult);
+}
+
+function compactLabelSummary(labels, emptyLabel = "未配置") {
+  const items = Array.from(new Set((labels || []).map((value) => String(value || "").trim()).filter(Boolean)));
+  if (!items.length) {
+    return emptyLabel;
+  }
+  if (items.length <= 2) {
+    return items.join("、");
+  }
+  return `${items.slice(0, 2).join("、")} 等 ${items.length} 项`;
+}
+
+function reviewPolicyDecisionValues(spec) {
+  const rules = reviewPolicyRulesFromSpec(spec);
+  if (rules.length) {
+    return Array.from(
+      new Set(
+        rules.flatMap((rule) => (rule.allowed_decisions || []).map((value) => String(value || "").trim()).filter(Boolean)),
+      ),
+    );
+  }
+  return Array.from(new Set((spec?.allowed_decisions || []).map((value) => String(value || "").trim()).filter(Boolean)));
+}
+
+function reviewPolicyDecisionLabels(spec) {
+  const options = new Map(reviewPolicyDecisionTypeOptions().map((item) => [item.value, item.label]));
+  return reviewPolicyDecisionValues(spec).map((value) => options.get(value) || value);
+}
+
+function reviewPolicyPluginActionLabels(spec) {
+  return Array.from(
+    new Set(
+      reviewPolicyRulesFromSpec(spec).map((item) => {
+        const pluginLabel = reviewPolicyPluginLabel(item.plugin_key) || item.plugin_key;
+        const actionLabel = item.action === "*" ? "\u5168\u90e8\u52a8\u4f5c" : item.action;
+        return `${pluginLabel} / ${actionLabel}`;
+      }),
+    ),
+  );
+}
+
+function resetReviewPolicyForm({ openModal = false } = {}) {
+  state.editingReviewPolicyId = null;
+  state.reviewPolicyBaseSpec = {};
+  reviewPolicyName.value = "";
+  setReviewPolicyRules([]);
+  if (reviewPolicyModalTitle) {
+    reviewPolicyModalTitle.textContent = "新增审核策略";
+  }
+  hideResult(reviewPolicyResult);
+  hideResult(reviewPolicyModalResult);
+  renderReviewPolicies();
+  if (openModal) {
+    openReviewPolicyModal();
+  }
+}
+
+function fillReviewPolicyForm(item, { openModal = false } = {}) {
   const spec = dictOrEmpty(item?.spec_json);
-  const conditions = dictOrEmpty(spec.conditions);
   state.editingReviewPolicyId = item.id;
   state.reviewPolicyBaseSpec = clone(spec);
-  reviewPolicyKey.value = item.key || "";
   reviewPolicyName.value = item.name || "";
-  reviewPolicyDescription.value = item.description || "";
-  populateReviewPolicyPluginOptions();
-  populateReviewPolicyConditionOptions();
-  setMultiSelectValues(reviewPolicyTriggers, spec.triggers || []);
-  setMultiSelectValues(reviewPolicyActions, spec.actions || []);
-  setMultiSelectValues(reviewPolicyPluginKeys, conditions.plugin_keys || []);
-  reviewPolicyRiskTags.value = listToLines(conditions.risk_tags || []);
-  setMultiSelectValues(reviewPolicyMessageTypes, conditions.message_types || []);
-  setMultiSelectValues(reviewPolicyMemoryScopes, conditions.memory_scopes || conditions.scopes || []);
-  setMultiSelectValues(reviewPolicyMemoryKinds, conditions.memory_kinds || []);
+  setReviewPolicyRules(reviewPolicyRulesFromSpec(spec));
+  if (reviewPolicyModalTitle) {
+    reviewPolicyModalTitle.textContent = "编辑审核策略";
+  }
   hideResult(reviewPolicyResult);
+  hideResult(reviewPolicyModalResult);
   renderReviewPolicies();
+  if (openModal) {
+    openReviewPolicyModal();
+  }
 }
 
 function buildReviewPolicyPayloadFromForm() {
   const spec = clone(state.reviewPolicyBaseSpec || {});
   const conditions = dictOrEmpty(spec.conditions);
-  conditions.plugin_keys = getMultiSelectValues(reviewPolicyPluginKeys);
-  conditions.risk_tags = linesToList(reviewPolicyRiskTags.value);
-  conditions.message_types = getMultiSelectValues(reviewPolicyMessageTypes);
-  conditions.memory_scopes = getMultiSelectValues(reviewPolicyMemoryScopes);
-  conditions.memory_kinds = getMultiSelectValues(reviewPolicyMemoryKinds);
-  spec.triggers = getMultiSelectValues(reviewPolicyTriggers);
-  spec.actions = getMultiSelectValues(reviewPolicyActions);
+  const rules = reviewPolicyRulesValue()
+    .filter((item) => item.plugin_key || item.action || (item.allowed_decisions || []).length)
+    .map((item) => normalizeReviewPolicyRule(item));
+  if (!rules.length) {
+    throw new Error("\u8bf7\u81f3\u5c11\u6dfb\u52a0\u4e00\u6761\u7b56\u7565\u3002");
+  }
+  rules.forEach((rule, index) => {
+    if (!rule.plugin_key) {
+      throw new Error(`\u7b56\u7565 ${index + 1} \u672a\u9009\u62e9\u63d2\u4ef6\u3002`);
+    }
+    if (!rule.action) {
+      throw new Error(`\u7b56\u7565 ${index + 1} \u672a\u9009\u62e9\u63d2\u4ef6\u52a8\u4f5c\u3002`);
+    }
+    if (!(rule.allowed_decisions || []).length) {
+      throw new Error(`\u7b56\u7565 ${index + 1} \u81f3\u5c11\u9700\u8981\u9009\u62e9\u4e00\u79cd\u51b3\u7b56\u7c7b\u578b\u3002`);
+    }
+  });
+  conditions.plugin_actions = rules.map((item) => ({ plugin_key: item.plugin_key, action: item.action }));
+  delete conditions.rules;
+  delete conditions.plugin_keys;
+  delete conditions.actions;
+  delete conditions.risk_tags;
+  delete conditions.message_types;
+  delete conditions.memory_scopes;
+  delete conditions.scopes;
+  delete conditions.memory_kinds;
+  delete spec.triggers;
+  spec.allowed_decisions = Array.from(new Set(rules.flatMap((item) => item.allowed_decisions || [])));
+  spec.rules = rules;
+  delete spec.actions;
   spec.conditions = conditions;
   return {
     id: state.editingReviewPolicyId,
-    key: reviewPolicyKey.value.trim(),
     name: reviewPolicyName.value.trim(),
-    description: reviewPolicyDescription.value.trim(),
     version: "v1",
     spec,
   };
 }
 
+function reviewPolicyRowMarkup(item) {
+  const spec = dictOrEmpty(item.spec_json);
+  const pluginActionSummary = compactLabelSummary(reviewPolicyPluginActionLabels(spec), "未配置插件动作");
+  const decisionSummary = compactLabelSummary(reviewPolicyDecisionLabels(spec), "未配置决策类型");
+  return `
+    <article class="provider-row review-policy-row">
+      <div class="provider-main">
+        <strong title="${escapeAttribute(item.name || item.id || "-")}">${escapeHtml(item.name || item.id || "-")}</strong>
+      </div>
+      <div class="provider-cell">
+        <strong title="${escapeAttribute(pluginActionSummary)}">${escapeHtml(pluginActionSummary)}</strong>
+      </div>
+      <div class="provider-cell">
+        <strong title="${escapeAttribute(decisionSummary)}">${escapeHtml(decisionSummary)}</strong>
+      </div>
+      <div class="provider-row-actions">
+        <button type="button" data-review-policy-edit="${item.id}">编辑</button>
+        <button type="button" class="ghost warn" data-review-policy-delete="${item.id}">删除</button>
+      </div>
+    </article>
+  `;
+}
+
 function renderReviewPolicies() {
-  reviewPolicyList.innerHTML = state.reviewPolicies.length
-    ? state.reviewPolicies
-        .map((item) => {
-          const spec = dictOrEmpty(item.spec_json);
-          return cardMarkup({
-            title: item.name || item.key || item.id,
-            body: item.description || "审核策略",
-            meta: `key=${item.key || "-"} / triggers=${(spec.triggers || []).length}`,
-            actions: `
-              <button type="button" data-review-policy-edit="${item.id}">编辑</button>
-              <button type="button" class="ghost" data-review-policy-delete="${item.id}">删除</button>
-            `,
-            active: item.id === state.editingReviewPolicyId,
-          });
-        })
-        .join("")
-    : cardMarkup({ title: "暂无审核策略", body: "先创建第一个审核策略。", meta: "" });
+  reviewPolicyList.innerHTML = state.reviewPolicyPage.items.length
+    ? state.reviewPolicyPage.items.map((item) => reviewPolicyRowMarkup(item)).join("")
+    : '<div class="detail empty compact-detail"><strong>暂无审核策略</strong><p>先创建第一个审核策略。</p></div>';
+  renderOffsetPagination(state.reviewPolicyPage, reviewPolicyPaginationMeta, "review-policy-page");
 }
 
 function renderMemoryProfiles() {
@@ -7999,7 +8608,7 @@ function resetAgentDefinitionForm({ openModal = false } = {}) {
   setMultiSelectValues(agentDefinitionPlugins, []);
   setMultiSelectValues(agentDefinitionSkills, []);
   agentDefinitionKnowledgeBases.value = "";
-  agentDefinitionReviewPolicies.value = "";
+  setMultiSelectValues(agentDefinitionReviewPolicies, []);
   syncAgentDefinitionModelOptions();
   if (agentDefinitionModalTitle) {
     agentDefinitionModalTitle.textContent = "新增 Agent 管理项";
@@ -8038,7 +8647,10 @@ function fillAgentDefinitionForm(item, { openModal = false } = {}) {
     normalizeResourceSelections(spec.skill_refs || spec.skills || [], state.skills),
   );
   agentDefinitionKnowledgeBases.value = normalizeResourceSelections(spec.knowledge_base_refs || [], state.knowledgeBases)[0] || "";
-  agentDefinitionReviewPolicies.value = normalizeResourceSelections(spec.review_policy_refs || [], state.reviewPolicies)[0] || "";
+  setMultiSelectValues(
+    agentDefinitionReviewPolicies,
+    normalizeResourceSelections(spec.review_policy_refs || [], state.reviewPolicies),
+  );
   if (agentDefinitionModalTitle) {
     agentDefinitionModalTitle.textContent = "编辑 Agent 管理项";
   }
@@ -8066,7 +8678,7 @@ function buildAgentDefinitionPayloadFromForm() {
   spec.knowledge_base_refs = agentDefinitionKnowledgeBases.value ? [agentDefinitionKnowledgeBases.value] : [];
   delete spec.memory_profile_ref;
   delete spec.memory_profile_id;
-  spec.review_policy_refs = agentDefinitionReviewPolicies.value ? [agentDefinitionReviewPolicies.value] : [];
+  spec.review_policy_refs = getMultiSelectValues(agentDefinitionReviewPolicies);
   return {
     id: state.editingAgentDefinitionId,
     name: agentDefinitionName.value.trim(),
@@ -8097,7 +8709,10 @@ function agentDefinitionRowMarkup(item) {
   const pluginCount = (spec.tool_plugin_refs || spec.plugin_refs || []).length;
   const skillCount = (spec.skill_refs || spec.skills || []).length;
   const knowledgeBaseLabel = agentDefinitionReferenceLabel(state.knowledgeBases, (spec.knowledge_base_refs || [])[0] || "", "未配置知识库");
-  const reviewPolicyLabel = agentDefinitionReferenceLabel(state.reviewPolicies, (spec.review_policy_refs || [])[0] || "", "未配置审核策略");
+  const reviewPolicyLabels = normalizeResourceSelections(spec.review_policy_refs || [], state.reviewPolicies).map(
+    (value) => agentDefinitionReferenceLabel(state.reviewPolicies, value, value),
+  );
+  const reviewPolicyLabel = compactLabelSummary(reviewPolicyLabels, "未配置审核策略");
   const resourceSummary =
     `角色管理: ${staticMemoryLabel} / 插件 ${pluginCount} / 技能 ${skillCount} / ` +
     `知识库: ${knowledgeBaseLabel} / 审核: ${reviewPolicyLabel}`;
@@ -8505,6 +9120,18 @@ async function loadReviewPolicies() {
   state.reviewPolicies = payload.items || [];
 }
 
+async function loadReviewPolicyPage() {
+  const params = new URLSearchParams({
+    limit: String(state.reviewPolicyPage.limit || 10),
+    offset: String(state.reviewPolicyPage.offset || 0),
+  });
+  const payload = await api(`/api/agent-center/review-policies?${params.toString()}`);
+  state.reviewPolicyPage.items = payload.items || [];
+  state.reviewPolicyPage.total = payload.total || 0;
+  state.reviewPolicyPage.limit = payload.limit || state.reviewPolicyPage.limit;
+  state.reviewPolicyPage.offset = payload.offset || 0;
+}
+
 async function loadPluginPage() {
   const params = new URLSearchParams({
     limit: String(state.pluginPage.limit || 10),
@@ -8664,8 +9291,18 @@ async function loadRunPage() {
 }
 
 async function loadApprovals() {
-  const payload = await api("/api/approvals?status=pending");
+  const params = new URLSearchParams({
+    limit: String(state.approvalPage.limit || 10),
+    offset: String(state.approvalPage.offset || 0),
+    view: String(state.approvalPage.view || "pending"),
+  });
+  const payload = await api(`/api/approvals?${params.toString()}`);
   state.approvals = payload.items || [];
+  state.approvalPage.items = payload.items || [];
+  state.approvalPage.total = payload.total || 0;
+  state.approvalPage.limit = payload.limit || state.approvalPage.limit;
+  state.approvalPage.offset = payload.offset || 0;
+  state.approvalPage.view = payload.view || state.approvalPage.view;
 }
 
 async function loadRunDetail(runId) {
@@ -8963,8 +9600,14 @@ async function ensureReviewPoliciesPage(force = false) {
     await loadReviewPolicies();
     state.loaded.reviewPolicyRefs = true;
   }
-  populateReviewPolicyPluginOptions();
-  populateReviewPolicyConditionOptions();
+  if (!state.loaded.reviewPolicyPage || force) {
+    await loadReviewPolicyPage();
+    state.loaded.reviewPolicyPage = true;
+  }
+  if (reviewPolicyPageSize) {
+    reviewPolicyPageSize.value = String(state.reviewPolicyPage.limit || 10);
+  }
+  renderReviewPolicyRules();
   if (state.editingReviewPolicyId) {
     const current = state.reviewPolicies.find((item) => item.id === state.editingReviewPolicyId) || null;
     if (!current) {
@@ -8975,11 +9618,7 @@ async function ensureReviewPoliciesPage(force = false) {
       renderReviewPolicies();
     }
   } else {
-    if (!reviewPolicyKey.value.trim() && !reviewPolicyName.value.trim()) {
-      resetReviewPolicyForm();
-    } else {
-      renderReviewPolicies();
-    }
+    renderReviewPolicies();
   }
 }
 
@@ -9372,6 +10011,7 @@ knowledgeBaseForm?.addEventListener("submit", async (event) => {
 reviewPolicyForm?.addEventListener("submit", async (event) => {
   event.preventDefault();
   hideResult(reviewPolicyResult);
+  hideResult(reviewPolicyModalResult);
   try {
     const payload = buildReviewPolicyPayloadFromForm();
     const method = state.editingReviewPolicyId ? "PUT" : "POST";
@@ -9379,12 +10019,18 @@ reviewPolicyForm?.addEventListener("submit", async (event) => {
       ? `/api/agent-center/review-policies/${state.editingReviewPolicyId}`
       : "/api/agent-center/review-policies";
     const saved = await api(path, { method, body: JSON.stringify(payload) });
-    fillReviewPolicyForm(saved);
-    invalidateData("reviewPolicyRefs", "agentDefinitionRefs", "teamDefinitions", "controlPlane");
+    if (!state.editingReviewPolicyId) {
+      state.reviewPolicyPage.offset = 0;
+    }
+    invalidateData("reviewPolicyRefs", "reviewPolicyPage", "agentDefinitionRefs", "teamDefinitions", "controlPlane");
     await ensureReviewPoliciesPage(true);
-    showResult(reviewPolicyResult, { message: "审核策略已保存", id: saved.id });
+    const refreshed =
+      state.reviewPolicies.find((item) => item.id === saved.id) ||
+      (await api(`/api/agent-center/review-policies/${saved.id}`));
+    fillReviewPolicyForm(refreshed, { openModal: true });
+    showResult(reviewPolicyModalResult, { message: "审核策略已保存", id: saved.id });
   } catch (error) {
-    showResult(reviewPolicyResult, errorResult(error));
+    showResult(reviewPolicyModalResult, errorResult(error));
   }
 });
 
@@ -9736,6 +10382,21 @@ runPageSize?.addEventListener("change", async () => {
   state.runPage.limit = Number(runPageSize.value || 10);
   state.runPage.offset = 0;
   await ensureRuntimePage(true);
+});
+approvalsViewPending?.addEventListener("click", async () => {
+  state.approvalPage.view = "pending";
+  state.approvalPage.offset = 0;
+  await ensureApprovalsPage(true);
+});
+approvalsViewHistory?.addEventListener("click", async () => {
+  state.approvalPage.view = "history";
+  state.approvalPage.offset = 0;
+  await ensureApprovalsPage(true);
+});
+approvalPageSize?.addEventListener("change", async () => {
+  state.approvalPage.limit = Number(approvalPageSize.value || 10);
+  state.approvalPage.offset = 0;
+  await ensureApprovalsPage(true);
 });
 teamChatTeamDefinition?.addEventListener("change", async () => {
   try {
@@ -10190,9 +10851,19 @@ knowledgeBaseDocumentList?.addEventListener("change", (event) => {
   }
   toggleKnowledgeBaseDocumentSelection(documentId, target.checked);
 });
-reviewPolicyReset?.addEventListener("click", async () => {
+reviewPolicyOpenCreate?.addEventListener("click", async () => {
   await ensureReviewPoliciesPage(true);
-  resetReviewPolicyForm();
+  resetReviewPolicyForm({ openModal: true });
+});
+reviewPolicyRuleAdd?.addEventListener("click", () => {
+  addReviewPolicyRule();
+});
+reviewPolicyModalCloseButtons.forEach((button) => button.addEventListener("click", closeReviewPolicyModal));
+reviewPolicyCancel?.addEventListener("click", closeReviewPolicyModal);
+reviewPolicyPageSize?.addEventListener("change", async () => {
+  state.reviewPolicyPage.limit = Number(reviewPolicyPageSize.value || 10);
+  state.reviewPolicyPage.offset = 0;
+  await ensureReviewPoliciesPage(true);
 });
 agentDefinitionOpenCreate?.addEventListener("click", async () => {
   await ensureAgentDefinitionsPage(true);
@@ -10266,6 +10937,12 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  const teamChatResultClose = event.target.closest("[data-team-chat-result-close]");
+  if (teamChatResultClose) {
+    hideResult(teamChatResult);
+    return;
+  }
+
   const providerDelete = event.target.closest("[data-provider-delete]");
   if (providerDelete) {
     const providerId = providerDelete.dataset.providerDelete;
@@ -10333,6 +11010,20 @@ document.addEventListener("click", async (event) => {
   if (knowledgeBasePageButton && !knowledgeBasePageButton.hasAttribute("disabled")) {
     state.knowledgeBasePage.offset = Number(knowledgeBasePageButton.dataset.knowledgeBasePage || 0);
     await ensureKnowledgeBasesPage(true);
+    return;
+  }
+
+  const reviewPolicyPageButton = event.target.closest("[data-review-policy-page]");
+  if (reviewPolicyPageButton && !reviewPolicyPageButton.hasAttribute("disabled")) {
+    state.reviewPolicyPage.offset = Number(reviewPolicyPageButton.dataset.reviewPolicyPage || 0);
+    await ensureReviewPoliciesPage(true);
+    return;
+  }
+
+  const approvalPageButton = event.target.closest("[data-approval-page]");
+  if (approvalPageButton && !approvalPageButton.hasAttribute("disabled")) {
+    state.approvalPage.offset = Number(approvalPageButton.dataset.approvalPage || 0);
+    await ensureApprovalsPage(true);
     return;
   }
 
@@ -10745,6 +11436,18 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  const reviewPolicyRuleRemove = event.target.closest("[data-review-policy-rule-remove]");
+  if (reviewPolicyRuleRemove) {
+    removeReviewPolicyRule(Number(reviewPolicyRuleRemove.dataset.reviewPolicyRuleRemove));
+    return;
+  }
+
+  const reviewPolicyRuleToggleAll = event.target.closest("[data-review-policy-rule-toggle-all]");
+  if (reviewPolicyRuleToggleAll) {
+    toggleReviewPolicyRuleAllDecisions(Number(reviewPolicyRuleToggleAll.dataset.reviewPolicyRuleToggleAll));
+    return;
+  }
+
   const reviewPolicyEdit = event.target.closest("[data-review-policy-edit]");
   if (reviewPolicyEdit) {
     try {
@@ -10752,7 +11455,7 @@ document.addEventListener("click", async (event) => {
       const item =
         state.reviewPolicies.find((entry) => entry.id === reviewPolicyEdit.dataset.reviewPolicyEdit) ||
         (await api(`/api/agent-center/review-policies/${reviewPolicyEdit.dataset.reviewPolicyEdit}`));
-      fillReviewPolicyForm(item);
+      fillReviewPolicyForm(item, { openModal: true });
     } catch (error) {
       showResult(reviewPolicyResult, errorResult(error));
     }
@@ -10763,15 +11466,19 @@ document.addEventListener("click", async (event) => {
   if (reviewPolicyDelete) {
     const itemId = reviewPolicyDelete.dataset.reviewPolicyDelete;
     const item = state.reviewPolicies.find((entry) => entry.id === itemId) || null;
-    if (!window.confirm(`确认删除审核策略“${item?.name || item?.key || itemId}”？`)) {
+    if (!window.confirm(`确认删除审核策略“${item?.name || itemId}”？`)) {
       return;
     }
     try {
+      if (state.reviewPolicyPage.items.length === 1 && state.reviewPolicyPage.offset > 0) {
+        state.reviewPolicyPage.offset = Math.max(0, state.reviewPolicyPage.offset - state.reviewPolicyPage.limit);
+      }
       await api(`/api/agent-center/review-policies/${itemId}`, { method: "DELETE" });
       if (state.editingReviewPolicyId === itemId) {
         resetReviewPolicyForm();
+        closeReviewPolicyModal();
       }
-      invalidateData("reviewPolicyRefs", "agentDefinitionRefs", "teamDefinitions", "controlPlane");
+      invalidateData("reviewPolicyRefs", "reviewPolicyPage", "agentDefinitionRefs", "teamDefinitions", "controlPlane");
       await ensureReviewPoliciesPage(true);
       showResult(reviewPolicyResult, { message: "审核策略已删除", id: itemId });
     } catch (error) {
@@ -11129,6 +11836,22 @@ document.addEventListener("change", (event) => {
   const memberField = event.target.closest("[data-team-member-field]");
   if (memberField) {
     updateMemberField(Number(memberField.dataset.memberIndex), memberField.dataset.teamMemberField, memberField.value);
+  }
+  const reviewPolicyRuleField = event.target.closest("[data-review-policy-rule-field]");
+  if (reviewPolicyRuleField) {
+    updateReviewPolicyRuleField(
+      Number(reviewPolicyRuleField.dataset.ruleIndex),
+      reviewPolicyRuleField.dataset.reviewPolicyRuleField,
+      fieldValue(reviewPolicyRuleField),
+    );
+  }
+  const reviewPolicyRuleDecision = event.target.closest("[data-review-policy-rule-decision]");
+  if (reviewPolicyRuleDecision) {
+    toggleReviewPolicyRuleDecision(
+      Number(reviewPolicyRuleDecision.dataset.ruleIndex),
+      reviewPolicyRuleDecision.dataset.reviewPolicyRuleDecision,
+      reviewPolicyRuleDecision.checked,
+    );
   }
   const teamDefinitionMemberField = event.target.closest("[data-team-definition-member-field]");
   if (teamDefinitionMemberField) {

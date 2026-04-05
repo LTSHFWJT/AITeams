@@ -50,48 +50,10 @@ LEGACY_DEFAULT_SKILL_KEYS = {
 }
 AGENT_CENTER_UI_METADATA = {
     "review_policy": {
-        "triggers": [
-            {"value": "before_tool_call", "label": "before_tool_call / 工具调用前"},
-            {"value": "before_external_side_effect", "label": "before_external_side_effect / 外部副作用前"},
-            {"value": "before_memory_write", "label": "before_memory_write / 记忆写入前"},
-            {"value": "before_agent_to_agent_message", "label": "before_agent_to_agent_message / Agent 消息前"},
-            {"value": "before_handoff_to_lower_level", "label": "before_handoff_to_lower_level / 向下交接前"},
-            {"value": "before_escalation_to_upper_level", "label": "before_escalation_to_upper_level / 向上升级前"},
-            {"value": "before_final_delivery", "label": "before_final_delivery / 最终交付前"},
-            {"value": "before_agent_receive_task", "label": "before_agent_receive_task / Agent 接任务前"},
-            {"value": "before_task_ingress", "label": "before_task_ingress / 任务入站前"},
-            {"value": "final_delivery", "label": "final_delivery / 交付消息"},
-        ],
-        "actions": [
-            {"value": "approve", "label": "approve / 允许"},
+        "decision_types": [
+            {"value": "approve", "label": "approve / 批准"},
             {"value": "reject", "label": "reject / 拒绝"},
-            {"value": "edit_payload", "label": "edit_payload / 编辑载荷"},
-            {"value": "edit_records", "label": "edit_records / 编辑记忆记录"},
-            {"value": "reroute", "label": "reroute / 改路由"},
-        ],
-        "message_types": [
-            {"value": "task", "label": "task / 任务"},
-            {"value": "dialogue", "label": "dialogue / 对话"},
-            {"value": "handoff", "label": "handoff / 交接"},
-            {"value": "delivery", "label": "delivery / 交付"},
-            {"value": "human_escalation", "label": "human_escalation / 人工介入"},
-            {"value": "escalation", "label": "escalation / 升级"},
-        ],
-        "memory_scopes": [
-            {"value": "agent", "label": "agent / Agent 私有"},
-            {"value": "team", "label": "team / 团队共享"},
-            {"value": "project", "label": "project / 项目共享"},
-            {"value": "run", "label": "run / 运行回顾"},
-            {"value": "working", "label": "working / 工作记忆"},
-        ],
-        "memory_kinds": [
-            {"value": "summary", "label": "summary / 摘要"},
-            {"value": "fact", "label": "fact / 事实"},
-            {"value": "deliverable", "label": "deliverable / 交付物"},
-            {"value": "risk", "label": "risk / 风险"},
-            {"value": "next_focus", "label": "next_focus / 下一步焦点"},
-            {"value": "team_message", "label": "team_message / 团队消息"},
-            {"value": "human_escalation", "label": "human_escalation / 人工介入"},
+            {"value": "edit", "label": "edit / 编辑"},
         ],
     },
     "team_edge_review": {

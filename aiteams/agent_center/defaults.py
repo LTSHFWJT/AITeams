@@ -426,10 +426,9 @@ def default_review_policies() -> list[dict[str, Any]]:
             "spec": {
                 "triggers": ["before_tool_call", "before_external_side_effect"],
                 "conditions": {
-                    "plugin_keys": ["terminal_kit"],
-                    "risk_tags": ["workspace_write", "terminal_safe"],
+                    "plugin_actions": [{"plugin_key": "terminal_kit", "action": "*"}],
                 },
-                "actions": ["approve", "reject", "edit_payload"],
+                "allowed_decisions": ["approve", "reject", "edit"],
             },
         },
         {
@@ -439,8 +438,7 @@ def default_review_policies() -> list[dict[str, Any]]:
             "version": "v1",
             "spec": {
                 "triggers": ["before_agent_to_agent_message", "before_escalation_to_upper_level"],
-                "conditions": {"message_types": ["handoff", "escalation"]},
-                "actions": ["approve", "reject", "reroute"],
+                "allowed_decisions": ["approve", "reject", "edit"],
             },
         },
         {
@@ -450,11 +448,8 @@ def default_review_policies() -> list[dict[str, Any]]:
             "version": "v1",
             "spec": {
                 "triggers": ["before_memory_write"],
-                "conditions": {
-                    "memory_scopes": ["team", "project"],
-                    "risk_tags": ["memory_mutation", "shared_memory"],
-                },
-                "actions": ["approve", "reject", "edit_records"],
+                "conditions": {},
+                "allowed_decisions": ["approve", "reject", "edit"],
             },
         },
     ]

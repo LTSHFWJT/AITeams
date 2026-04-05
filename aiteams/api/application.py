@@ -20,6 +20,7 @@ from aiteams.agent_center import AgentCenterService
 from aiteams.knowledge import KnowledgeBaseService
 from aiteams.plugins import PluginManager, describe_plugin_base_tools
 from aiteams.plugins.manifest import PLUGIN_MANIFEST
+from aiteams.review_policies import review_policy_spec
 from aiteams.role_specs import normalize_role_spec
 from aiteams.runtime.engine import RuntimeEngine
 from aiteams.skills import SkillLibraryScan, SkillValidationIssue, ValidatedSkill, scan_skill_library
@@ -628,6 +629,10 @@ class WebApplication:
                         raise AppError(404, "Knowledge document does not exist.")
                     return self._json(200, {"deleted": True, "id": knowledge_document_id})
             if method == "GET" and path == "/api/agent-center/review-policies":
+                limit = self._optional_int(query.get("limit"))
+                offset = self._optional_int(query.get("offset")) or 0
+                if limit is not None or offset:
+                    return self._json(200, self.container.store.list_review_policies_page(limit=limit, offset=offset))
                 return self._json(200, {"items": self.container.store.list_review_policies()})
             if method == "POST" and path == "/api/agent-center/review-policies":
                 payload = self._parse_json(body)
@@ -699,8 +704,6 @@ class WebApplication:
                     mode="team_chat",
                 )
                 defaults = self.container.store.default_scope_ids()
-                title = self._optional_str(payload.get("title")) or f"团队测试 · {definition.get('name') or definition_id}"
-                title = self._optional_str(payload.get("title")) or f"团队测试 · {definition.get('name') or definition_id}"
                 title = self._optional_str(payload.get("title")) or f"\u56e2\u961f\u6d4b\u8bd5 - {definition.get('name') or definition_id}"
                 build = self.container.agent_center.build_team_definition(definition_id, blueprint_name=f"{definition.get('name') or definition_id} Chat Runtime")
                 blueprint = dict(build.get("blueprint") or {})
@@ -757,11 +760,9 @@ class WebApplication:
                 assistant_status = "delivered"
                 if interrupted:
                     assistant_payload["interrupted"] = True
-                    assistant_payload["body"] = assistant_text or "当前团队测试触发了审批等待，测试页暂不支持继续审批流。"
-                    assistant_payload["body"] = assistant_text or "当前团队测试触发了审批等待，测试页暂不支持继续审批流。"
                     assistant_payload["body"] = (
                         assistant_text
-                        or "\u5f53\u524d\u56e2\u961f\u6d4b\u8bd5\u89e6\u53d1\u4e86\u5ba1\u6279\u7b49\u5f85\uff0c\u6d4b\u8bd5\u9875\u6682\u4e0d\u652f\u6301\u7ee7\u7eed\u5ba1\u6279\u6d41\u3002"
+                        or "\u5f53\u524d\u56e2\u961f\u6d4b\u8bd5\u5df2\u8fdb\u5165\u5ba1\u6279\u7b49\u5f85\uff0c\u5ba1\u6279\u5b8c\u6210\u540e\u7ed3\u679c\u4f1a\u81ea\u52a8\u56de\u5199\u5230\u5f53\u524d\u4f1a\u8bdd\u3002"
                     )
                     assistant_status = "interrupted"
                 assistant_event = self.container.store.add_message_event(
@@ -891,6 +892,9 @@ class WebApplication:
             if path.startswith("/api/runs/") and path.endswith("/resume") and method == "POST":
                 run_id = path.split("/")[3]
                 bundle = asyncio.run(self.container.runtime.resume_run(run_id))
+                team_chat_thread = self._sync_team_chat_after_run(bundle)
+                if team_chat_thread is not None:
+                    bundle["team_chat_thread"] = self._team_chat_thread_resource(team_chat_thread)
                 return self._json(200, bundle)
             if path.startswith("/api/runs/") and path.endswith("/messages") and method == "POST":
                 run_id = path.split("/")[3]
@@ -939,6 +943,20 @@ class WebApplication:
                 bundle["workspace_files"] = self._workspace_files_for_run(bundle["run"])
                 return self._json(200, bundle)
             if method == "GET" and path == "/api/approvals":
+                limit = self._optional_int(query.get("limit"))
+                offset = self._optional_int(query.get("offset")) or 0
+                view = self._optional_str(query.get("view"))
+                if limit is not None or offset or view:
+                    return self._json(
+                        200,
+                        self.container.store.list_approvals_page(
+                            run_id=self._optional_str(query.get("run_id")),
+                            status=self._optional_str(query.get("status")),
+                            view=view,
+                            limit=limit,
+                            offset=offset,
+                        ),
+                    )
                 return self._json(
                     200,
                     {
@@ -1029,6 +1047,96 @@ class WebApplication:
         payload["last_message_preview"] = self._optional_str(metadata.get("last_message_preview"))
         payload["last_message_at"] = self._optional_str(metadata.get("last_message_at"))
         return payload
+
+    def _team_chat_thread_for_run(self, bundle: dict[str, Any]) -> dict[str, Any] | None:
+        run = dict((bundle or {}).get("run") or {})
+        run_id = self._optional_str(run.get("id"))
+        if not run_id:
+            return None
+        runtime_threads = self.container.store.list_task_threads(run_id=run_id)
+        runtime_thread = runtime_threads[0] if runtime_threads else None
+        team_definition_id = self._optional_str((runtime_thread or {}).get("team_definition_id"))
+        if not team_definition_id:
+            blueprint_spec = dict(((bundle or {}).get("blueprint") or {}).get("spec_json") or {})
+            metadata = dict(blueprint_spec.get("metadata") or {})
+            team_definition_id = (
+                self._optional_str(metadata.get("team_definition_id"))
+                or self._optional_str(dict(metadata.get("deepagents_runtime") or {}).get("team_definition_id"))
+                or self._optional_str(dict(metadata.get("team_runtime") or {}).get("team_definition_id"))
+            )
+        if not team_definition_id:
+            return None
+        session_thread_id = self._optional_str(dict(run.get("state_json") or {}).get("session_thread_id"))
+        if not session_thread_id and runtime_thread is not None:
+            session_thread_id = self._optional_str(dict(runtime_thread.get("metadata_json") or {}).get("session_thread_id"))
+        team_chat_threads = self.container.store.list_task_threads(team_definition_id=team_definition_id, mode="team_chat")
+        for item in team_chat_threads:
+            metadata = dict(item.get("metadata_json") or {})
+            if self._optional_str(metadata.get("last_run_id")) == run_id:
+                return item
+        if session_thread_id:
+            for item in team_chat_threads:
+                metadata = dict(item.get("metadata_json") or {})
+                if self._optional_str(metadata.get("session_thread_id")) == session_thread_id:
+                    return item
+        return None
+
+    def _sync_team_chat_after_run(self, bundle: dict[str, Any]) -> dict[str, Any] | None:
+        run = dict((bundle or {}).get("run") or {})
+        run_id = self._optional_str(run.get("id"))
+        if not run_id:
+            return None
+        thread = self._team_chat_thread_for_run(bundle)
+        if thread is None:
+            return None
+        run_status = str(run.get("status") or "").strip()
+        if run_status == "waiting_approval":
+            return thread
+        existing_events = self.container.store.list_message_events(thread_id=str(thread["id"]), run_id=run_id)
+        for item in existing_events:
+            payload = dict(item.get("payload_json") or {})
+            role = str(payload.get("role") or item.get("message_type") or "").strip().lower()
+            if role != "assistant":
+                continue
+            if bool(payload.get("interrupted")) or str(item.get("status") or "").strip() == "interrupted":
+                continue
+            return thread
+        assistant_text = self._team_chat_response_text(bundle) or str(run.get("summary") or "").strip()
+        if not assistant_text:
+            return thread
+        thread_metadata = dict(thread.get("metadata_json") or {})
+        session_thread_id = self._optional_str(thread_metadata.get("session_thread_id"))
+        assistant_event = self.container.store.add_message_event(
+            run_id=run_id,
+            thread_id=str(thread["id"]),
+            source_agent_id=self._optional_str(thread_metadata.get("team_definition_id")),
+            target_agent_id="user",
+            message_type="assistant",
+            payload={
+                "role": "assistant",
+                "body": assistant_text,
+                "thread_id": session_thread_id,
+                "run_id": run_id,
+                "run_status": run_status,
+                "resumed_from_approval": True,
+            },
+        )
+        current_last_run_id = self._optional_str(thread_metadata.get("last_run_id"))
+        if current_last_run_id and current_last_run_id != run_id:
+            return thread
+        thread_metadata.update(
+            {
+                "last_run_id": run_id,
+                "last_message_preview": trim_text(assistant_text, limit=120),
+                "last_message_at": self._optional_str(assistant_event.get("created_at")) or utcnow_iso(),
+            }
+        )
+        updated = self.container.store.update_task_thread(
+            str(thread["id"]),
+            title=str(thread.get("title") or ""),
+            metadata=thread_metadata,
+        )
+        return updated or thread
 
     def _team_chat_response_text(self, bundle: dict[str, Any]) -> str:
         run = dict((bundle or {}).get("run") or {})
@@ -2462,14 +2570,17 @@ class WebApplication:
         return result
 
     def _save_review_policy(self, payload: dict[str, Any], *, review_policy_id: str | None) -> dict[str, Any]:
-        self._require_fields(payload, "key", "name")
+        self._require_fields(payload, "name")
+        existing = self.container.store.get_review_policy(review_policy_id) if review_policy_id else None
+        raw_spec = dict(payload.get("spec") or {})
+        raw_spec["triggers"] = ["before_tool_call", "before_external_side_effect"]
         return self.container.store.save_review_policy(
             review_policy_id=review_policy_id,
-            key=str(payload["key"]),
+            key=self._optional_str((existing or {}).get("key")),
             name=str(payload["name"]),
-            description=str(payload.get("description") or ""),
-            version=str(payload.get("version") or "v1"),
-            spec=dict(payload.get("spec") or {}),
+            description=str((existing or {}).get("description") or ""),
+            version=str(payload.get("version") or (existing or {}).get("version") or "v1"),
+            spec=review_policy_spec({"spec": raw_spec}),
         )
 
     def _save_agent_definition(self, payload: dict[str, Any], *, definition_id: str | None) -> dict[str, Any]:
@@ -2482,6 +2593,8 @@ class WebApplication:
         spec.update(dict(payload.get("spec") or {}))
         plugin_refs = [str(item).strip() for item in list(spec.get("tool_plugin_refs") or spec.get("plugin_refs") or []) if str(item).strip()]
         spec["tool_plugin_refs"] = list(dict.fromkeys(plugin_refs))
+        review_policy_refs = [str(item).strip() for item in list(spec.get("review_policy_refs") or []) if str(item).strip()]
+        spec["review_policy_refs"] = list(dict.fromkeys(review_policy_refs))
         spec.pop("memory_profile_ref", None)
         spec.pop("memory_profile_id", None)
         spec.pop("memory_profile", None)
