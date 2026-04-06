@@ -588,6 +588,11 @@ class DeepAgentsTeamRuntime:
             node_id="deepagents_orchestrate",
             title=self._interrupt_title(executor=executor, interrupt_payload=interrupt_payload),
             detail=self._interrupt_detail(interrupt_payload),
+            metadata={
+                "scope": "tool_interrupt",
+                "allowed_decisions": self._interrupt_allowed_decisions(interrupt_payload),
+                "action_requests": [dict(item or {}) for item in list(interrupt_payload.get("action_requests") or [])],
+            },
         )
         runtime_state["waiting"] = {
             "scope": "tool_interrupt",
@@ -641,6 +646,11 @@ class DeepAgentsTeamRuntime:
             node_id="deepagents_orchestrate",
             title=f"Review final delivery for `{executor.get('name') or executor.get('runtime_key') or 'team'}`",
             detail=trim_text(final_text, limit=4000),
+            metadata={
+                "scope": "final_delivery",
+                "allowed_decisions": self._final_delivery_allowed_decisions(executor),
+                "pending_result_text": final_text,
+            },
         )
         runtime_state["pending_result_text"] = final_text
         runtime_state["waiting"] = {
@@ -825,9 +835,39 @@ class DeepAgentsTeamRuntime:
             lines.append(pretty_json(dict(action.get("args") or {})))
         return "\n\n".join(lines) or pretty_json(interrupt_payload)
 
+    def _interrupt_allowed_decisions(self, interrupt_payload: dict[str, Any]) -> list[str]:
+        merged: list[str] = []
+        merged.extend(
+            str(item).strip()
+            for item in list(interrupt_payload.get("allowed_decisions") or [])
+            if str(item).strip()
+        )
+        for item in list(interrupt_payload.get("review_configs") or []):
+            merged.extend(
+                str(value).strip()
+                for value in list((dict(item or {})).get("allowed_decisions") or [])
+                if str(value).strip()
+            )
+        for item in list(interrupt_payload.get("action_requests") or []):
+            merged.extend(
+                str(value).strip()
+                for value in list((dict(item or {})).get("allowed_decisions") or [])
+                if str(value).strip()
+            )
+        return list(dict.fromkeys(merged)) or ["approve", "reject"]
+
+    def _review_policies(self, executor: dict[str, Any]) -> list[dict[str, Any]]:
+        return [dict(item) for item in list(executor.get("review_policies") or []) if isinstance(item, dict)]
+
+    def _final_delivery_policies(self, executor: dict[str, Any]) -> list[dict[str, Any]]:
+        return [policy for policy in self._review_policies(executor) if policy_has_trigger(policy, FINAL_DELIVERY_REVIEW_TRIGGERS)]
+
+    def _final_delivery_allowed_decisions(self, executor: dict[str, Any]) -> list[str]:
+        return union_allowed_decisions(self._final_delivery_policies(executor)) or ["approve", "reject"]
+
     def _interrupt_on(self, executor: dict[str, Any]) -> dict[str, Any] | None:
         config: dict[str, Any] = {}
-        review_policies = [dict(item) for item in list(executor.get("review_policies") or []) if isinstance(item, dict)]
+        review_policies = self._review_policies(executor)
         if not review_policies:
             return None
         task_policies = [policy for policy in review_policies if policy_has_trigger(policy, TASK_REVIEW_TRIGGERS)]
@@ -877,10 +917,7 @@ class DeepAgentsTeamRuntime:
         return config or None
 
     def _should_review_final_delivery(self, executor: dict[str, Any]) -> bool:
-        return any(
-            policy_has_trigger(policy, FINAL_DELIVERY_REVIEW_TRIGGERS)
-            for policy in [dict(item) for item in list(executor.get("review_policies") or []) if isinstance(item, dict)]
-        )
+        return bool(self._final_delivery_policies(executor))
 
     def _task_review_description(self, executor: dict[str, Any]):
         def _describe(tool_call: dict[str, Any], _state: Any, _runtime: Any) -> str:

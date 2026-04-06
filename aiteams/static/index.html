@@ -1557,6 +1557,24 @@
                 </div>
               </section>
             </div>
+
+            <div id="approval-edit-modal" class="modal-shell hidden">
+              <div class="modal-backdrop" data-approval-edit-close></div>
+              <section class="modal-card resource-modal-card approval-edit-modal-card">
+                <div class="modal-head">
+                  <h3 id="approval-edit-modal-title">编辑审批内容</h3>
+                </div>
+                <form id="approval-edit-form" class="form resource-editor-form">
+                  <div id="approval-edit-summary" class="detail compact-detail"></div>
+                  <div id="approval-edit-fields" class="approval-edit-fields"></div>
+                  <pre id="approval-edit-result" class="result hidden"></pre>
+                  <div class="modal-actions">
+                    <button id="approval-edit-cancel" type="button" class="ghost">取消</button>
+                    <button id="approval-edit-submit" type="submit">确认编辑并通过</button>
+                  </div>
+                </form>
+              </section>
+            </div>
           </section>
         </main>
       </div>

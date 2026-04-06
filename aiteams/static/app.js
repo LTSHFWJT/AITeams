@@ -153,6 +153,9 @@ const state = {
     offset: 0,
     view: "pending",
   },
+  approvalEditor: {
+    item: null,
+  },
   selectedTaskTeamDefinitionId: null,
   taskSessionThreads: loadPersistedTaskSessionThreads(),
   activePage: "overview",
@@ -700,6 +703,14 @@ const approvalsViewPending = document.querySelector("#approvals-view-pending");
 const approvalsViewHistory = document.querySelector("#approvals-view-history");
 const approvalPageSize = document.querySelector("#approval-page-size");
 const approvalPaginationMeta = document.querySelector("#approval-pagination-meta");
+const approvalEditModal = document.querySelector("#approval-edit-modal");
+const approvalEditModalTitle = document.querySelector("#approval-edit-modal-title");
+const approvalEditModalCloseButtons = Array.from(document.querySelectorAll("[data-approval-edit-close]"));
+const approvalEditForm = document.querySelector("#approval-edit-form");
+const approvalEditSummary = document.querySelector("#approval-edit-summary");
+const approvalEditFields = document.querySelector("#approval-edit-fields");
+const approvalEditResult = document.querySelector("#approval-edit-result");
+const approvalEditCancel = document.querySelector("#approval-edit-cancel");
 const teamChatTeamDefinition = document.querySelector("#team-chat-team-definition");
 const teamChatNewThread = document.querySelector("#team-chat-new-thread");
 const teamChatThreadList = document.querySelector("#team-chat-thread-list");
@@ -2890,15 +2901,37 @@ function populatePluginOptions() {
   );
 }
 
+function reviewPolicyDecisionTypeLabel(value) {
+  const normalized = String(value || "").trim();
+  if (normalized === "approve") {
+    return "批准";
+  }
+  if (normalized === "reject") {
+    return "拒绝";
+  }
+  if (normalized === "edit") {
+    return "编辑";
+  }
+  return normalized;
+}
+
 function reviewPolicyDecisionTypeOptions() {
   const options = uiMetadataOptions("review_policy", "decision_types");
-  return options.length
+  const normalizedOptions = (options.length
     ? options
-    : [
-        { value: "approve", label: "approve / \u6279\u51c6" },
-        { value: "reject", label: "reject / \u62d2\u7edd" },
-        { value: "edit", label: "edit / \u7f16\u8f91" },
-      ];
+    : [{ value: "approve" }, { value: "reject" }, { value: "edit" }])
+    .map((item) => {
+      const value = String(item?.value || "").trim();
+      if (!value) {
+        return null;
+      }
+      return {
+        value,
+        label: reviewPolicyDecisionTypeLabel(value),
+      };
+    })
+    .filter(Boolean);
+  return normalizedOptions;
 }
 
 function reviewPolicyDecisionTypeValues() {
@@ -7353,22 +7386,232 @@ function approvalResultSummary(item) {
   };
 }
 
+function approvalMetadata(item) {
+  return dictOrEmpty(item?.metadata_json);
+}
+
+function approvalScope(item) {
+  return String(approvalMetadata(item).scope || "").trim();
+}
+
+function approvalAllowedDecisions(item) {
+  const metadata = approvalMetadata(item);
+  const values = Array.isArray(metadata.allowed_decisions)
+    ? metadata.allowed_decisions.map((value) => String(value || "").trim()).filter(Boolean)
+    : [];
+  return values.length ? Array.from(new Set(values)) : ["approve", "reject"];
+}
+
+function approvalSupportsDecision(item, decision) {
+  const normalized = String(decision || "").trim();
+  return approvalAllowedDecisions(item).includes(normalized);
+}
+
+function approvalActionRequests(item) {
+  return Array.isArray(approvalMetadata(item).action_requests)
+    ? approvalMetadata(item).action_requests.filter((entry) => isRecord(entry)).map((entry) => clone(entry))
+    : [];
+}
+
+function approvalPendingResultText(item) {
+  return String(approvalMetadata(item).pending_result_text || "").trim();
+}
+
+function approvalSupportsEdit(item) {
+  if (!approvalSupportsDecision(item, "edit")) {
+    return false;
+  }
+  const scope = approvalScope(item);
+  if (scope === "tool_interrupt") {
+    return approvalActionRequests(item).length > 0;
+  }
+  if (scope === "final_delivery") {
+    return Boolean(approvalPendingResultText(item));
+  }
+  return false;
+}
+
+function approvalScopeLabel(item) {
+  const scope = approvalScope(item);
+  if (scope === "tool_interrupt") {
+    return "工具调用";
+  }
+  if (scope === "final_delivery") {
+    return "最终交付";
+  }
+  return "审批";
+}
+
+function approvalActionName(action, index) {
+  return String(action?.name || action?.action || `动作 ${index + 1}`).trim() || `动作 ${index + 1}`;
+}
+
+function renderApprovalEditSummary(item) {
+  const title = String(item?.title || item?.id || "-").trim() || "-";
+  const runId = String(item?.run_id || "").trim();
+  const scopeLabel = approvalScopeLabel(item);
+  const summary = `${scopeLabel}${runId ? ` · Run ${runId}` : ""}`;
+  return `
+    <div class="approval-edit-summary">
+      <strong>${escapeHtml(title)}</strong>
+      <span>${escapeHtml(summary)}</span>
+    </div>
+  `;
+}
+
+function renderApprovalEditFields(item) {
+  if (approvalScope(item) === "tool_interrupt") {
+    const actions = approvalActionRequests(item);
+    return actions
+      .map((action, index) => {
+        const args = action.args === undefined ? {} : action.args;
+        return `
+          <article class="approval-edit-card">
+            <div class="approval-edit-card-head">
+              <div>
+                <strong>${escapeHtml(`动作 ${index + 1}`)}</strong>
+                <span>${escapeHtml(approvalActionName(action, index))}</span>
+              </div>
+            </div>
+            <label>
+              <span>动作参数 JSON</span>
+              <textarea data-approval-edit-action="${index}" rows="10">${escapeHtml(prettyJson(args))}</textarea>
+            </label>
+          </article>
+        `;
+      })
+      .join("");
+  }
+  if (approvalScope(item) === "final_delivery") {
+    return `
+      <article class="approval-edit-card">
+        <div class="approval-edit-card-head">
+          <div>
+            <strong>最终交付</strong>
+            <span>编辑后的内容会作为最终回复继续发送。</span>
+          </div>
+        </div>
+        <label>
+          <span>交付内容</span>
+          <textarea data-approval-edit-body rows="14">${escapeHtml(approvalPendingResultText(item))}</textarea>
+        </label>
+      </article>
+    `;
+  }
+  return '<div class="detail empty compact-detail"><strong>当前审批不支持编辑</strong></div>';
+}
+
+function openApprovalEditModal(item) {
+  const record = clone(item || {});
+  state.approvalEditor.item = record;
+  if (approvalEditModalTitle) {
+    approvalEditModalTitle.textContent = approvalScope(record) === "final_delivery" ? "编辑最终交付" : "编辑工具调用";
+  }
+  if (approvalEditSummary) {
+    approvalEditSummary.innerHTML = renderApprovalEditSummary(record);
+  }
+  if (approvalEditFields) {
+    approvalEditFields.innerHTML = renderApprovalEditFields(record);
+  }
+  hideResult(approvalEditResult);
+  approvalEditModal?.classList.remove("hidden");
+}
+
+function closeApprovalEditModal() {
+  approvalEditModal?.classList.add("hidden");
+  state.approvalEditor.item = null;
+  if (approvalEditSummary) {
+    approvalEditSummary.innerHTML = "";
+  }
+  if (approvalEditFields) {
+    approvalEditFields.innerHTML = "";
+  }
+  hideResult(approvalEditResult);
+}
+
+function buildApprovalEditMetadata(item) {
+  const scope = approvalScope(item);
+  if (scope === "tool_interrupt") {
+    const decisions = approvalActionRequests(item).map((action, index) => {
+      const field = approvalEditFields?.querySelector(`[data-approval-edit-action="${index}"]`);
+      if (!(field instanceof HTMLTextAreaElement)) {
+        throw new Error(`找不到动作 ${index + 1} 的编辑输入框。`);
+      }
+      let parsedArgs;
+      try {
+        parsedArgs = safeParseJson(field.value, {});
+      } catch (error) {
+        throw new Error(`动作 ${index + 1} 的参数 JSON 无法解析。`);
+      }
+      if (!isRecord(parsedArgs)) {
+        throw new Error(`动作 ${index + 1} 的参数必须是 JSON 对象。`);
+      }
+      return {
+        type: "edit",
+        edited_action: {
+          ...clone(action),
+          args: parsedArgs,
+        },
+      };
+    });
+    return { decisions };
+  }
+  if (scope === "final_delivery") {
+    const field = approvalEditFields?.querySelector("[data-approval-edit-body]");
+    if (!(field instanceof HTMLTextAreaElement)) {
+      throw new Error("找不到最终交付的编辑输入框。");
+    }
+    const editedBody = field.value.trim();
+    if (!editedBody) {
+      throw new Error("最终交付内容不能为空。");
+    }
+    return { edited_body: editedBody };
+  }
+  throw new Error("当前审批不支持编辑。");
+}
+
+async function resolveApprovalAndResume({ approvalId, runId, approved, comment, metadata = {} }) {
+  if (!approvalId) {
+    throw new Error("审批记录不存在。");
+  }
+  if (!runId) {
+    throw new Error("审批关联的 Run 不存在。");
+  }
+  await api(`/api/approvals/${approvalId}/resolve`, {
+    method: "POST",
+    body: JSON.stringify({ approved, comment, metadata }),
+  });
+  const payload = await api(`/api/runs/${runId}/resume`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  state.selectedRunId = payload.run.id;
+  invalidateData("runs", "approvals", "controlPlane");
+  return payload;
+}
+
 function approvalRowMarkup(item) {
   const title = String(item?.title || item?.id || "-").trim() || "-";
   const detail = String(item?.detail || "").trim() || "无审批内容";
   const runId = String(item?.run_id || "").trim();
   const result = approvalResultSummary(item);
   const runAction = runId ? `<button type="button" class="ghost" data-run-open="${escapeAttribute(runId)}">查看 Run</button>` : "";
-  const actions =
+  const actionButtons =
     state.approvalPage.view === "history"
-      ? `
-          ${runAction}
-        `
-      : `
-          <button type="button" data-approval-approve="${escapeAttribute(item.id || "")}" data-run-id="${escapeAttribute(runId)}">批准</button>
-          <button type="button" class="ghost" data-approval-reject="${escapeAttribute(item.id || "")}" data-run-id="${escapeAttribute(runId)}">拒绝</button>
-          ${runAction}
-        `;
+      ? [runAction]
+      : [
+          approvalSupportsDecision(item, "approve")
+            ? `<button type="button" data-approval-approve="${escapeAttribute(item.id || "")}" data-run-id="${escapeAttribute(runId)}">批准</button>`
+            : "",
+          approvalSupportsEdit(item)
+            ? `<button type="button" class="ghost" data-approval-edit="${escapeAttribute(item.id || "")}">编辑</button>`
+            : "",
+          approvalSupportsDecision(item, "reject")
+            ? `<button type="button" class="ghost warn" data-approval-reject="${escapeAttribute(item.id || "")}" data-run-id="${escapeAttribute(runId)}">拒绝</button>`
+            : "",
+          runAction,
+        ];
+  const actions = actionButtons.filter(Boolean).join("") || "<span>—</span>";
   return `
     <article class="provider-row approval-row">
       <div class="provider-main">
@@ -8450,8 +8693,7 @@ function reviewPolicyDecisionValues(spec) {
 }
 
 function reviewPolicyDecisionLabels(spec) {
-  const options = new Map(reviewPolicyDecisionTypeOptions().map((item) => [item.value, item.label]));
-  return reviewPolicyDecisionValues(spec).map((value) => options.get(value) || value);
+  return reviewPolicyDecisionValues(spec).map((value) => reviewPolicyDecisionTypeLabel(value) || value);
 }
 
 function reviewPolicyPluginActionLabels(spec) {
@@ -8544,7 +8786,8 @@ function buildReviewPolicyPayloadFromForm() {
 function reviewPolicyRowMarkup(item) {
   const spec = dictOrEmpty(item.spec_json);
   const pluginActionSummary = compactLabelSummary(reviewPolicyPluginActionLabels(spec), "未配置插件动作");
-  const decisionSummary = compactLabelSummary(reviewPolicyDecisionLabels(spec), "未配置决策类型");
+  const decisionLabels = reviewPolicyDecisionLabels(spec);
+  const decisionSummary = decisionLabels.length ? decisionLabels.join("、") : "未配置决策类型";
   return `
     <article class="provider-row review-policy-row">
       <div class="provider-main">
@@ -9303,6 +9546,15 @@ async function loadApprovals() {
   state.approvalPage.limit = payload.limit || state.approvalPage.limit;
   state.approvalPage.offset = payload.offset || 0;
   state.approvalPage.view = payload.view || state.approvalPage.view;
+  const editingApprovalId = String(state.approvalEditor.item?.id || "").trim();
+  if (editingApprovalId) {
+    const refreshed = state.approvalPage.items.find((item) => String(item?.id || "").trim() === editingApprovalId);
+    if (refreshed) {
+      state.approvalEditor.item = clone(refreshed);
+    } else {
+      closeApprovalEditModal();
+    }
+  }
 }
 
 async function loadRunDetail(runId) {
@@ -10397,6 +10649,30 @@ approvalPageSize?.addEventListener("change", async () => {
   state.approvalPage.limit = Number(approvalPageSize.value || 10);
   state.approvalPage.offset = 0;
   await ensureApprovalsPage(true);
+});
+approvalEditModalCloseButtons.forEach((button) => button.addEventListener("click", closeApprovalEditModal));
+approvalEditCancel?.addEventListener("click", closeApprovalEditModal);
+approvalEditForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  hideResult(approvalEditResult);
+  try {
+    const item = state.approvalEditor.item;
+    if (!item) {
+      throw new Error("审批项不存在。");
+    }
+    const payload = await resolveApprovalAndResume({
+      approvalId: String(item.id || "").trim(),
+      runId: String(item.run_id || "").trim(),
+      approved: true,
+      comment: "Edited from control plane.",
+      metadata: buildApprovalEditMetadata(item),
+    });
+    closeApprovalEditModal();
+    await switchPage("runtime", { force: true });
+    await loadRunDetail(payload.run.id);
+  } catch (error) {
+    showResult(approvalEditResult, errorResult(error));
+  }
 });
 teamChatTeamDefinition?.addEventListener("change", async () => {
   try {
@@ -11758,16 +12034,12 @@ document.addEventListener("click", async (event) => {
   const approveButton = event.target.closest("[data-approval-approve]");
   if (approveButton) {
     try {
-      await api(`/api/approvals/${approveButton.dataset.approvalApprove}/resolve`, {
-        method: "POST",
-        body: JSON.stringify({ approved: true, comment: "Approved from control plane." }),
+      const payload = await resolveApprovalAndResume({
+        approvalId: approveButton.dataset.approvalApprove,
+        runId: approveButton.dataset.runId,
+        approved: true,
+        comment: "Approved from control plane.",
       });
-      const payload = await api(`/api/runs/${approveButton.dataset.runId}/resume`, {
-        method: "POST",
-        body: JSON.stringify({}),
-      });
-      state.selectedRunId = payload.run.id;
-      invalidateData("runs", "approvals", "controlPlane");
       await switchPage("runtime", { force: true });
       await loadRunDetail(payload.run.id);
     } catch (error) {
@@ -11776,24 +12048,35 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  const editButton = event.target.closest("[data-approval-edit]");
+  if (editButton) {
+    const approvalId = String(editButton.dataset.approvalEdit || "").trim();
+    const item =
+      state.approvalPage.items.find((entry) => String(entry?.id || "").trim() === approvalId) ||
+      state.approvals.find((entry) => String(entry?.id || "").trim() === approvalId);
+    if (!item) {
+      showResult(taskResult, { error: "审批项不存在。" });
+      return;
+    }
+    openApprovalEditModal(item);
+    return;
+  }
+
   const rejectButton = event.target.closest("[data-approval-reject]");
   if (rejectButton) {
     try {
-      await api(`/api/approvals/${rejectButton.dataset.approvalReject}/resolve`, {
-        method: "POST",
-        body: JSON.stringify({ approved: false, comment: "Rejected from control plane." }),
+      const payload = await resolveApprovalAndResume({
+        approvalId: rejectButton.dataset.approvalReject,
+        runId: rejectButton.dataset.runId,
+        approved: false,
+        comment: "Rejected from control plane.",
       });
-      const payload = await api(`/api/runs/${rejectButton.dataset.runId}/resume`, {
-        method: "POST",
-        body: JSON.stringify({}),
-      });
-      state.selectedRunId = payload.run.id;
-      invalidateData("runs", "approvals", "controlPlane");
       await switchPage("runtime", { force: true });
       await loadRunDetail(payload.run.id);
     } catch (error) {
       showResult(taskResult, { error: error.message });
     }
+    return;
   }
 });
 

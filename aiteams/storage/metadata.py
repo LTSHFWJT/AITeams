@@ -132,6 +132,7 @@ SCHEMA = [
         title TEXT NOT NULL,
         detail TEXT NOT NULL,
         status TEXT NOT NULL,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
         resolution_json TEXT NOT NULL DEFAULT '{}',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
@@ -525,6 +526,7 @@ class MetadataStore:
 
     def _apply_migrations(self) -> None:
         self._migrate_plugins_table()
+        self._ensure_column("approvals", "metadata_json", "TEXT NOT NULL DEFAULT '{}'")
         self._connection.execute(
             """
             CREATE TABLE IF NOT EXISTS skill_groups (
@@ -3367,15 +3369,24 @@ class MetadataStore:
     def list_events(self, run_id: str) -> list[dict[str, Any]]:
         return self._deserialize_many(self.fetch_all("SELECT * FROM run_events WHERE run_id = ? ORDER BY created_at ASC", (run_id,)))
 
-    def create_approval(self, *, run_id: str, step_id: str, node_id: str, title: str, detail: str) -> dict[str, Any]:
+    def create_approval(
+        self,
+        *,
+        run_id: str,
+        step_id: str,
+        node_id: str,
+        title: str,
+        detail: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         record_id = make_id("approval")
         now = utcnow_iso()
         self.execute(
             """
-            INSERT INTO approvals(id, run_id, step_id, node_id, title, detail, status, resolution_json, created_at, updated_at, resolved_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO approvals(id, run_id, step_id, node_id, title, detail, status, metadata_json, resolution_json, created_at, updated_at, resolved_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (record_id, run_id, step_id, node_id, title, detail, "pending", json_dumps({}), now, now, None),
+            (record_id, run_id, step_id, node_id, title, detail, "pending", json_dumps(metadata or {}), json_dumps({}), now, now, None),
         )
         approval = self.get_approval(record_id)
         assert approval is not None
@@ -3394,7 +3405,7 @@ class MetadataStore:
         return self.get_approval(approval_id)
 
     def get_approval(self, approval_id: str) -> dict[str, Any] | None:
-        return self._deserialize(self.fetch_one("SELECT * FROM approvals WHERE id = ?", (approval_id,)))
+        return self._enrich_approval(self._deserialize(self.fetch_one("SELECT * FROM approvals WHERE id = ?", (approval_id,))))
 
     def list_approvals(self, *, run_id: str | None = None, status: str | None = None) -> list[dict[str, Any]]:
         clauses: list[str] = []
@@ -3409,7 +3420,7 @@ class MetadataStore:
         if clauses:
             sql += f" WHERE {' AND '.join(clauses)}"
         sql += " ORDER BY created_at DESC"
-        return self._deserialize_many(self.fetch_all(sql, tuple(params)))
+        return [self._enrich_approval(item) for item in self._deserialize_many(self.fetch_all(sql, tuple(params)))]
 
     def list_approvals_page(
         self,
@@ -3449,12 +3460,72 @@ class MetadataStore:
             )
         )
         return {
-            "items": rows,
+            "items": [self._enrich_approval(item) for item in rows],
             "total": total,
             "limit": page_limit,
             "offset": page_offset,
             "view": normalized_view or "all",
         }
+
+    def _enrich_approval(self, approval: dict[str, Any] | None) -> dict[str, Any] | None:
+        if approval is None:
+            return None
+        metadata = dict(approval.get("metadata_json") or {})
+        if str(approval.get("status") or "") != "pending":
+            return approval
+        run_id = str(approval.get("run_id") or "").strip()
+        if not run_id:
+            return approval
+        run = self._deserialize(self.fetch_one("SELECT state_json FROM runs WHERE id = ?", (run_id,)))
+        state = dict((run or {}).get("state_json") or {})
+        waiting = dict(state.get("waiting") or {})
+        if str(waiting.get("approval_id") or "") != str(approval.get("id") or ""):
+            return approval
+        scope = str(waiting.get("scope") or "").strip()
+        if scope == "tool_interrupt":
+            interrupt_payload = dict(waiting.get("interrupt_payload") or {})
+            action_requests = [
+                dict(item or {})
+                for item in list(interrupt_payload.get("action_requests") or [])
+                if isinstance(item, dict)
+            ]
+            allowed_decisions = [
+                str(item).strip()
+                for item in list(interrupt_payload.get("allowed_decisions") or [])
+                if str(item).strip()
+            ]
+            for config in list(interrupt_payload.get("review_configs") or []):
+                allowed_decisions.extend(
+                    str(item).strip()
+                    for item in list((dict(config or {})).get("allowed_decisions") or [])
+                    if str(item).strip()
+                )
+            for action in action_requests:
+                allowed_decisions.extend(
+                    str(item).strip()
+                    for item in list(action.get("allowed_decisions") or [])
+                    if str(item).strip()
+                )
+            metadata.update(
+                {
+                    "scope": scope,
+                    "allowed_decisions": list(dict.fromkeys([*list(metadata.get("allowed_decisions") or []), *allowed_decisions]))
+                    or ["approve", "reject"],
+                    "action_requests": action_requests or list(metadata.get("action_requests") or []),
+                }
+            )
+            approval["metadata_json"] = metadata
+            return approval
+        if scope == "final_delivery":
+            metadata.update(
+                {
+                    "scope": scope,
+                    "allowed_decisions": list(dict.fromkeys([*list(metadata.get("allowed_decisions") or []), "approve", "reject"])),
+                    "pending_result_text": str(state.get("pending_result_text") or ""),
+                }
+            )
+            approval["metadata_json"] = metadata
+        return approval
 
     def create_artifact(
         self,
