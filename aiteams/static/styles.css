@@ -4711,3 +4711,499 @@ button.warn {
     max-width: 100%;
   }
 }
+
+/* Minimal-aligned theme override: keep layout, match sample palette */
+:root {
+  --bg-0: #f2f2f2;
+  --bg-1: #f7f7f7;
+  --bg-2: #ffffff;
+  --panel: rgba(255, 255, 255, 0.92);
+  --panel-strong: rgba(255, 255, 255, 0.98);
+  --line: rgba(226, 226, 226, 0.98);
+  --line-strong: rgba(65, 139, 202, 0.34);
+  --ink: #3f4e62;
+  --muted: #717171;
+  --cyan: #22beef;
+  --cyan-deep: #418bca;
+  --amber: #ffc100;
+  --amber-soft: rgba(255, 193, 0, 0.14);
+  --mint: #16a085;
+  --shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+}
+
+html {
+  background: #f2f2f2;
+}
+
+body {
+  font-family: "Microsoft YaHei UI", "Segoe UI", "Aptos", sans-serif;
+  background-color: #f2f2f2;
+  background-image: linear-gradient(180deg, #ffffff 0%, #f7f7f7 38%, #f2f2f2 100%);
+  background-attachment: fixed;
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.4), rgba(255, 255, 255, 0.08));
+  opacity: 0.7;
+}
+
+body::after {
+  display: none;
+}
+
+.scene-grid {
+  background:
+    linear-gradient(rgba(65, 139, 202, 0.018) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(65, 139, 202, 0.018) 1px, transparent 1px);
+  background-size: 72px 72px;
+  opacity: 0.28;
+}
+
+.scene-glow {
+  background:
+    radial-gradient(circle at 12% 12%, rgba(34, 190, 239, 0.045), transparent 18%),
+    radial-gradient(circle at 88% 14%, rgba(205, 151, 235, 0.032), transparent 16%);
+  filter: blur(16px);
+  opacity: 0.5;
+}
+
+.scene-rings {
+  background:
+    radial-gradient(circle at 82% 78%, transparent 0 54px, rgba(65, 139, 202, 0.035) 55px 57px, transparent 58px 100%),
+    radial-gradient(circle at 18% 76%, transparent 0 42px, rgba(34, 190, 239, 0.03) 43px 45px, transparent 46px 100%);
+  opacity: 0.45;
+}
+
+.shell {
+  position: relative;
+  z-index: 1;
+}
+
+.hero,
+.nav-panel,
+.panel,
+.stat-card,
+.card,
+.detail,
+.system-banner,
+.editor-mode,
+.rule-card,
+.inspector-card {
+  border: 1px solid #e2e2e2;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+  backdrop-filter: none;
+}
+
+.hero {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.99), rgba(248, 248, 248, 0.99)),
+    linear-gradient(135deg, rgba(65, 139, 202, 0.03), transparent 72%);
+}
+
+.hero::after {
+  background:
+    linear-gradient(120deg, rgba(65, 139, 202, 0.035), transparent 46%, rgba(34, 190, 239, 0.025)),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.42), transparent 38%);
+}
+
+.hero-copy-block {
+  padding-left: 12px;
+  position: relative;
+}
+
+.hero-copy-block::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 4px;
+  border-radius: 4px;
+  background: #418bca;
+}
+
+.hero h1,
+.page-head h2,
+.panel-title h3 {
+  color: #3f4e62;
+}
+
+.hero h1 {
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.panel-title {
+  margin-bottom: 14px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #e2e2e2;
+}
+
+.page-head h2 {
+  letter-spacing: 0.02em;
+}
+
+.eyebrow,
+.page-kicker,
+.nav-label,
+.system-chip {
+  color: #418bca;
+}
+
+.system-banner {
+  background: #fbfbfb;
+}
+
+.system-chip {
+  border: 1px solid rgba(65, 139, 202, 0.18);
+  background: rgba(65, 139, 202, 0.08);
+}
+
+.top-nav-button,
+.nav-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #dcdcdc;
+  border-radius: 4px;
+  background: #ffffff;
+  color: #717171;
+  text-align: center;
+  line-height: 1.25;
+  font-weight: 700;
+  box-shadow: 0 3px 0 rgba(0, 0, 0, 0.05);
+}
+
+.top-nav-button:hover,
+.nav-button:hover {
+  border-color: #cfd9e3;
+  background: #f9fbfd;
+  color: #418bca;
+}
+
+.top-nav-button.active,
+.nav-button.active {
+  border-color: #418bca;
+  background: #418bca;
+  color: #ffffff;
+  box-shadow: 0 3px 0 rgba(0, 0, 0, 0.05);
+}
+
+.nav-button {
+  text-align: center;
+}
+
+.nav-button strong,
+.nav-button span {
+  width: 100%;
+  text-align: center;
+}
+
+.panel::before {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(65, 139, 202, 0.24), transparent);
+  opacity: 0.45;
+}
+
+.stat-card {
+  border-top: 3px solid #22beef;
+  background: #ffffff;
+}
+
+.rule-grid .rule-card:nth-child(5n + 1),
+.stats-grid .stat-card:nth-child(5n + 1) {
+  border-top-color: #22beef;
+}
+
+.rule-grid .rule-card:nth-child(5n + 2),
+.stats-grid .stat-card:nth-child(5n + 2) {
+  border-top-color: #ffc100;
+}
+
+.rule-grid .rule-card:nth-child(5n + 3),
+.stats-grid .stat-card:nth-child(5n + 3) {
+  border-top-color: #cd97eb;
+}
+
+.rule-grid .rule-card:nth-child(5n + 4),
+.stats-grid .stat-card:nth-child(5n + 4) {
+  border-top-color: #16a085;
+}
+
+.rule-grid .rule-card:nth-child(5n),
+.stats-grid .stat-card:nth-child(5n) {
+  border-top-color: #418bca;
+}
+
+.stat-card::after {
+  background: radial-gradient(circle, rgba(34, 190, 239, 0.12), transparent 64%);
+}
+
+.card,
+.provider-row,
+.resource-row,
+.knowledge-stage-card,
+.knowledge-document-card,
+.knowledge-document-detail-card,
+.edge-card,
+.approval-edit-card,
+.skill-modal-result-card,
+.skill-preview-file-button {
+  border: 1px solid #e2e2e2;
+  border-radius: 4px;
+  background: #ffffff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
+}
+
+.card:hover,
+.provider-row:hover,
+.resource-row:hover,
+.knowledge-stage-card:hover,
+.knowledge-document-card:hover {
+  border-color: #d6e4f2;
+}
+
+.provider-row.active,
+.resource-row.active,
+.knowledge-stage-card.active,
+.knowledge-document-card.active,
+.skill-preview-file-button.active,
+.card.active {
+  border-color: #418bca;
+  background: #ffffff;
+  box-shadow: 0 1px 4px rgba(65, 139, 202, 0.18);
+}
+
+.provider-main strong,
+.provider-cell strong,
+.team-chat-thread-item > strong,
+.team-chat-bubble-head strong {
+  color: #3f4e62;
+}
+
+.provider-main span,
+.provider-cell span,
+.meta,
+.field-note,
+.approval-edit-card-head span,
+.approval-edit-summary span,
+.team-chat-thread-item > span,
+.team-chat-main-copy p,
+.team-chat-result-meta span,
+.provider-list-head,
+.resource-list-head,
+.skill-management-list-head,
+.knowledge-base-list-head,
+.local-model-list-head,
+.review-policy-list-head,
+.approval-list-head,
+.skill-group-management-list-head,
+.knowledge-document-list-head {
+  color: #717171;
+}
+
+.skill-view-switch {
+  border: 1px solid #e2e2e2;
+  border-radius: 4px;
+  background: #f2f2f2;
+  box-shadow: none;
+}
+
+.skill-view-toggle {
+  border-radius: 4px;
+}
+
+.skill-view-toggle.active {
+  background: #418bca;
+  color: #ffffff;
+  box-shadow: 0 3px 0 rgba(0, 0, 0, 0.05);
+}
+
+textarea,
+input,
+select,
+.tag-multi-select-control {
+  border: 1px solid #d9d9d9;
+  border-radius: 4px;
+  background: #ffffff;
+  color: #3f4e62;
+  box-shadow: none;
+}
+
+textarea:focus,
+input:focus,
+select:focus,
+.tag-multi-select.open .tag-multi-select-control,
+.tag-multi-select:focus-within .tag-multi-select-control {
+  border-color: #418bca;
+  box-shadow: 0 0 0 3px rgba(65, 139, 202, 0.12);
+}
+
+input::placeholder,
+textarea::placeholder,
+.tag-multi-select-placeholder,
+.tag-multi-select-empty {
+  color: #717171;
+}
+
+.tag-multi-select-menu {
+  border: 1px solid #e2e2e2;
+  border-radius: 4px;
+  background: #f2f2f2;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+}
+
+.tag-multi-select-option:hover,
+.tag-multi-select-option.selected {
+  background: rgba(65, 139, 202, 0.08);
+}
+
+.tag-multi-select-token {
+  border: 1px solid rgba(65, 139, 202, 0.18);
+  border-radius: 999px;
+  background: rgba(65, 139, 202, 0.08);
+  color: #418bca;
+}
+
+.tag-multi-select-check {
+  border-color: #d9d9d9;
+  background: #ffffff;
+}
+
+button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid #418bca;
+  border-radius: 4px;
+  background: #418bca;
+  color: #ffffff;
+  text-align: center;
+  line-height: 1.2;
+  font-weight: 700;
+  letter-spacing: 0;
+  box-shadow: 0 3px 0 rgba(0, 0, 0, 0.05);
+}
+
+button:hover {
+  filter: none;
+  border-color: #3a7fba;
+  background: #3a7fba;
+}
+
+button.ghost {
+  border-color: #d9d9d9;
+  background: #ffffff;
+  color: #717171;
+  box-shadow: 0 3px 0 rgba(0, 0, 0, 0.05);
+}
+
+button.ghost:hover {
+  border-color: #cfd9e3;
+  background: #f9fbfd;
+  color: #418bca;
+}
+
+button.ghost.warn {
+  border-color: rgba(217, 84, 79, 0.22);
+  background: #fff4f4;
+  color: #d9544f;
+}
+
+button:not(.icon-button) > strong,
+button:not(.icon-button) > span {
+  width: 100%;
+  text-align: center;
+}
+
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.modal-backdrop {
+  background: rgba(63, 78, 98, 0.18);
+  backdrop-filter: blur(4px);
+}
+
+.modal-card,
+.knowledge-base-modal-card,
+.provider-modal-card,
+.resource-modal-card,
+.provider-model-modal-card,
+.provider-model-editor-modal-card,
+.skill-modal-card,
+.skill-group-modal-card,
+.skill-preview-modal-card,
+.approval-edit-modal-card {
+  border: 1px solid #e2e2e2;
+  border-top: 3px solid #418bca;
+  border-radius: 4px;
+  background: #ffffff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
+}
+
+.modal-head {
+  border-bottom: 1px solid #e2e2e2;
+}
+
+.team-chat-thread-item,
+.team-chat-bubble,
+.team-chat-result-shell {
+  border: 1px solid #e2e2e2;
+  border-radius: 4px;
+  background: #ffffff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
+}
+
+.team-chat-thread-item.active,
+.team-chat-thread-row:hover .team-chat-thread-item,
+.team-chat-thread-row:focus-within .team-chat-thread-item {
+  border-color: #418bca;
+}
+
+.team-chat-message.user .team-chat-bubble {
+  border-left: 4px solid #22beef;
+}
+
+.team-chat-message.system .team-chat-bubble {
+  border-left: 4px solid #ffc100;
+  background: #fffdf4;
+}
+
+.team-chat-result-shell.warn {
+  border-color: rgba(255, 193, 0, 0.22);
+  background: #fff9ef;
+}
+
+.team-chat-result-shell.error {
+  border-color: rgba(217, 84, 79, 0.22);
+  background: #fff4f4;
+}
+
+.skill-preview-file-button {
+  justify-content: flex-start;
+  text-align: left;
+}
+
+.approval-status-badge.pending {
+  background: rgba(255, 193, 0, 0.16);
+  color: #9c7600;
+}
+
+.approval-status-badge.approved {
+  background: rgba(22, 160, 133, 0.14);
+  color: #0b7a65;
+}
+
+.approval-status-badge.rejected {
+  background: rgba(217, 84, 79, 0.12);
+  color: #b6403c;
+}
