@@ -1329,6 +1329,22 @@ pre {
   grid-template-columns: minmax(260px, 1.2fr) minmax(220px, 1fr) minmax(160px, 0.72fr) minmax(200px, 0.82fr) minmax(180px, 0.7fr);
 }
 
+.runtime-toolbar {
+  margin-bottom: 12px;
+}
+
+.page-view[data-page="retrieval-config"] .runtime-toolbar {
+  display: none;
+}
+
+.task-modal-card {
+  max-width: 820px;
+}
+
+.task-modal-card > .panel-title {
+  display: none;
+}
+
 .provider-list-head span,
 .resource-list-head span {
   justify-self: center;

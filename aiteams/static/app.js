@@ -702,6 +702,10 @@ const taskNewSession = document.querySelector("#task-new-session");
 const taskSessionHint = document.querySelector("#task-session-hint");
 const taskPrompt = document.querySelector("#task-prompt");
 const taskResult = document.querySelector("#task-result");
+const taskModal = document.querySelector("#task-modal");
+const taskModalTitle = document.querySelector("#task-modal-title");
+const taskModalCloseButtons = Array.from(document.querySelectorAll("[data-task-modal-close]"));
+const taskCancel = document.querySelector("#task-cancel");
 const runList = document.querySelector("#run-list");
 const runPageSize = document.querySelector("#run-page-size");
 const runPaginationMeta = document.querySelector("#run-pagination-meta");
@@ -4870,6 +4874,61 @@ function openProviderModelEditorModal() {
 function closeProviderModelEditorModal() {
   providerModelEditorModal.classList.add("hidden");
   resetProviderModelEditor();
+}
+
+function resetTaskForm() {
+  taskForm?.reset();
+  hideResult(taskResult);
+  if (taskModalTitle) {
+    taskModalTitle.textContent = "启动 Run";
+  }
+  if (taskApprovalMode) {
+    taskApprovalMode.value = "auto";
+  }
+  if (taskTeamDefinition) {
+    taskTeamDefinition.value = state.selectedTaskTeamDefinitionId || "";
+  }
+  if (taskTitle) {
+    taskTitle.value = "";
+  }
+  if (taskPrompt) {
+    taskPrompt.value = "";
+  }
+  if (taskNewSession) {
+    taskNewSession.checked = false;
+  }
+  renderTaskSessionHint();
+}
+
+function ensureRuntimeLaunchButton() {
+  document.querySelector('.page-view[data-page="retrieval-config"] .runtime-toolbar')?.remove();
+  const runtimePanel = runList?.closest(".panel");
+  if (!runtimePanel) {
+    return;
+  }
+  let toolbar = runtimePanel.querySelector(".provider-toolbar.runtime-toolbar");
+  if (!toolbar) {
+    toolbar = document.createElement("div");
+    toolbar.className = "provider-toolbar runtime-toolbar";
+    const title = runtimePanel.querySelector(".panel-title");
+    runtimePanel.insertBefore(toolbar, title || runtimePanel.firstChild);
+  }
+  if (!toolbar.querySelector("[data-runtime-create]")) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.runtimeCreate = "1";
+    button.textContent = "启动 Run";
+    toolbar.appendChild(button);
+  }
+}
+
+function openTaskModal() {
+  taskModal?.classList.remove("hidden");
+}
+
+function closeTaskModal() {
+  taskModal?.classList.add("hidden");
+  hideResult(taskResult);
 }
 
 function resetProviderModelEditor() {
@@ -10226,6 +10285,7 @@ async function ensureRuntimePage(force = false) {
     await loadRunPage();
     state.loaded.runs = true;
   }
+  ensureRuntimeLaunchButton();
   populateTaskOptions();
   if (runPageSize) {
     runPageSize.value = String(state.runPage.limit || 10);
@@ -10663,6 +10723,9 @@ teamDefinitionForm.addEventListener("submit", async (event) => {
   }
 });
 
+taskModalCloseButtons.forEach((button) => button.addEventListener("click", closeTaskModal));
+taskCancel?.addEventListener("click", closeTaskModal);
+
 taskForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   hideResult(taskResult);
@@ -10708,6 +10771,7 @@ taskForm.addEventListener("submit", async (event) => {
       status: runBundle.run.status,
       conversation_thread_id: conversationThreadId || null,
     });
+    closeTaskModal();
   } catch (error) {
     showResult(taskResult, { error: error.message });
   }
@@ -11496,6 +11560,19 @@ document.addEventListener("click", async (event) => {
   const teamChatResultClose = event.target.closest("[data-team-chat-result-close]");
   if (teamChatResultClose) {
     hideResult(teamChatResult);
+    return;
+  }
+
+  const runtimeCreateButton = event.target.closest("[data-runtime-create]");
+  if (runtimeCreateButton) {
+    try {
+      await ensureRuntimePage(true);
+      resetTaskForm();
+      openTaskModal();
+    } catch (error) {
+      openTaskModal();
+      showResult(taskResult, errorResult(error));
+    }
     return;
   }
 

@@ -382,6 +382,9 @@
             </div>
             <div class="page-grid retrieval-page-grid">
               <section class="panel panel-wide">
+                <div class="provider-toolbar runtime-toolbar">
+                  <button id="task-open-create" type="button">启动 Run</button>
+                </div>
                 <div class="panel-title">
                   <h3>Embedding / Rerank</h3>
                 </div>
@@ -1449,11 +1452,16 @@
               </div>
             </div>
             <div class="page-grid provider-page-grid">
-              <section class="panel">
+              <div id="task-modal" class="modal-shell hidden">
+                <div class="modal-backdrop" data-task-modal-close></div>
+                <section class="modal-card resource-modal-card task-modal-card">
                 <div class="panel-title">
                   <h3>启动 Run</h3>
                 </div>
-                <form id="task-form" class="form">
+                <div class="modal-head">
+                  <h3 id="task-modal-title">鍚姩 Run</h3>
+                </div>
+                <form id="task-form" class="form resource-editor-form">
                   <label><span>TeamDefinition</span><select id="task-team-definition"></select></label>
                   <label><span>任务标题</span><input id="task-title" placeholder="输入标题" /></label>
                   <label>
@@ -1475,6 +1483,7 @@
                 </form>
                 <pre id="task-result" class="result hidden"></pre>
               </section>
+              </div>
               <section class="panel panel-wide">
                 <div class="panel-title">
                   <h3>Run 列表</h3>
