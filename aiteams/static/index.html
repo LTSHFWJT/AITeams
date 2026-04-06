@@ -84,30 +84,62 @@
 
         <main class="page-stack">
           <section class="page-view active" data-page="overview">
-            <div class="page-head">
-              <div>
-                <h2>平台概览</h2>
+            <div class="overview-screen">
+              <section class="panel overview-command-panel">
+                <div class="overview-command-copy">
+                  <span class="eyebrow">Control Plane</span>
+                  <h2>平台概览</h2>
+                </div>
+                <div class="overview-command-side">
+                  <div id="overview-score" class="overview-score-card"></div>
+                  <div id="storage-banner" class="overview-chip-row"></div>
+                </div>
+              </section>
+              <div class="overview-dashboard">
+                <section class="panel overview-panel overview-panel-metrics">
+                  <div class="panel-title overview-panel-title">
+                    <div>
+                      <h3>核心指标</h3>
+                    </div>
+                  </div>
+                  <div id="summary-cards" class="stats-grid overview-stats-grid"></div>
+                </section>
+                <section class="panel overview-panel overview-panel-focus">
+                  <div class="panel-title overview-panel-title">
+                    <div>
+                      <h3>运行焦点</h3>
+                    </div>
+                  </div>
+                  <div id="overview-focus" class="overview-focus-list"></div>
+                  <div id="overview-readiness" class="overview-readiness-list"></div>
+                </section>
+                <section class="panel overview-panel overview-panel-approvals">
+                  <div class="panel-title overview-panel-title">
+                    <div>
+                      <h3>待审批</h3>
+                    </div>
+                    <button type="button" class="ghost" data-overview-page="approvals">审批中心</button>
+                  </div>
+                  <div id="overview-approvals" class="overview-approval-list"></div>
+                </section>
+                <section class="panel overview-panel overview-panel-capability">
+                  <div class="panel-title overview-panel-title">
+                    <div>
+                      <h3>接入能力</h3>
+                    </div>
+                  </div>
+                  <div id="provider-type-grid" class="rule-grid overview-capability-grid"></div>
+                </section>
+                <section class="panel overview-panel overview-panel-runs">
+                  <div class="panel-title overview-panel-title">
+                    <div>
+                      <h3>最近 Run</h3>
+                    </div>
+                    <div id="overview-run-summary" class="overview-inline-meta"></div>
+                  </div>
+                  <div id="overview-runs" class="overview-run-list"></div>
+                </section>
               </div>
-            </div>
-            <div class="page-grid overview-grid">
-              <section class="panel">
-                <div class="panel-title">
-                  <h3>核心数量</h3>
-                </div>
-                <div id="summary-cards" class="stats-grid"></div>
-              </section>
-              <section class="panel">
-                <div class="panel-title">
-                  <h3>Provider 类型</h3>
-                </div>
-                <div id="provider-type-grid" class="rule-grid"></div>
-              </section>
-              <section class="panel">
-                <div class="panel-title">
-                  <h3>最近 Run</h3>
-                </div>
-                <div id="overview-runs" class="list compact-list"></div>
-              </section>
             </div>
           </section>
 

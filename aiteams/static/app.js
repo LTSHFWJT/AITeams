@@ -26,6 +26,7 @@ const state = {
   providerTypes: [],
   uiMetadata: null,
   recentRuns: [],
+  pendingApprovals: [],
   providers: [],
   localModels: [],
   retrievalSettings: {
@@ -328,11 +329,19 @@ const topNavButtons = Array.from(document.querySelectorAll("[data-nav-section]")
 const navButtons = Array.from(document.querySelectorAll("[data-page-target]"));
 const subMenuPanels = Array.from(document.querySelectorAll("[data-nav-panel]"));
 const pageViews = Array.from(document.querySelectorAll("[data-page]"));
+const workspaceShell = document.querySelector(".workspace-shell");
+const overviewPageView = document.querySelector('.page-view[data-page="overview"]');
+const overviewScreen = document.querySelector(".overview-screen");
 
 const summaryCards = document.querySelector("#summary-cards");
 const storageBanner = document.querySelector("#storage-banner");
 const providerTypeGrid = document.querySelector("#provider-type-grid");
 const overviewRuns = document.querySelector("#overview-runs");
+const overviewScore = document.querySelector("#overview-score");
+const overviewFocus = document.querySelector("#overview-focus");
+const overviewReadiness = document.querySelector("#overview-readiness");
+const overviewApprovals = document.querySelector("#overview-approvals");
+const overviewRunSummary = document.querySelector("#overview-run-summary");
 
 const providerForm = document.querySelector("#provider-form");
 const providerName = document.querySelector("#provider-name");
@@ -1848,6 +1857,7 @@ async function switchPage(pageName, options = {}) {
   }
   state.activePage = pageName;
   state.activeNavSection = PAGE_SECTIONS[pageName] || "overview";
+  workspaceShell?.classList.toggle("overview-nav-hidden", pageName === "overview");
   topNavButtons.forEach((button) => {
     button.classList.toggle("active", button.dataset.navSection === state.activeNavSection);
   });
@@ -1867,6 +1877,8 @@ async function switchPage(pageName, options = {}) {
         syncTeamChatViewportHeight();
         scrollTeamChatToBottom();
       });
+    } else if (pageName === "overview") {
+      requestAnimationFrame(syncOverviewViewportHeight);
     }
   } catch (error) {
     showResult(taskResult, errorResult(error));
@@ -3739,6 +3751,20 @@ function syncTeamChatViewportHeight() {
   const bottomGap = 12;
   const availableHeight = Math.max(420, Math.floor(viewportHeight - rect.top - bottomGap));
   teamChatLayout.style.setProperty("--team-chat-layout-height", `${availableHeight}px`);
+}
+
+function syncOverviewViewportHeight() {
+  if (!overviewScreen || !overviewPageView?.classList.contains("active")) {
+    return;
+  }
+  const viewportHeight = Math.round(window.visualViewport?.height || window.innerHeight || document.documentElement.clientHeight || 0);
+  if (!viewportHeight) {
+    return;
+  }
+  const rect = overviewScreen.getBoundingClientRect();
+  const bottomGap = 12;
+  const availableHeight = Math.max(540, Math.floor(viewportHeight - rect.top - bottomGap));
+  overviewScreen.style.setProperty("--overview-layout-height", `${availableHeight}px`);
 }
 
 function populateTeamChatTeamOptions(selectedValue = state.teamChat.selectedTeamDefinitionId || "") {
@@ -6350,52 +6376,305 @@ function fillTeamTemplateForm(template) {
   renderTeamEditor();
 }
 
-function renderOverview() {
-  const items = [
-    ["Provider", state.summary.provider_profile_count || 0],
-    ["本地模型", state.summary.local_model_count || 0],
-    ["插件", state.summary.plugin_count || 0],
-    ["技能", state.summary.skill_count || 0],
-    ["角色管理", state.summary.static_memory_count || 0],
-    ["知识库", state.summary.knowledge_base_count || 0],
-    ["Agent 管理", state.summary.agent_definition_count || 0],
-    ["团队定义", state.summary.team_definition_count || 0],
-    ["Run", state.summary.run_count || 0],
-    ["待审批", state.summary.pending_approval_count || 0],
-  ];
-  summaryCards.innerHTML = items
-    .map(([label, value]) => `<div class="stat-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`)
-    .join("");
+function overviewPill(label, tone = "neutral") {
+  return `<span class="overview-pill ${escapeAttribute(tone)}">${escapeHtml(label)}</span>`;
+}
 
-  if (storageBanner) {
-    storageBanner.innerHTML = state.storage
-    ? [chip("元数据库", state.storage.metadata_driver || "sqlite"), chip("日志模式", state.storage.journal_mode || "wal"), chip("路径", state.storage.metadata_path || "")].join("")
-      : "";
+function overviewStatusLabel(status) {
+  const normalized = String(status || "").trim().toLowerCase();
+  if (!normalized) {
+    return "未知";
   }
+  if (["completed", "succeeded", "success", "done"].includes(normalized)) {
+    return "已完成";
+  }
+  if (["failed", "error", "rejected", "cancelled"].includes(normalized)) {
+    return "异常";
+  }
+  if (normalized === "waiting_approval") {
+    return "待审批";
+  }
+  if (["running", "in_progress", "processing"].includes(normalized)) {
+    return "运行中";
+  }
+  if (["queued", "pending", "created"].includes(normalized)) {
+    return "排队中";
+  }
+  return status;
+}
 
-  providerTypeGrid.innerHTML = state.providerTypes
+function overviewStatusTone(status) {
+  const normalized = String(status || "").trim().toLowerCase();
+  if (["completed", "succeeded", "success", "done"].includes(normalized)) {
+    return "success";
+  }
+  if (["failed", "error", "rejected", "cancelled"].includes(normalized)) {
+    return "danger";
+  }
+  if (normalized === "waiting_approval") {
+    return "warn";
+  }
+  if (["running", "in_progress", "processing"].includes(normalized)) {
+    return "info";
+  }
+  if (["queued", "pending", "created"].includes(normalized)) {
+    return "neutral";
+  }
+  return "neutral";
+}
+
+function overviewEmptyMarkup(title, body) {
+  return `
+    <div class="overview-empty">
+      <strong>${escapeHtml(title)}</strong>
+      <p>${escapeHtml(body)}</p>
+    </div>
+  `;
+}
+
+function renderOverview() {
+  const summary = state.summary || {};
+  const providerCount = Number(summary.provider_profile_count || 0);
+  const localModelCount = Number(summary.local_model_count || 0);
+  const pluginCount = Number(summary.plugin_count || 0);
+  const skillCount = Number(summary.skill_count || 0);
+  const staticMemoryCount = Number(summary.static_memory_count || 0);
+  const knowledgeBaseCount = Number(summary.knowledge_base_count || 0);
+  const agentDefinitionCount = Number(summary.agent_definition_count || 0);
+  const teamDefinitionCount = Number(summary.team_definition_count || 0);
+  const reviewPolicyCount = Number(summary.review_policy_count || 0);
+  const runCount = Number(summary.run_count || 0);
+  const pendingApprovalCount = Number(summary.pending_approval_count || 0);
+  const taskCount = Number(summary.task_count || 0);
+  const workspaceCount = Number(summary.workspace_count || 0);
+  const projectCount = Number(summary.project_count || 0);
+  const blueprintCount = Number(summary.blueprint_count || 0);
+
+  const modelResourceCount = providerCount + localModelCount;
+  const knowledgeResourceCount = skillCount + knowledgeBaseCount + staticMemoryCount;
+  const orchestrationCount = agentDefinitionCount + teamDefinitionCount;
+
+  const readinessItems = [
+    {
+      label: "模型链路",
+      detail: `Provider ${providerCount} / 本地模型 ${localModelCount}`,
+      state: modelResourceCount > 0 ? "ready" : "missing",
+      stateLabel: modelResourceCount > 0 ? "已就绪" : "待配置",
+    },
+    {
+      label: "知识能力",
+      detail: `Skill ${skillCount} / 知识库 ${knowledgeBaseCount} / 角色 ${staticMemoryCount}`,
+      state: knowledgeResourceCount > 0 ? "ready" : "missing",
+      stateLabel: knowledgeResourceCount > 0 ? "已就绪" : "待配置",
+    },
+    {
+      label: "编排执行",
+      detail: `Agent ${agentDefinitionCount} / 团队 ${teamDefinitionCount}`,
+      state: orchestrationCount > 0 ? "ready" : "missing",
+      stateLabel: orchestrationCount > 0 ? "已就绪" : "待配置",
+    },
+    {
+      label: "治理审批",
+      detail: reviewPolicyCount > 0 ? `${reviewPolicyCount} 条审核策略 / ${pendingApprovalCount} 条待审批` : pendingApprovalCount > 0 ? `${pendingApprovalCount} 条审批待处理` : "尚未配置审核策略",
+      state: reviewPolicyCount > 0 ? "ready" : pendingApprovalCount > 0 ? "attention" : "partial",
+      stateLabel: reviewPolicyCount > 0 ? "已启用" : pendingApprovalCount > 0 ? "处理中" : "可增强",
+    },
+  ];
+  const readyCount = readinessItems.filter((item) => item.state === "ready").length;
+  const readyPercent = readinessItems.length ? Math.round((readyCount / readinessItems.length) * 100) : 0;
+
+  const metrics = [
+    { label: "Provider", value: providerCount, note: "在线模型源", tone: "blue" },
+    { label: "本地模型", value: localModelCount, note: "本地推理资源", tone: "cyan" },
+    { label: "插件", value: pluginCount, note: "工具扩展", tone: "violet" },
+    { label: "Skill", value: skillCount, note: "技能资产", tone: "mint" },
+    { label: "知识库", value: knowledgeBaseCount, note: "检索资源", tone: "amber" },
+    { label: "Agent", value: agentDefinitionCount, note: "执行单元", tone: "blue" },
+    { label: "团队", value: teamDefinitionCount, note: "协同流程", tone: "cyan" },
+    { label: "待审批", value: pendingApprovalCount, note: pendingApprovalCount ? "需要人工处理" : "当前无阻塞", tone: pendingApprovalCount ? "amber" : "mint" },
+  ];
+  summaryCards.innerHTML = metrics
     .map(
       (item) => `
-        <article class="rule-card">
-          <h3>${escapeHtml(item.label)}</h3>
-          <p>${escapeHtml(item.protocol || item.provider_type)}</p>
+        <article class="stat-card overview-stat-card tone-${escapeAttribute(item.tone)}">
+          <span>${escapeHtml(item.label)}</span>
+          <strong>${escapeHtml(item.value)}</strong>
+          <em>${escapeHtml(item.note)}</em>
         </article>
       `,
     )
     .join("");
 
+  if (overviewScore) {
+    overviewScore.innerHTML = `
+      <span>链路就绪度</span>
+      <strong>${escapeHtml(`${readyPercent}%`)}</strong>
+      <div class="overview-score-meta">
+        <span>${escapeHtml(`${readyCount}/${readinessItems.length} 项已就绪`)}</span>
+        <span>${escapeHtml(`Run ${runCount}`)}</span>
+        <span>${escapeHtml(`任务 ${taskCount}`)}</span>
+      </div>
+    `;
+  }
+
+  if (storageBanner) {
+    const storageItems = [
+      chip("工作区", workspaceCount),
+      chip("项目", projectCount),
+      chip("蓝图", blueprintCount),
+      chip("任务", taskCount),
+      chip("审核策略", reviewPolicyCount),
+    ];
+    storageBanner.innerHTML = storageItems.join("");
+  }
+
+  if (overviewFocus) {
+    const focusItems = [
+      !modelResourceCount
+        ? { tone: "danger", title: "模型资源未接通", detail: "至少配置一个 Provider 或本地模型。" }
+        : { tone: "success", title: "模型资源已接通", detail: `已接入 ${modelResourceCount} 个模型资源入口。` },
+      !orchestrationCount
+        ? { tone: "warn", title: "尚未建立执行单元", detail: "建议至少配置一个 Agent 或团队。" }
+        : { tone: "info", title: "编排执行已具备", detail: `Agent ${agentDefinitionCount} / 团队 ${teamDefinitionCount}` },
+      pendingApprovalCount > 0
+        ? { tone: "warn", title: `${pendingApprovalCount} 条审批待处理`, detail: "当前存在人工审核阻塞。" }
+        : reviewPolicyCount > 0
+          ? { tone: "success", title: "审核守卫已启用", detail: `已配置 ${reviewPolicyCount} 条审核策略。` }
+          : { tone: "neutral", title: "审核策略待增强", detail: "当前未配置审核策略。" },
+    ];
+    overviewFocus.innerHTML = focusItems
+      .map(
+        (item) => `
+          <article class="overview-focus-card ${escapeAttribute(item.tone)}">
+            <strong>${escapeHtml(item.title)}</strong>
+            <p>${escapeHtml(item.detail)}</p>
+          </article>
+        `,
+      )
+      .join("");
+  }
+
+  if (overviewReadiness) {
+    overviewReadiness.innerHTML = readinessItems
+      .map(
+        (item) => `
+          <div class="overview-readiness-row ${escapeAttribute(item.state)}">
+            <div>
+              <strong>${escapeHtml(item.label)}</strong>
+              <span>${escapeHtml(item.detail)}</span>
+            </div>
+            <b>${escapeHtml(item.stateLabel)}</b>
+          </div>
+        `,
+      )
+      .join("");
+  }
+
+  if (providerTypeGrid) {
+    const capabilityItems = state.providerTypes.slice(0, 4);
+    providerTypeGrid.innerHTML = capabilityItems.length
+      ? capabilityItems
+          .map(
+            (item) => `
+              <article class="rule-card overview-capability-card">
+                <h3>${escapeHtml(item.label || item.provider_type || "-")}</h3>
+                <p>${escapeHtml(item.protocol || item.provider_type || "-")}</p>
+                <span>${escapeHtml(item.provider_type || "-")}</span>
+              </article>
+            `,
+          )
+          .join("")
+      : overviewEmptyMarkup("暂无接入能力", "当前没有可展示的 Provider 协议。");
+  }
+
+  if (overviewRunSummary) {
+    const runBuckets = state.recentRuns.reduce(
+      (acc, item) => {
+        const tone = overviewStatusTone(item.status);
+        acc.total += 1;
+        if (tone === "success") {
+          acc.success += 1;
+        } else if (tone === "danger") {
+          acc.danger += 1;
+        } else if (tone === "warn") {
+          acc.warn += 1;
+        } else if (tone === "info") {
+          acc.info += 1;
+        } else {
+          acc.neutral += 1;
+        }
+        return acc;
+      },
+      { total: 0, success: 0, danger: 0, warn: 0, info: 0, neutral: 0 },
+    );
+    const chips = [
+      overviewPill(`最近 ${runBuckets.total} 条`, "neutral"),
+      runBuckets.info ? overviewPill(`运行中 ${runBuckets.info}`, "info") : "",
+      runBuckets.warn ? overviewPill(`待审批 ${runBuckets.warn}`, "warn") : "",
+      runBuckets.success ? overviewPill(`完成 ${runBuckets.success}`, "success") : "",
+      runBuckets.danger ? overviewPill(`异常 ${runBuckets.danger}`, "danger") : "",
+    ].filter(Boolean);
+    overviewRunSummary.innerHTML = chips.join("");
+  }
+
+  const overviewRunItems = state.recentRuns.slice(0, 8);
   overviewRuns.innerHTML = state.recentRuns.length
-    ? state.recentRuns
-        .map((item) =>
-          cardMarkup({
-            title: item.summary || item.id,
-            body: `状态：${item.status}`,
-            meta: `run=${item.id}`,
-            actions: `<button type="button" class="ghost" data-run-open="${item.id}">查看</button>`,
-          }),
-        )
-        .join("")
-    : cardMarkup({ title: "暂无 Run", body: "启动任务后显示。", meta: "" });
+    ? overviewRunItems.map((item) => {
+        const title = String(item.summary || item.id || "未命名 Run").trim();
+        const statusLabel = overviewStatusLabel(item.status);
+        const tone = overviewStatusTone(item.status);
+        const updatedAt = formatTeamChatTime(item.updated_at || item.started_at) || item.updated_at || item.started_at || "-";
+        const body = item.current_node_id
+          ? `当前节点：${item.current_node_id}`
+          : item.started_at
+            ? `开始于 ${formatTeamChatTime(item.started_at) || item.started_at}`
+            : "等待执行";
+        return `
+          <article class="overview-list-card">
+            <div class="overview-list-top">
+              <strong title="${escapeAttribute(title)}">${escapeHtml(title)}</strong>
+              ${overviewPill(statusLabel, tone)}
+            </div>
+            <p title="${escapeAttribute(body)}">${escapeHtml(body)}</p>
+            <div class="overview-list-meta">
+              <span>${escapeHtml(`run=${item.id || "-"}`)}</span>
+              <span>${escapeHtml(updatedAt)}</span>
+            </div>
+            <div class="card-actions">
+              <button type="button" class="ghost" data-run-open="${escapeAttribute(item.id || "")}">查看</button>
+            </div>
+          </article>
+        `;
+      }).join("")
+    : overviewEmptyMarkup("暂无 Run", "启动任务后，这里会显示最近执行态势。");
+
+  if (overviewApprovals) {
+    const overviewApprovalItems = state.pendingApprovals.slice(0, 8);
+    overviewApprovals.classList.toggle("is-empty", overviewApprovalItems.length === 0);
+    overviewApprovals.innerHTML = state.pendingApprovals.length
+      ? overviewApprovalItems.map((item) => {
+          const title = String(item.title || "待审批项").trim();
+          const detail = String(item.detail || "等待人工处理。").trim() || "等待人工处理。";
+          const createdAt = formatTeamChatTime(item.created_at) || item.created_at || "-";
+          const runLabel = item.run_id ? `run=${item.run_id}` : "未绑定 Run";
+          return `
+            <article class="overview-list-card overview-approval-card">
+              <div class="overview-list-top">
+                <strong title="${escapeAttribute(title)}">${escapeHtml(title)}</strong>
+                ${overviewPill("待审批", "warn")}
+              </div>
+              <p title="${escapeAttribute(detail)}">${escapeHtml(detail)}</p>
+              <div class="overview-list-meta">
+                <span>${escapeHtml(runLabel)}</span>
+                <span>${escapeHtml(createdAt)}</span>
+              </div>
+            </article>
+          `;
+        }).join("")
+      : overviewEmptyMarkup("当前无待审批项", "审批链路没有阻塞，可以直接发起运行。");
+  }
+
+  requestAnimationFrame(syncOverviewViewportHeight);
 }
 
 function renderProviderPagination() {
@@ -9240,6 +9519,7 @@ async function loadControlPlane() {
   state.storage = payload.storage || null;
   state.providerTypes = payload.provider_types || [];
   state.recentRuns = payload.recent_runs || [];
+  state.pendingApprovals = payload.pending_approvals || [];
 }
 
 async function loadProviderTypes() {
@@ -11296,6 +11576,12 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  const overviewPageButton = event.target.closest("[data-overview-page]");
+  if (overviewPageButton && !overviewPageButton.hasAttribute("disabled")) {
+    await switchPage(overviewPageButton.dataset.overviewPage || "overview");
+    return;
+  }
+
   const approvalPageButton = event.target.closest("[data-approval-page]");
   if (approvalPageButton && !approvalPageButton.hasAttribute("disabled")) {
     state.approvalPage.offset = Number(approvalPageButton.dataset.approvalPage || 0);
@@ -12220,9 +12506,13 @@ document.addEventListener("click", (event) => {
 
 initializeTagMultiSelects();
 resizeTeamChatInput();
+syncOverviewViewportHeight();
 window.addEventListener("resize", syncTeamChatViewportHeight);
+window.addEventListener("resize", syncOverviewViewportHeight);
 window.visualViewport?.addEventListener("resize", syncTeamChatViewportHeight);
+window.visualViewport?.addEventListener("resize", syncOverviewViewportHeight);
 window.visualViewport?.addEventListener("scroll", syncTeamChatViewportHeight);
+window.visualViewport?.addEventListener("scroll", syncOverviewViewportHeight);
 
 (async function bootstrap() {
   try {
