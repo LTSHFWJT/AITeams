@@ -6695,12 +6695,14 @@ function renderOverview() {
               ${overviewPill(statusLabel, tone)}
             </div>
             <p title="${escapeAttribute(body)}">${escapeHtml(body)}</p>
+            <div class="overview-list-foot">
             <div class="overview-list-meta">
               <span>${escapeHtml(`run=${item.id || "-"}`)}</span>
               <span>${escapeHtml(updatedAt)}</span>
             </div>
             <div class="card-actions">
               <button type="button" class="ghost" data-run-open="${escapeAttribute(item.id || "")}">查看</button>
+            </div>
             </div>
           </article>
         `;

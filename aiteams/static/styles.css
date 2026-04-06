@@ -5557,6 +5557,7 @@ button:not(.icon-button) > span {
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
   padding-right: 6px;
+  gap: 8px;
 }
 
 .overview-approval-list.is-empty {
@@ -5692,6 +5693,13 @@ button:not(.icon-button) > span {
   word-break: break-word;
 }
 
+.overview-list-foot {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
 .overview-list-card .card-actions {
   display: flex;
   justify-content: flex-end;
@@ -5702,6 +5710,26 @@ button:not(.icon-button) > span {
   min-height: 34px;
   padding: 7px 12px;
   font-size: 0.78rem;
+}
+
+.overview-run-list .overview-list-card {
+  padding: 8px 10px;
+  gap: 4px;
+}
+
+.overview-run-list .overview-list-meta {
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 8px;
+  align-items: center;
+}
+
+.overview-run-list .overview-list-card .card-actions {
+  margin-top: 0;
+}
+
+.overview-run-list .overview-list-card .card-actions button {
+  min-height: 30px;
+  padding: 5px 10px;
 }
 
 .overview-capability-grid {
